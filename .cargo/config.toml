@@ -1,0 +1,8 @@
+# Homebrew on Apple Silicon installs dylibs under /opt/homebrew/lib,
+# which the system linker doesn't search by default. SDL2 (pulled in
+# by embedded-graphics-simulator) lives there.
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/lib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-L", "/usr/local/lib"]

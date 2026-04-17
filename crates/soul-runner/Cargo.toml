@@ -1,0 +1,13 @@
+[package]
+name = "soul-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+soul-hal.workspace = true
+soul-core.workspace = true
+soul-ui.workspace = true
+soul-db.workspace = true
+soul-hal-hosted.workspace = true
+embedded-graphics.workspace = true

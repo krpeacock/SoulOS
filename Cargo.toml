@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/soul-hal",
+    "crates/soul-core",
+    "crates/soul-ui",
+    "crates/soul-db",
+    "crates/soul-hal-hosted",
+    "crates/soul-runner",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+embedded-graphics = "0.8"
+embedded-graphics-simulator = "0.6"
+soul-hal = { path = "crates/soul-hal" }
+soul-core = { path = "crates/soul-core" }
+soul-ui = { path = "crates/soul-ui" }
+soul-db = { path = "crates/soul-db" }
+soul-hal-hosted = { path = "crates/soul-hal-hosted" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
