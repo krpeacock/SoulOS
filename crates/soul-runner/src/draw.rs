@@ -33,11 +33,11 @@ use std::rc::Rc;
 use crate::launcher_store::LauncherIconStore;
 use crate::{APPS, ICON_CELL};
 
-const LOG_W: usize = 120;
-const LOG_H: usize = 120;
+const LOG_W: usize = 48;
+const LOG_H: usize = 48;
 const ICON_OX: usize = (LOG_W - ICON_CELL as usize) / 2;
 const ICON_OY: usize = (LOG_H - ICON_CELL as usize) / 2;
-const SCALE: i32 = 2;
+const SCALE: i32 = 5;
 const CANVAS_PX: i32 = (LOG_W as i32) * SCALE;
 
 /// Eight evenly spaced levels from black to white (3-bit display feel).
@@ -129,6 +129,15 @@ pub struct Draw {
 }
 
 impl Draw {
+    fn validate_background(&mut self) {
+        if let Some(ref bg) = self.bg {
+            if bg.len() != LOG_W * LOG_H {
+                // Background size doesn't match current canvas - clear it
+                self.bg = None;
+            }
+        }
+    }
+
     pub fn new(launcher_icons: Rc<RefCell<LauncherIconStore>>) -> Self {
         let draw_dir = std::env::var("SOUL_DRAW_DIR")
             .map(PathBuf::from)
@@ -160,7 +169,7 @@ impl Draw {
             }
         };
 
-        Self {
+        let mut instance = Self {
             launcher_icons,
             edit: EditTarget::Document,
             fg,
@@ -177,7 +186,9 @@ impl Draw {
             menu_touch: None,
             mode: Mode::Normal,
             undo_stack: Vec::new(),
-        }
+        };
+        instance.validate_background();
+        instance
     }
 
     fn push_undo(&mut self) {
@@ -303,7 +314,11 @@ impl Draw {
             return self.fg[i];
         }
         if let Some(ref bg) = self.bg {
-            faint_background(bg[i])
+            if i < bg.len() {
+                faint_background(bg[i])
+            } else {
+                255
+            }
         } else {
             255
         }
@@ -500,6 +515,7 @@ impl Draw {
                 self.written = vec![true; LOG_W * LOG_H];
                 self.bg = None;
                 self.edit = EditTarget::Document;
+                self.validate_background();
                 ctx.invalidate(Self::canvas_screen_rect());
                 eprintln!("draw: loaded {}", path.display());
                 true
@@ -530,16 +546,13 @@ impl Draw {
                 eprintln!("draw: background {}", path.display());
                 true
             }
-            Ok((w, h, _)) => {
-                eprintln!(
-                    "draw: bg {} is {}×{}, need {}×{}",
-                    path.display(),
-                    w,
-                    h,
-                    LOG_W,
-                    LOG_H
-                );
-                false
+            Ok((w, h, data)) => {
+                let scaled_data = scale_image_to_canvas(&data, w, h, LOG_W, LOG_H);
+                self.bg = Some(scaled_data);
+                ctx.invalidate(Self::canvas_screen_rect());
+                eprintln!("draw: background {} scaled from {}×{} to {}×{}", 
+                         path.display(), w, h, LOG_W, LOG_H);
+                true
             }
             Err(e) => {
                 eprintln!("draw: load bg failed: {e}");
@@ -1202,6 +1215,42 @@ impl App for Draw {
             Mode::Normal => {}
         }
     }
+}
+
+fn scale_image_to_canvas(data: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+    let mut result = vec![255u8; dst_w * dst_h];
+    
+    // Calculate scale factor to fit image within canvas while maintaining aspect ratio
+    let scale_x = dst_w as f32 / src_w as f32;
+    let scale_y = dst_h as f32 / src_h as f32;
+    let scale = scale_x.min(scale_y); // Use the smaller scale to ensure it fits
+    
+    let scaled_w = (src_w as f32 * scale) as usize;
+    let scaled_h = (src_h as f32 * scale) as usize;
+    
+    // Center the scaled image in the canvas
+    let offset_x = (dst_w - scaled_w) / 2;
+    let offset_y = (dst_h - scaled_h) / 2;
+    
+    for dy in 0..scaled_h {
+        for dx in 0..scaled_w {
+            let src_x = (dx as f32 / scale) as usize;
+            let src_y = (dy as f32 / scale) as usize;
+            
+            if src_x < src_w && src_y < src_h {
+                let src_idx = src_y * src_w + src_x;
+                let dst_x = offset_x + dx;
+                let dst_y = offset_y + dy;
+                
+                if dst_x < dst_w && dst_y < dst_h {
+                    let dst_idx = dst_y * dst_w + dst_x;
+                    result[dst_idx] = data[src_idx];
+                }
+            }
+        }
+    }
+    
+    result
 }
 
 fn faint_background(b: u8) -> u8 {
