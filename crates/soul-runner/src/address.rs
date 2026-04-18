@@ -396,6 +396,7 @@ impl App for Address {
                 if let Mode::Edit(_) = self.mode {
                     // Enter moves to next field
                     self.next_field();
+                    ctx.a11y.log_focused_element(&self.edit_inputs[self.active_field]);
                     ctx.invalidate_all();
                 }
             }
@@ -408,6 +409,7 @@ impl App for Address {
             Event::Key(KeyCode::ArrowDown) => {
                 if let Mode::Edit(_) = self.mode {
                     self.next_field();
+                    ctx.a11y.log_focused_element(&self.edit_inputs[self.active_field]);
                     ctx.invalidate_all();
                 }
             }
@@ -469,6 +471,7 @@ impl App for Address {
                             if input.contains(x, y) {
                                 self.active_field = i;
                                 let _ = input.pen_released(x, y);
+                                ctx.a11y.log_focused_element(&self.edit_inputs[self.active_field]);
                                 ctx.invalidate_all();
                                 return;
                             }

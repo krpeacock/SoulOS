@@ -11,12 +11,14 @@ use embedded_graphics_simulator::{
 };
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 
+pub mod testing;
+
 pub struct HostedPlatform {
-    display: SimulatorDisplay<Gray8>,
+    pub display: SimulatorDisplay<Gray8>,
     window: Window,
     start: Instant,
     stylus_down: bool,
-    pending: VecDeque<InputEvent>,
+    pub pending: VecDeque<InputEvent>,
 }
 
 impl HostedPlatform {

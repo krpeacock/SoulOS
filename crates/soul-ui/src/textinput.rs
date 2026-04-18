@@ -34,6 +34,7 @@
 //! ```
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -44,6 +45,7 @@ use embedded_graphics::{
 };
 
 use crate::palette::{BLACK, GRAY, WHITE};
+use soul_core::a11y::{Accessible, AccessibleNode};
 
 const CHAR_W: i32 = 6;
 const FONT_H: i32 = 10;
@@ -277,5 +279,16 @@ impl TextInput {
             .draw(canvas)?;
         }
         Ok(())
+    }
+}
+
+impl Accessible for TextInput {
+    fn a11y_nodes(&self, nodes: &mut Vec<AccessibleNode>) {
+        let text = if self.buffer.is_empty() {
+            self.placeholder.into()
+        } else {
+            self.buffer.clone()
+        };
+        nodes.push(AccessibleNode { text });
     }
 }

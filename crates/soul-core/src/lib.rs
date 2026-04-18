@@ -203,6 +203,10 @@ fn union(a: Rectangle, b: Rectangle) -> Rectangle {
     )
 }
 
+pub mod a11y;
+
+use a11y::A11yManager;
+
 /// The per-event context passed to [`App::handle`].
 ///
 /// Holds the platform time and a handle for the dirty-region
@@ -212,6 +216,7 @@ pub struct Ctx<'a> {
     /// Milliseconds since the platform started (monotonic).
     pub now_ms: u64,
     dirty: &'a mut Dirty,
+    pub a11y: &'a mut A11yManager,
 }
 
 impl<'a> Ctx<'a> {
@@ -292,11 +297,13 @@ fn translate(input: InputEvent) -> Option<Event> {
 /// bare-metal bootloaders) can embed it.
 pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
     let mut dirty = Dirty::full();
+    let mut a11y = A11yManager::new();
     {
         let now = platform.now_ms();
         let mut ctx = Ctx {
             now_ms: now,
             dirty: &mut dirty,
+            a11y: &mut a11y,
         };
         app.handle(Event::AppStart, &mut ctx);
     }
@@ -307,6 +314,7 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
                 let mut ctx = Ctx {
                     now_ms: now,
                     dirty: &mut dirty,
+                    a11y: &mut a11y,
                 };
                 app.handle(Event::AppStop, &mut ctx);
                 return;
@@ -316,6 +324,7 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
                 let mut ctx = Ctx {
                     now_ms: now,
                     dirty: &mut dirty,
+                    a11y: &mut a11y,
                 };
                 app.handle(e, &mut ctx);
             }
@@ -325,6 +334,7 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
             let mut ctx = Ctx {
                 now_ms: now,
                 dirty: &mut dirty,
+                a11y: &mut a11y,
             };
             app.handle(Event::Tick(now), &mut ctx);
         }

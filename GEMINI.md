@@ -2,6 +2,16 @@
 
 SoulOS is a Rust reimagining of PalmOS aimed at obsolete phones and e-readers. Its design deliberately inherits the **Zen of Palm** — the discipline of ruthless simplification that made the original Pilot line feel faster and more intuitive than machines orders of magnitude more powerful. This document is the standing brief for every change to the codebase.
 
+## Accessibility First
+
+SoulOS is for everyone. Accessibility is not a feature, but a core design principle. Every feature must be designed and implemented with accessibility in mind. This means:
+
+- **Screen Reader Support:** All UI elements must be accessible to screen readers. Textual descriptions must be provided for all visual elements.
+- **Navigability:** All UI elements must be navigable using the keyboard and other assistive technologies.
+- **Simplicity:** The UI should be simple and easy to understand, avoiding complex gestures and interactions.
+
+This is a commandment, not a suggestion.
+
 ## The Zen of Palm, restated
 
 PalmOS succeeded on 16 MHz CPUs, 160×160 monochrome screens, and 128 KB of RAM not because engineers heroically optimized, but because designers ruthlessly subtracted. The device felt like paper because it refused to feel like a computer.
