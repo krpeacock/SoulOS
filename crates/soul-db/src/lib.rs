@@ -133,9 +133,7 @@ impl Database {
     /// Look up a record by id. Returns `None` for missing or
     /// tombstoned ids.
     pub fn get(&self, id: u32) -> Option<&Record> {
-        self.records
-            .iter()
-            .find(|r| r.id == id && !r.attrs.deleted)
+        self.records.iter().find(|r| r.id == id && !r.attrs.deleted)
     }
 
     /// Mark a record as deleted. Returns `true` if a matching

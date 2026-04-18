@@ -142,20 +142,36 @@ pub struct KeyboardOutput {
 // -- layout tables -----------------------------------------------------------
 
 const L_ROW0: &[Kd] = &[
-    (Key::Char('q'), "q", 1), (Key::Char('w'), "w", 1), (Key::Char('e'), "e", 1),
-    (Key::Char('r'), "r", 1), (Key::Char('t'), "t", 1), (Key::Char('y'), "y", 1),
-    (Key::Char('u'), "u", 1), (Key::Char('i'), "i", 1), (Key::Char('o'), "o", 1),
+    (Key::Char('q'), "q", 1),
+    (Key::Char('w'), "w", 1),
+    (Key::Char('e'), "e", 1),
+    (Key::Char('r'), "r", 1),
+    (Key::Char('t'), "t", 1),
+    (Key::Char('y'), "y", 1),
+    (Key::Char('u'), "u", 1),
+    (Key::Char('i'), "i", 1),
+    (Key::Char('o'), "o", 1),
     (Key::Char('p'), "p", 1),
 ];
 const L_ROW1: &[Kd] = &[
-    (Key::Char('a'), "a", 1), (Key::Char('s'), "s", 1), (Key::Char('d'), "d", 1),
-    (Key::Char('f'), "f", 1), (Key::Char('g'), "g", 1), (Key::Char('h'), "h", 1),
-    (Key::Char('j'), "j", 1), (Key::Char('k'), "k", 1), (Key::Char('l'), "l", 1),
+    (Key::Char('a'), "a", 1),
+    (Key::Char('s'), "s", 1),
+    (Key::Char('d'), "d", 1),
+    (Key::Char('f'), "f", 1),
+    (Key::Char('g'), "g", 1),
+    (Key::Char('h'), "h", 1),
+    (Key::Char('j'), "j", 1),
+    (Key::Char('k'), "k", 1),
+    (Key::Char('l'), "l", 1),
 ];
 const L_ROW2: &[Kd] = &[
     (Key::Shift, "sh", 1),
-    (Key::Char('z'), "z", 1), (Key::Char('x'), "x", 1), (Key::Char('c'), "c", 1),
-    (Key::Char('v'), "v", 1), (Key::Char('b'), "b", 1), (Key::Char('n'), "n", 1),
+    (Key::Char('z'), "z", 1),
+    (Key::Char('x'), "x", 1),
+    (Key::Char('c'), "c", 1),
+    (Key::Char('v'), "v", 1),
+    (Key::Char('b'), "b", 1),
+    (Key::Char('n'), "n", 1),
     (Key::Char('m'), "m", 1),
     (Key::Backspace, "del", 2),
 ];
@@ -168,20 +184,36 @@ const L_ROW3: &[Kd] = &[
 ];
 
 const U_ROW0: &[Kd] = &[
-    (Key::Char('Q'), "Q", 1), (Key::Char('W'), "W", 1), (Key::Char('E'), "E", 1),
-    (Key::Char('R'), "R", 1), (Key::Char('T'), "T", 1), (Key::Char('Y'), "Y", 1),
-    (Key::Char('U'), "U", 1), (Key::Char('I'), "I", 1), (Key::Char('O'), "O", 1),
+    (Key::Char('Q'), "Q", 1),
+    (Key::Char('W'), "W", 1),
+    (Key::Char('E'), "E", 1),
+    (Key::Char('R'), "R", 1),
+    (Key::Char('T'), "T", 1),
+    (Key::Char('Y'), "Y", 1),
+    (Key::Char('U'), "U", 1),
+    (Key::Char('I'), "I", 1),
+    (Key::Char('O'), "O", 1),
     (Key::Char('P'), "P", 1),
 ];
 const U_ROW1: &[Kd] = &[
-    (Key::Char('A'), "A", 1), (Key::Char('S'), "S", 1), (Key::Char('D'), "D", 1),
-    (Key::Char('F'), "F", 1), (Key::Char('G'), "G", 1), (Key::Char('H'), "H", 1),
-    (Key::Char('J'), "J", 1), (Key::Char('K'), "K", 1), (Key::Char('L'), "L", 1),
+    (Key::Char('A'), "A", 1),
+    (Key::Char('S'), "S", 1),
+    (Key::Char('D'), "D", 1),
+    (Key::Char('F'), "F", 1),
+    (Key::Char('G'), "G", 1),
+    (Key::Char('H'), "H", 1),
+    (Key::Char('J'), "J", 1),
+    (Key::Char('K'), "K", 1),
+    (Key::Char('L'), "L", 1),
 ];
 const U_ROW2: &[Kd] = &[
     (Key::Shift, "sh", 1),
-    (Key::Char('Z'), "Z", 1), (Key::Char('X'), "X", 1), (Key::Char('C'), "C", 1),
-    (Key::Char('V'), "V", 1), (Key::Char('B'), "B", 1), (Key::Char('N'), "N", 1),
+    (Key::Char('Z'), "Z", 1),
+    (Key::Char('X'), "X", 1),
+    (Key::Char('C'), "C", 1),
+    (Key::Char('V'), "V", 1),
+    (Key::Char('B'), "B", 1),
+    (Key::Char('N'), "N", 1),
     (Key::Char('M'), "M", 1),
     (Key::Backspace, "del", 2),
 ];
@@ -194,20 +226,36 @@ const U_ROW3: &[Kd] = &[
 ];
 
 const S_ROW0: &[Kd] = &[
-    (Key::Char('1'), "1", 1), (Key::Char('2'), "2", 1), (Key::Char('3'), "3", 1),
-    (Key::Char('4'), "4", 1), (Key::Char('5'), "5", 1), (Key::Char('6'), "6", 1),
-    (Key::Char('7'), "7", 1), (Key::Char('8'), "8", 1), (Key::Char('9'), "9", 1),
+    (Key::Char('1'), "1", 1),
+    (Key::Char('2'), "2", 1),
+    (Key::Char('3'), "3", 1),
+    (Key::Char('4'), "4", 1),
+    (Key::Char('5'), "5", 1),
+    (Key::Char('6'), "6", 1),
+    (Key::Char('7'), "7", 1),
+    (Key::Char('8'), "8", 1),
+    (Key::Char('9'), "9", 1),
     (Key::Char('0'), "0", 1),
 ];
 const S_ROW1: &[Kd] = &[
-    (Key::Char('-'), "-", 1), (Key::Char('/'), "/", 1), (Key::Char(':'), ":", 1),
-    (Key::Char(';'), ";", 1), (Key::Char('('), "(", 1), (Key::Char(')'), ")", 1),
-    (Key::Char('$'), "$", 1), (Key::Char('&'), "&", 1), (Key::Char('@'), "@", 1),
+    (Key::Char('-'), "-", 1),
+    (Key::Char('/'), "/", 1),
+    (Key::Char(':'), ":", 1),
+    (Key::Char(';'), ";", 1),
+    (Key::Char('('), "(", 1),
+    (Key::Char(')'), ")", 1),
+    (Key::Char('$'), "$", 1),
+    (Key::Char('&'), "&", 1),
+    (Key::Char('@'), "@", 1),
 ];
 const S_ROW2: &[Kd] = &[
     (Key::Char('!'), "!", 1),
-    (Key::Char('?'), "?", 1), (Key::Char('+'), "+", 1), (Key::Char('='), "=", 1),
-    (Key::Char('#'), "#", 1), (Key::Char('"'), "\"", 1), (Key::Char('\''), "'", 1),
+    (Key::Char('?'), "?", 1),
+    (Key::Char('+'), "+", 1),
+    (Key::Char('='), "=", 1),
+    (Key::Char('#'), "#", 1),
+    (Key::Char('"'), "\"", 1),
+    (Key::Char('\''), "'", 1),
     (Key::Char('*'), "*", 1),
     (Key::Backspace, "del", 2),
 ];
@@ -359,10 +407,8 @@ impl Keyboard {
             let mut x = ROW_INDENTS[row_i];
             for kd in row.iter() {
                 let w = kd.2 as u32 * KEY_CELL_W;
-                let rect = Rectangle::new(
-                    Point::new(x + 1, y + 1),
-                    Size::new(w - 2, KEY_ROW_H - 2),
-                );
+                let rect =
+                    Rectangle::new(Point::new(x + 1, y + 1), Size::new(w - 2, KEY_ROW_H - 2));
                 let pressed =
                     Some(kd.0) == highlight || (matches!(kd.0, Key::Shift) && shift_active);
                 key_cap(canvas, rect, kd.1, pressed)?;
@@ -395,7 +441,10 @@ impl Keyboard {
             let w = kd.2 as i32 * KEY_CELL_W as i32;
             if (x as i32) >= x_cur && (x as i32) < x_cur + w {
                 let rect = Rectangle::new(
-                    Point::new(x_cur + 1, self.top_y + (row_i as i32) * KEY_ROW_H as i32 + 1),
+                    Point::new(
+                        x_cur + 1,
+                        self.top_y + (row_i as i32) * KEY_ROW_H as i32 + 1,
+                    ),
                     Size::new(w as u32 - 2, KEY_ROW_H - 2),
                 );
                 return Some((kd.0, rect));
