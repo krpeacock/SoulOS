@@ -239,6 +239,38 @@ impl Form {
         None
     }
 
+    /// Find the first [`Action`] wired to `component_id` for the given `trigger`.
+    ///
+    /// Returns `None` if the component doesn't exist or has no matching
+    /// interaction. The host app executes the returned action; this method
+    /// only performs the lookup.
+    pub fn dispatch(&self, trigger: Trigger, component_id: &str) -> Option<&Action> {
+        self.components
+            .iter()
+            .find(|c| c.id == component_id)?
+            .interactions
+            .iter()
+            .find(|i| i.trigger == trigger)
+            .map(|i| &i.action)
+    }
+
+    /// Hit-test at `(x, y)` and look up the [`Trigger::OnTap`] action on
+    /// whichever component was under the stylus.
+    ///
+    /// Returns `None` when no component was hit. When a component is hit the
+    /// tuple is `(component, action)` where `action` is `None` if the component
+    /// has no `OnTap` interaction — the host app may still want the component
+    /// reference for visual feedback or `binding`-driven script dispatch.
+    pub fn tap_dispatch(&self, x: i16, y: i16) -> Option<(&Component, Option<&Action>)> {
+        let comp = self.hit_test(x, y)?;
+        let action = comp
+            .interactions
+            .iter()
+            .find(|i| i.trigger == Trigger::OnTap)
+            .map(|i| &i.action);
+        Some((comp, action))
+    }
+
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
         self.components.iter().map(|c| soul_core::a11y::A11yNode {
             bounds: c.bounds.to_eg_rect(),
