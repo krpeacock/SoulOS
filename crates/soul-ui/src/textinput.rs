@@ -67,6 +67,7 @@ pub struct TextInputOutput {
 }
 
 /// A single-line text input with an optional placeholder.
+#[derive(Clone)]
 pub struct TextInput {
     area: Rectangle,
     buffer: String,

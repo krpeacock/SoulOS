@@ -1,0 +1,18 @@
+[package]
+name = "soul-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+std = ["rhai/std"]
+
+[dependencies]
+soul-core = { workspace = true }
+soul-ui = { workspace = true }
+soul-db = { workspace = true }
+rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float", "debugging"] }
+serde.workspace = true
+serde_json.workspace = true
+embedded-graphics.workspace = true

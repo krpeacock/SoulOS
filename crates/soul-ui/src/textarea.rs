@@ -109,6 +109,7 @@ pub struct TextAreaOutput {
 /// A multi-line, word-wrapping text editor widget.
 ///
 /// See the [module docs](self) for lifecycle and typical wiring.
+#[derive(Clone)]
 pub struct TextArea {
     area: Rectangle,
     buffer: String,

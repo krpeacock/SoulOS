@@ -8,6 +8,7 @@ members = [
     "crates/soul-hal-hosted",
     "crates/soul-runner",
     "crates/soul-a11y",
+    "crates/soul-script",
 ]
 
 [workspace.package]

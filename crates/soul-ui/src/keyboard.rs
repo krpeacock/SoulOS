@@ -274,6 +274,7 @@ const ROW_INDENTS: [i32; 4] = [0, 12, 0, 0];
 /// Owns its current layer, the in-flight highlighted key under the
 /// user's finger, and nothing else. Construct once at the top of
 /// your `handle`-able state and reuse across frames.
+#[derive(Clone)]
 pub struct Keyboard {
     top_y: i32,
     layer: Layer,

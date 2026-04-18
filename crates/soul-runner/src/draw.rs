@@ -465,6 +465,19 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
+                
+                // In icon editing mode, only paint within icon bounds
+                if matches!(self.edit, EditTarget::Icon(_)) {
+                    let cell = ICON_CELL as usize;
+                    if lx < ICON_OX
+                        || lx >= ICON_OX + cell
+                        || ly < ICON_OY
+                        || ly >= ICON_OY + cell
+                    {
+                        continue;
+                    }
+                }
+                
                 let i = ly * LOG_W + lx;
                 if self.written[i] && self.fg[i] == self.brush {
                     continue;
@@ -494,6 +507,19 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
+                
+                // In icon editing mode, only erase within icon bounds
+                if matches!(self.edit, EditTarget::Icon(_)) {
+                    let cell = ICON_CELL as usize;
+                    if lx < ICON_OX
+                        || lx >= ICON_OX + cell
+                        || ly < ICON_OY
+                        || ly >= ICON_OY + cell
+                    {
+                        continue;
+                    }
+                }
+                
                 let i = ly * LOG_W + lx;
                 if !self.written[i] {
                     continue;
@@ -508,13 +534,20 @@ impl Draw {
         match self.tool {
             Tool::Brush => self.stamp(x, y, ctx),
             Tool::Eraser => self.erase_stamp(x, y, ctx),
-            Tool::Fill => {}
+            Tool::Fill => {
+                // Fill tool only works on pen down, not during moves
+            }
         }
     }
 
     fn flood_fill(&mut self, sx: usize, sy: usize, ctx: &mut Ctx<'_>) {
-        self.push_undo();
         let target = self.display_value(sy * LOG_W + sx);
+        // Don't fill if target color is same as brush color
+        if target == self.brush {
+            return;
+        }
+        
+        self.push_undo();
         let mut seen = vec![false; LOG_W * LOG_H];
         let mut q = VecDeque::new();
         q.push_back((sx, sy));

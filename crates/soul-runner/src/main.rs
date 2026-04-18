@@ -1,11 +1,11 @@
 //! Desktop runner: hosts the launcher and the system strip.
 
-mod address;
 mod builder;
 mod draw;
 mod launcher_store;
-mod notes;
-mod todo;
+// mod notes;
+// mod todo;
+// mod address;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -17,6 +17,8 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use soul_core::{run, App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_HEIGHT, SCREEN_WIDTH, SYSTEM_STRIP_H};
+use soul_db::Database;
+use soul_script::ScriptedApp;
 use soul_hal_hosted::HostedPlatform;
 use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H, WHITE};
 use std::cell::RefCell;
@@ -25,23 +27,23 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use address::Address;
 use builder::MobileBuilder;
 use draw::Draw;
 use launcher_store::LauncherIconStore;
-use notes::Notes;
-use todo::MyTodoApp;
+// use notes::Notes;
+// use todo::MyTodoApp;
+// use address::Address;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
 pub(crate) const APPS: &[&str] = &[
-    "Notes", "Address", "Date", "ToDo", "Mail", "Calc", "Prefs", "Draw", "Sync", "Builder", "Todo",
+    "Notes", "Address", "Date", "Todo", "Mail", "Calc", "Prefs", "Draw", "Sync", "Builder",
 ];
 const NOTES_IDX: usize = 0;
 const ADDRESS_IDX: usize = 1;
+const TODO_IDX: usize = 3;
 const DRAW_IDX: usize = 7;
 const BUILDER_IDX: usize = 9;
-const TODO_IDX: usize = 10;
 
 const LABEL_FONT_W: i32 = 6;
 const LABEL_FONT_H: i32 = 10;
@@ -321,11 +323,11 @@ enum Slot {
 struct Host {
     launcher_icons: Rc<RefCell<LauncherIconStore>>,
     launcher: Launcher,
-    notes: Notes,
-    address: Address,
+    notes: ScriptedApp,
+    address: ScriptedApp,
     draw: Draw,
     builder: MobileBuilder,
-    todo: MyTodoApp,
+    todo: ScriptedApp,
     active: Slot,
     /// `true` while a press that began inside the system strip is
     /// in flight. Child apps don't see any event during this window.
@@ -340,16 +342,101 @@ struct Host {
 }
 
 impl Host {
+    /// Helper to check and log Rhai script errors  
+    fn log_script_error(app: &mut ScriptedApp) {
+        if let Some(error) = app.last_error() {
+            log::error!("🔥 RHAI ERROR in {} -> {}()", error.script_name, error.function_name);
+            log::error!("   Error: {}", error.error_message);
+            if let Some(line) = error.line {
+                log::error!("   Line: {}", line);
+                
+                // Show source context
+                let lines: Vec<&str> = app.script_source().lines().collect();
+                if line > 0 && line <= lines.len() {
+                    let start = (line.saturating_sub(3)).max(1);
+                    let end = (line + 2).min(lines.len());
+                    log::error!("   Source context:");
+                    for i in start..=end {
+                        if let Some(source_line) = lines.get(i.saturating_sub(1)) {
+                            let marker = if i == line { " >>> " } else { "     " };
+                            log::error!("{}{:4} | {}", marker, i, source_line);
+                        }
+                    }
+                }
+            }
+            log::error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            app.clear_error();
+        }
+    }
+
     fn new() -> Self {
+        log::info!("🏠 Initializing Host with launcher and apps...");
         let launcher_icons = Rc::new(RefCell::new(LauncherIconStore::load_or_seed()));
+        
+        log::info!("📋 Loading Todo script...");
+        let todo_script = std::fs::read_to_string("assets/scripts/todo.rhai")
+            .unwrap_or_else(|e| {
+                log::error!("❌ Failed to load todo.rhai: {}", e);
+                "fn on_draw() { title_bar(\"Error: No Script\"); }".into()
+            });
+        let todo_db_path = PathBuf::from(".soulos/todo_v2.sdb");
+        let todo_db = if let Ok(bytes) = std::fs::read(&todo_db_path) {
+            log::info!("🗄️  Loaded existing todo database");
+            soul_db::Database::decode(&bytes).unwrap_or_else(|| soul_db::Database::new("todo_v2"))
+        } else {
+            log::info!("🗄️  Creating new todo database");
+            soul_db::Database::new("todo_v2")
+        };
+        let mut todo_app = ScriptedApp::new("Todo", &todo_script, todo_db).expect("Failed to compile Todo script");
+        Self::log_script_error(&mut todo_app);
+        log::info!("✅ Todo script loaded successfully");
+
+        log::info!("📝 Loading Notes script...");
+        let notes_script = std::fs::read_to_string("assets/scripts/notes.rhai")
+            .unwrap_or_else(|e| {
+                log::error!("❌ Failed to load notes.rhai: {}", e);
+                "fn on_draw() { title_bar(\"Error: No Notes Script\"); }".into()
+            });
+        let notes_db_path = PathBuf::from(".soulos/notes_v2.sdb");
+        let notes_db = if let Ok(bytes) = std::fs::read(&notes_db_path) {
+            log::info!("🗄️  Loaded existing notes database");
+            soul_db::Database::decode(&bytes).unwrap_or_else(|| soul_db::Database::new("notes_v2"))
+        } else {
+            log::info!("🗄️  Creating new notes database");
+            soul_db::Database::new("notes_v2")
+        };
+        let mut notes_app = ScriptedApp::new("Notes", &notes_script, notes_db).expect("Failed to compile Notes script");
+        Self::log_script_error(&mut notes_app);
+        log::info!("✅ Notes script loaded successfully");
+
+        log::info!("📞 Loading Address script...");
+        let addr_script = std::fs::read_to_string("assets/scripts/address.rhai")
+            .unwrap_or_else(|e| {
+                log::error!("❌ Failed to load address.rhai: {}", e);
+                "fn on_draw() { title_bar(\"Error: No Address Script\"); }".into()
+            });
+        let addr_db_path = PathBuf::from(".soulos/address_v2.sdb");
+        let addr_db = if let Ok(bytes) = std::fs::read(&addr_db_path) {
+            log::info!("🗄️  Loaded existing address database");
+            soul_db::Database::decode(&bytes).unwrap_or_else(|| soul_db::Database::new("address_v2"))
+        } else {
+            log::info!("🗄️  Creating new address database");
+            soul_db::Database::new("address_v2")
+        };
+        let mut addr_app = ScriptedApp::new("Address", &addr_script, addr_db).expect("Failed to compile Address script");
+        Self::log_script_error(&mut addr_app);
+        log::info!("✅ Address script loaded successfully");
+        
+        log::info!("🎉 All Rhai scripts loaded successfully!");
+
         Self {
             launcher_icons: Rc::clone(&launcher_icons),
             launcher: Launcher::new(Rc::clone(&launcher_icons)),
-            notes: Notes::new(),
-            address: Address::new(),
+            notes: notes_app,
+            address: addr_app,
             draw: Draw::new(Rc::clone(&launcher_icons)),
             builder: MobileBuilder::new(),
-            todo: MyTodoApp::new(),
+            todo: todo_app,
             active: Slot::Launcher,
             strip_pressed: false,
             a11y_enabled: false,
@@ -455,11 +542,20 @@ impl Host {
                     }
                 }
             }
-            Slot::Notes => self.notes.handle(event, ctx),
-            Slot::Address => self.address.handle(event, ctx),
+            Slot::Notes => {
+                self.notes.handle(event, ctx);
+                Self::log_script_error(&mut self.notes);
+            }
+            Slot::Address => {
+                self.address.handle(event, ctx);
+                Self::log_script_error(&mut self.address);
+            }
             Slot::Draw => self.draw.handle(event, ctx),
             Slot::Builder => self.builder.handle(event, ctx),
-            Slot::Todo => self.todo.handle(event, ctx),
+            Slot::Todo => {
+                self.todo.handle(event, ctx);
+                Self::log_script_error(&mut self.todo);
+            }
         }
     }
 
@@ -483,6 +579,9 @@ impl App for Host {
             if let Err(e) = self.launcher_icons.borrow().persist() {
                 eprintln!("launcher: could not persist icon cache on shutdown: {e}");
             }
+            let _ = std::fs::write(".soulos/todo_v2.sdb", self.todo.db.encode());
+            let _ = std::fs::write(".soulos/notes_v2.sdb", self.notes.db.encode());
+            let _ = std::fs::write(".soulos/address_v2.sdb", self.address.db.encode());
             self.forward_to_child(event, ctx);
             return;
         }
@@ -587,11 +686,20 @@ impl App for Host {
     {
         match self.active {
             Slot::Launcher => self.launcher.draw(canvas),
-            Slot::Notes => self.notes.draw(canvas),
-            Slot::Address => self.address.draw(canvas),
+            Slot::Notes => {
+                self.notes.draw(canvas);
+                Self::log_script_error(&mut self.notes);
+            }
+            Slot::Address => {
+                self.address.draw(canvas);
+                Self::log_script_error(&mut self.address);
+            }
             Slot::Draw => self.draw.draw(canvas),
             Slot::Builder => self.builder.draw(canvas),
-            Slot::Todo => self.todo.draw(canvas),
+            Slot::Todo => {
+                self.todo.draw(canvas);
+                Self::log_script_error(&mut self.todo);
+            }
         }
         draw_system_strip(canvas, self.active_label());
 
@@ -613,13 +721,24 @@ impl App for Host {
 }
 
 fn main() {
+    // Initialize logging for enhanced Rhai debugging
+    env_logger::Builder::from_default_env()
+        .format_timestamp_millis()
+        .init();
+    
+    log::info!("🚀 SoulOS starting up...");
+    
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 2 && args[1] == "--test" {
         let scenario_name = &args[2];
         run_headless_test(scenario_name);
         return;
     }
+    
+    log::info!("🖥️  Initializing hosted platform...");
     let mut platform = HostedPlatform::new("SoulOS", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+    
+    log::info!("🎮 Starting main event loop...");
     run(&mut platform, Host::new());
 }
 
