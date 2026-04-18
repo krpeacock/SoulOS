@@ -79,6 +79,11 @@ pub mod primitives;
 pub mod selecttext;
 pub mod textarea;
 pub mod textinput;
+pub mod form;
+pub mod builder;
+
+#[cfg(test)]
+mod tests;
 
 /// Convenience re-exports for apps that prefer one glob import.
 pub mod prelude {
@@ -89,6 +94,8 @@ pub mod prelude {
     pub use crate::selecttext::SelectableText;
     pub use crate::textarea::{TextArea, TextAreaOutput};
     pub use crate::textinput::{TextInput, TextInputOutput};
+    pub use crate::form::*;
+    pub use crate::builder::*;
 }
 
 pub use keyboard::{Keyboard, KeyboardOutput, Layer, TypedKey, KEYBOARD_HEIGHT, KEYBOARD_WIDTH};
@@ -98,3 +105,5 @@ pub use primitives::{button, clear, hit_test, label, title_bar, TITLE_BAR_H};
 pub use selecttext::SelectableText;
 pub use textarea::{TextArea, TextAreaOutput};
 pub use textinput::{TextInput, TextInputOutput};
+pub use form::*;
+pub use builder::*;

@@ -93,8 +93,6 @@ impl TestingPlatform for crate::HostedPlatform {
     }
     
     fn screenshot(&self, filename: &str) -> Result<(), std::io::Error> {
-        // For now, we'd need to implement screenshot saving
-        // This would save the current display buffer as an image
         Ok(())
     }
     
@@ -113,54 +111,78 @@ impl TestingPlatform for crate::HostedPlatform {
 pub mod scenarios {
     use super::*;
     
-    /// Test scenario to open the Notes app and type some text
     pub fn test_notes_app() -> TestScenario {
         let mut events = Vec::new();
-        
-        // Click on Notes app (coordinates from launcher)
         events.extend(TestEvent::click(363, 170, "Click Notes app"));
-        
-        // Wait a bit for app to load
         events.push(TestEvent {
-            event: InputEvent::StylusDown { x: 0, y: 0 }, // Dummy event for delay
+            event: InputEvent::StylusDown { x: 0, y: 0 },
             delay_ms: 500,
             description: "Wait for Notes app to load".to_string(),
         });
-        
-        // Type some test text
         events.extend(TestEvent::type_string("Hello from automated test!"));
-        
-        // Press Enter
-        events.push(TestEvent::key(
-            soul_hal::KeyCode::Enter,
-            "Press Enter to confirm"
-        ));
-        
+        events.push(TestEvent::key(soul_hal::KeyCode::Enter, "Press Enter to confirm"));
         TestScenario {
             name: "Test Notes App".to_string(),
             events,
         }
     }
     
-    /// Test scenario to navigate back to home
     pub fn return_to_home() -> TestScenario {
         TestScenario {
             name: "Return to Home".to_string(),
-            events: TestEvent::hard_button(
-                soul_hal::HardButton::Home,
-                "Press Home button"
-            ),
+            events: TestEvent::hard_button(soul_hal::HardButton::Home, "Press Home button"),
         }
     }
     
-    /// Test scenario for address book
     pub fn test_address_app() -> TestScenario {
         let mut events = Vec::new();
-        
         events.extend(TestEvent::click(320, 170, "Click Address app"));
-        
         TestScenario {
             name: "Test Address App".to_string(),
+            events,
+        }
+    }
+
+    pub fn build_todo_app() -> TestScenario {
+        let mut events = Vec::new();
+        events.extend(TestEvent::click(86, 119, "Open Builder"));
+        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::click(100, 89, "Add Label"));
+        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::click(100, 193, "Edit Label"));
+        events.extend(TestEvent::type_string("My Tasks"));
+        events.push(TestEvent::key(soul_hal::KeyCode::Enter, "Confirm Label"));
+        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::click(100, 167, "Add Checkbox"));
+        events.push(TestEvent {
+            event: InputEvent::StylusDown { x: 30, y: 50 },
+            delay_ms: 100,
+            description: "Select Checkbox".to_string(),
+        });
+        events.push(TestEvent {
+            event: InputEvent::StylusMove { x: 30, y: 100 },
+            delay_ms: 100,
+            description: "Drag Checkbox".to_string(),
+        });
+        events.push(TestEvent {
+            event: InputEvent::StylusUp { x: 30, y: 100 },
+            delay_ms: 100,
+            description: "Drop Checkbox".to_string(),
+        });
+        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::click(100, 245, "Save Form"));
+        TestScenario {
+            name: "Build Todo App".to_string(),
+            events,
+        }
+    }
+
+    pub fn verify_todo_app() -> TestScenario {
+        let mut events = Vec::new();
+        events.extend(TestEvent::click(122, 140, "Open Todo App"));
+        events.extend(TestEvent::click(40, 104, "Toggle Task"));
+        TestScenario {
+            name: "Verify Todo App".to_string(),
             events,
         }
     }

@@ -215,7 +215,7 @@ use a11y::A11yManager;
 pub struct Ctx<'a> {
     /// Milliseconds since the platform started (monotonic).
     pub now_ms: u64,
-    dirty: &'a mut Dirty,
+    pub dirty: &'a mut Dirty,
     pub a11y: &'a mut A11yManager,
 }
 
@@ -262,6 +262,11 @@ pub trait App {
     fn draw<D>(&mut self, canvas: &mut D)
     where
         D: DrawTarget<Color = Gray8>;
+
+    /// Return a list of accessible nodes for the current state.
+    fn a11y_nodes(&self) -> alloc::vec::Vec<a11y::A11yNode> {
+        alloc::vec::Vec::new()
+    }
 }
 
 fn translate(input: InputEvent) -> Option<Event> {
@@ -345,6 +350,12 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
                 .draw(&mut clip);
             app.draw(&mut clip);
         }
+
+        // Drain accessibility speech
+        for text in a11y.pending_speech.drain(..) {
+            platform.speak(&text);
+        }
+
         platform.flush();
         platform.sleep_ms(16);
     }

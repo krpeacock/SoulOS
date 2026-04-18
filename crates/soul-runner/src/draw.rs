@@ -57,6 +57,9 @@ const MENU_ITEMS: &[&str] = &[
     "Open icon...",
     "Load bg...",
     "Clear bg",
+    "Edit Layout",
+    "Delete Element",
+    "Reset Layout",
     "Close menu",
 ];
 
@@ -126,6 +129,12 @@ pub struct Draw {
     menu_touch: Option<usize>,
     mode: Mode,
     undo_stack: Vec<(Vec<u8>, Vec<bool>)>,
+
+    // MobileBuilder integration
+    ui_form: soul_ui::Form,
+    edit_overlay: soul_ui::EditOverlay,
+    builder_mode: bool,
+    ui_db_path: PathBuf,
 }
 
 impl Draw {
@@ -169,6 +178,10 @@ impl Draw {
             }
         };
 
+        let ui_db_path = std::env::var("SOUL_DRAW_UI_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(".soulos/draw_ui.sdb"));
+
         let mut instance = Self {
             launcher_icons,
             edit: EditTarget::Document,
@@ -186,9 +199,135 @@ impl Draw {
             menu_touch: None,
             mode: Mode::Normal,
             undo_stack: Vec::new(),
+
+            ui_form: Self::load_ui(&ui_db_path),
+            edit_overlay: soul_ui::EditOverlay::new(),
+            builder_mode: false,
+            ui_db_path,
         };
         instance.validate_background();
         instance
+    }
+
+    fn load_ui(path: &Path) -> soul_ui::Form {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Some(db) = soul_db::Database::decode(&bytes) {
+                if let Some(rec) = db.iter().next() {
+                    if let Ok(json) = std::str::from_utf8(&rec.data) {
+                        if let Some(form) = soul_ui::Form::from_json(json) {
+                            return form;
+                        }
+                    }
+                }
+            }
+        }
+        Self::default_draw_ui()
+    }
+
+    fn persist_ui(&self) {
+        if let Some(parent) = self.ui_db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut db = soul_db::Database::new("draw_ui");
+        db.insert(0, self.ui_form.to_json().into_bytes());
+        let _ = std::fs::write(&self.ui_db_path, db.encode());
+    }
+
+    fn default_draw_ui() -> soul_ui::Form {
+        use soul_ui::{Form, Component, ComponentType, Rect, A11yHints};
+        use std::collections::BTreeMap;
+        let mut form = Form::new("draw_ui");
+        
+        let row1_y = 15 + 240;
+        let row2_y = row1_y + 26;
+
+        form.components.push(Component {
+            id: "tool_brush".into(),
+            class: "tool".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 4, y: row1_y + 2, w: 32, h: 18 },
+            properties: BTreeMap::from([("label".into(), "Pen".into())]),
+            a11y: A11yHints { label: "Pen tool".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+        form.components.push(Component {
+            id: "tool_fill".into(),
+            class: "tool".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 40, y: row1_y + 2, w: 32, h: 18 },
+            properties: BTreeMap::from([("label".into(), "Fill".into())]),
+            a11y: A11yHints { label: "Fill tool".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+        form.components.push(Component {
+            id: "tool_eraser".into(),
+            class: "tool".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 60, y: row1_y + 2, w: 38, h: 18 },
+            properties: BTreeMap::from([("label".into(), "Erase".into())]),
+            a11y: A11yHints { label: "Eraser tool".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+
+        form.components.push(Component {
+            id: "brush_minus".into(),
+            class: "brush-ctrl".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 102, y: row1_y + 2, w: 20, h: 18 },
+            properties: BTreeMap::from([("label".into(), "-".into())]),
+            a11y: A11yHints { label: "Decrease brush size".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+        form.components.push(Component {
+            id: "brush_plus".into(),
+            class: "brush-ctrl".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 126, y: row1_y + 2, w: 20, h: 18 },
+            properties: BTreeMap::from([("label".into(), "+".into())]),
+            a11y: A11yHints { label: "Increase brush size".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+        form.components.push(Component {
+            id: "undo".into(),
+            class: "action".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 154, y: row1_y + 2, w: 36, h: 18 },
+            properties: BTreeMap::from([("label".into(), "Undo".into())]),
+            a11y: A11yHints { label: "Undo last stroke".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+        form.components.push(Component {
+            id: "clear".into(),
+            class: "action".into(),
+            type_: ComponentType::Button,
+            bounds: Rect { x: 196, y: row1_y + 2, w: 40, h: 18 },
+            properties: BTreeMap::from([("label".into(), "Clear".into())]),
+            a11y: A11yHints { label: "Clear canvas".into(), role: "button".into() },
+            interactions: Vec::new(),
+            binding: None,
+        });
+
+        for (i, g) in GRAY_LEVELS.iter().enumerate() {
+            let x = 4 + (i as i32) * 28;
+            form.components.push(Component {
+                id: format!("ink_{}", i),
+                class: "ink".into(),
+                type_: ComponentType::Button,
+                bounds: Rect { x, y: row2_y + 2, w: 24, h: 16 },
+                properties: BTreeMap::from([("color".into(), (*g as i64).into())]),
+                a11y: A11yHints { label: format!("Gray level {}", i), role: "button".into() },
+                interactions: Vec::new(),
+                binding: None,
+            });
+        }
+        
+        form
     }
 
     fn push_undo(&mut self) {
@@ -241,41 +380,10 @@ impl Draw {
         Some((lx, ly))
     }
 
-    fn rect_tool_brush() -> Rectangle {
-        Rectangle::new(Point::new(4, ROW1_Y + 2), Size::new(26, 18))
-    }
-
-    fn rect_tool_fill() -> Rectangle {
-        Rectangle::new(Point::new(32, ROW1_Y + 2), Size::new(26, 18))
-    }
-
-    fn rect_tool_eraser() -> Rectangle {
-        Rectangle::new(Point::new(60, ROW1_Y + 2), Size::new(38, 18))
-    }
-
-    fn rect_brush_minus() -> Rectangle {
-        Rectangle::new(Point::new(102, ROW1_Y + 2), Size::new(20, 18))
-    }
-
-    fn rect_brush_plus() -> Rectangle {
-        Rectangle::new(Point::new(126, ROW1_Y + 2), Size::new(20, 18))
-    }
-
-    fn rect_undo() -> Rectangle {
-        Rectangle::new(Point::new(154, ROW1_Y + 2), Size::new(36, 18))
-    }
-
-    fn rect_clear() -> Rectangle {
-        Rectangle::new(Point::new(196, ROW1_Y + 2), Size::new(40, 18))
-    }
-
-    fn rect_ink(i: usize) -> Rectangle {
-        let x = 4 + (i as i32) * 28;
-        Rectangle::new(Point::new(x, ROW2_Y + 2), Size::new(24, 16))
-    }
-
     fn rect_menu_entry(i: usize) -> Rectangle {
-        Rectangle::new(Point::new(20, 52 + i as i32 * 30), Size::new(200, 26))
+        let col = (i % 2) as i32;
+        let row = (i / 2) as i32;
+        Rectangle::new(Point::new(15 + col * 105, 60 + row * 26), Size::new(100, 22))
     }
 
     fn rect_save_as_input() -> Rectangle {
@@ -711,6 +819,20 @@ impl Draw {
                 self.clear_background(ctx);
                 ctx.invalidate_all();
             }
+            7 => {
+                self.builder_mode = !self.builder_mode;
+                ctx.invalidate_all();
+            }
+            8 => {
+                self.edit_overlay.delete_selected(&mut self.ui_form);
+                self.persist_ui();
+                ctx.invalidate_all();
+            }
+            9 => {
+                self.ui_form = Self::default_draw_ui();
+                self.persist_ui();
+                ctx.invalidate_all();
+            }
             _ => {
                 ctx.invalidate_all();
             }
@@ -746,32 +868,25 @@ impl Draw {
         if self.screen_to_cell(x, y).is_some() {
             return PaintTarget::Canvas;
         }
-        if hit_test(&Self::rect_tool_brush(), x, y) {
-            return PaintTarget::ToolBrush;
-        }
-        if hit_test(&Self::rect_tool_fill(), x, y) {
-            return PaintTarget::ToolFill;
-        }
-        if hit_test(&Self::rect_tool_eraser(), x, y) {
-            return PaintTarget::ToolEraser;
-        }
-        if hit_test(&Self::rect_brush_minus(), x, y) {
-            return PaintTarget::BrushMinus;
-        }
-        if hit_test(&Self::rect_brush_plus(), x, y) {
-            return PaintTarget::BrushPlus;
-        }
-        if hit_test(&Self::rect_undo(), x, y) {
-            return PaintTarget::UndoBtn;
-        }
-        if hit_test(&Self::rect_clear(), x, y) {
-            return PaintTarget::ClearBtn;
-        }
-        for i in 0..GRAY_LEVELS.len() {
-            if hit_test(&Self::rect_ink(i), x, y) {
-                return PaintTarget::Ink(i);
+        
+        if let Some(comp) = self.ui_form.hit_test(x, y) {
+            match comp.id.as_str() {
+                "tool_brush" => return PaintTarget::ToolBrush,
+                "tool_fill" => return PaintTarget::ToolFill,
+                "tool_eraser" => return PaintTarget::ToolEraser,
+                "brush_minus" => return PaintTarget::BrushMinus,
+                "brush_plus" => return PaintTarget::BrushPlus,
+                "undo" => return PaintTarget::UndoBtn,
+                "clear" => return PaintTarget::ClearBtn,
+                id if id.starts_with("ink_") => {
+                    if let Ok(i) = id[4..].parse::<usize>() {
+                        return PaintTarget::Ink(i);
+                    }
+                }
+                _ => {}
             }
         }
+        
         PaintTarget::None
     }
 
@@ -918,6 +1033,12 @@ impl App for Draw {
                 Mode::SaveAs(_) => self.handle_save_as_pen(true, false, x, y, ctx),
                 Mode::OpenList { .. } => self.handle_open_pen(true, false, x, y, ctx),
                 Mode::Normal => {
+                    if self.builder_mode {
+                        if self.edit_overlay.pen_down(&self.ui_form, x, y) {
+                            ctx.invalidate_all();
+                            return;
+                        }
+                    }
                     if self.menu_open {
                         self.handle_menu_pen(true, false, false, x, y, ctx);
                         return;
@@ -963,6 +1084,12 @@ impl App for Draw {
                 }
             },
             Event::PenMove { x, y } => {
+                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open {
+                    if self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
+                        ctx.invalidate_all();
+                        return;
+                    }
+                }
                 if matches!(self.mode, Mode::Normal) && self.menu_open {
                     return;
                 }
@@ -988,6 +1115,11 @@ impl App for Draw {
                 Mode::SaveAs(_) => self.handle_save_as_pen(false, true, x, y, ctx),
                 Mode::OpenList { .. } => self.handle_open_pen(false, true, x, y, ctx),
                 Mode::Normal => {
+                    if self.builder_mode {
+                        self.edit_overlay.pen_up();
+                        self.persist_ui();
+                        ctx.invalidate_all();
+                    }
                     if self.menu_open {
                         self.handle_menu_pen(false, false, true, x, y, ctx);
                     } else {
@@ -1090,79 +1222,51 @@ impl App for Draw {
                 .draw(canvas);
         }
 
-        let _ = button(
-            canvas,
-            Self::rect_tool_brush(),
-            "Pen",
-            self.tool == Tool::Brush || self.paint_touch == PaintTarget::ToolBrush,
-        );
-        let _ = button(
-            canvas,
-            Self::rect_tool_fill(),
-            "Fill",
-            self.tool == Tool::Fill || self.paint_touch == PaintTarget::ToolFill,
-        );
-        let _ = button(
-            canvas,
-            Self::rect_tool_eraser(),
-            "Erase",
-            self.tool == Tool::Eraser || self.paint_touch == PaintTarget::ToolEraser,
-        );
-        let _ = button(
-            canvas,
-            Self::rect_brush_minus(),
-            "-",
-            self.paint_touch == PaintTarget::BrushMinus,
-        );
-        let _ = label(
-            canvas,
-            Point::new(148, ROW1_Y + 6),
-            &format!("{}", self.brush_radius),
-        );
-        let _ = button(
-            canvas,
-            Self::rect_brush_plus(),
-            "+",
-            self.paint_touch == PaintTarget::BrushPlus,
-        );
-        let _ = button(
-            canvas,
-            Self::rect_undo(),
-            "Undo",
-            self.paint_touch == PaintTarget::UndoBtn,
-        );
-        let _ = button(
-            canvas,
-            Self::rect_clear(),
-            "Clear",
-            self.paint_touch == PaintTarget::ClearBtn,
-        );
+        // Draw the dynamic UI form
+        let pressed_id = match self.paint_touch {
+            PaintTarget::ToolBrush => Some("tool_brush"),
+            PaintTarget::ToolFill => Some("tool_fill"),
+            PaintTarget::ToolEraser => Some("tool_eraser"),
+            PaintTarget::BrushMinus => Some("brush_minus"),
+            PaintTarget::BrushPlus => Some("brush_plus"),
+            PaintTarget::UndoBtn => Some("undo"),
+            PaintTarget::ClearBtn => Some("clear"),
+            PaintTarget::Ink(0) => Some("ink_0"),
+            PaintTarget::Ink(1) => Some("ink_1"),
+            PaintTarget::Ink(2) => Some("ink_2"),
+            PaintTarget::Ink(3) => Some("ink_3"),
+            PaintTarget::Ink(4) => Some("ink_4"),
+            PaintTarget::Ink(5) => Some("ink_5"),
+            PaintTarget::Ink(6) => Some("ink_6"),
+            PaintTarget::Ink(7) => Some("ink_7"),
+            _ => None,
+        };
+        let _ = self.ui_form.draw(canvas, pressed_id);
 
+        // Draw selection highlight for current gray level
         for (i, g) in GRAY_LEVELS.iter().enumerate() {
-            let rect = Self::rect_ink(i);
-            let sel = self.brush == *g;
-            let fill = Gray8::new(*g);
-            let mut style = PrimitiveStyleBuilder::new().fill_color(fill);
-            if sel {
-                style = style.stroke_color(BLACK).stroke_width(2);
-            } else {
-                style = style.stroke_color(GRAY).stroke_width(1);
-            }
-            let _ = rect.into_styled(style.build()).draw(canvas);
-        }
-
-        if self.menu_open {
-            let _ = Self::app_content_rect()
-                .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
-                .draw(canvas);
-            let _ = label(canvas, Point::new(12, 44), "Menu");
-            for i in 0..MENU_ITEMS.len() {
-                let pressed = self.menu_touch == Some(i);
-                let _ = button(canvas, Self::rect_menu_entry(i), MENU_ITEMS[i], pressed);
+            if self.brush == *g {
+                if let Some(comp) = self.ui_form.components.iter().find(|c| c.id == format!("ink_{}", i)) {
+                    let rect = comp.bounds.to_eg_rect();
+                    let _ = rect.into_styled(PrimitiveStyle::with_stroke(BLACK, 2)).draw(canvas);
+                }
             }
         }
 
-        match &mut self.mode {
+        // Overlay brush radius label
+        if let Some(comp) = self.ui_form.components.iter().find(|c| c.id == "brush_minus") {
+            let _ = label(
+                canvas,
+                Point::new(comp.bounds.x + comp.bounds.w as i32 + 6, comp.bounds.y + 4),
+                &format!("{}", self.brush_radius),
+            );
+        }
+
+        if self.builder_mode {
+            let _ = self.edit_overlay.draw(canvas, &self.ui_form);
+        }
+
+        match &self.mode {
             Mode::SaveAs(input) => {
                 let _ = Self::app_content_rect()
                     .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
@@ -1212,8 +1316,59 @@ impl App for Draw {
                 let _ = label(canvas, Point::new(12, 200), "PgUp / PgDn scroll");
                 let _ = button(canvas, Self::rect_open_cancel(), "Cancel", false);
             }
-            Mode::Normal => {}
+            Mode::Normal => {
+                if self.menu_open {
+                    let rect = Rectangle::new(Point::new(10, 30), Size::new(220, 240));
+                    let _ = rect
+                        .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
+                        .draw(canvas);
+                    let _ = rect.into_styled(PrimitiveStyle::with_stroke(BLACK, 1)).draw(canvas);
+                    let _ = label(canvas, Point::new(15, 38), "Menu");
+                    for i in 0..MENU_ITEMS.len() {
+                        let pressed = self.menu_touch == Some(i);
+                        let _ = button(canvas, Self::rect_menu_entry(i), MENU_ITEMS[i], pressed);
+                    }
+                }
+            }
         }
+    }
+
+    fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        let mut nodes = self.ui_form.a11y_nodes();
+        match &self.mode {
+            Mode::Normal => {
+                if self.menu_open {
+                    for (i, item) in MENU_ITEMS.iter().enumerate() {
+                        nodes.push(soul_core::a11y::A11yNode {
+                            bounds: Self::rect_menu_entry(i),
+                            label: item.to_string(),
+                            role: "menuitem".into(),
+                        });
+                    }
+                }
+            }
+            Mode::SaveAs(_) => {
+                nodes.push(soul_core::a11y::A11yNode {
+                    bounds: Self::rect_save_as_input(),
+                    label: "Filename input".into(),
+                    role: "textinput".into(),
+                });
+            }
+            Mode::OpenList { files, scroll, .. } => {
+                let visible = OPEN_VISIBLE.min(files.len().saturating_sub(*scroll));
+                for i in 0..visible {
+                    let idx = *scroll + i;
+                    if let Some(name) = files.get(idx) {
+                        nodes.push(soul_core::a11y::A11yNode {
+                            bounds: Self::rect_open_row(i),
+                            label: name.clone(),
+                            role: "file".into(),
+                        });
+                    }
+                }
+            }
+        }
+        nodes
     }
 }
 

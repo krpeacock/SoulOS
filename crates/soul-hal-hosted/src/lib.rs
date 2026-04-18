@@ -110,6 +110,17 @@ impl Platform for HostedPlatform {
     fn sleep_ms(&mut self, ms: u32) {
         std::thread::sleep(Duration::from_millis(ms as u64));
     }
+
+    fn speak(&mut self, text: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("say").arg(text).spawn();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("[TTS]: {}", text);
+        }
+    }
 }
 
 // Hard buttons live on F-keys so letter/digit keys are free for text input.

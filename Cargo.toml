@@ -18,6 +18,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 embedded-graphics = "0.8"
 embedded-graphics-simulator = "0.6"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 soul-hal = { path = "crates/soul-hal" }
 soul-core = { path = "crates/soul-core" }
 soul-ui = { path = "crates/soul-ui" }

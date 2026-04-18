@@ -129,7 +129,10 @@ impl Notes {
 
     fn apply_typed(&mut self, typed: TypedKey, ctx: &mut Ctx<'_>) {
         let out = match typed {
-            TypedKey::Char(c) => self.text_area.insert_char(c),
+            TypedKey::Char(c) => {
+                ctx.a11y.speak(&c.to_string());
+                self.text_area.insert_char(c)
+            }
             TypedKey::Backspace => self.text_area.backspace(),
             TypedKey::Enter => self.text_area.enter(),
         };
@@ -195,6 +198,7 @@ impl App for Notes {
                 }
             }
             Event::Key(KeyCode::Char(c)) => {
+                ctx.a11y.speak(&c.to_string());
                 let out = self.text_area.insert_char(c);
                 self.apply_output(out, ctx);
             }
@@ -240,5 +244,13 @@ impl App for Notes {
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, "Notes");
         let _ = self.text_area.draw(canvas);
         let _ = self.keyboard.draw(canvas);
+    }
+
+    fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        vec![soul_core::a11y::A11yNode {
+            bounds: Self::text_rect(),
+            label: self.text_area.text().to_string(),
+            role: "textarea".into(),
+        }]
     }
 }

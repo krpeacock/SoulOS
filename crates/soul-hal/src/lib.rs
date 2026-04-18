@@ -75,6 +75,9 @@ pub trait Platform {
     /// Sleep for at least `ms` milliseconds. On embedded targets,
     /// this is typically a WFI / low-power wait.
     fn sleep_ms(&mut self, ms: u32);
+
+    /// Speak text using the platform's text-to-speech system.
+    fn speak(&mut self, text: &str);
 }
 
 /// An input event produced by the platform.

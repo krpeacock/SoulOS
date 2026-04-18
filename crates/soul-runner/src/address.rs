@@ -378,6 +378,7 @@ impl App for Address {
             }
             Event::Key(KeyCode::Char(c)) => {
                 if let Mode::Edit(_) = self.mode {
+                    ctx.a11y.speak(&c.to_string());
                     let out = self.edit_inputs[self.active_field].insert_char(c);
                     if let Some(r) = out.dirty {
                         ctx.invalidate(r);
@@ -587,7 +588,50 @@ impl App for Address {
                 
                 let _ = label(canvas, Point::new(12, 260), "Enter/↑↓: Navigate");
                 let _ = label(canvas, Point::new(12, 280), "Menu: Save & Back");
-            }
-        }
-    }
-}
+                }
+                }
+                }
+
+                fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+                let mut nodes = Vec::new();
+                match self.mode {
+                Mode::List => {
+                let list_rect = Self::list_rect();
+                let item_h = 24;
+                let page_start = self.pagination.page_start_index();
+                let page_end = self.pagination.page_end_index();
+
+                for (i, (_, name)) in self.contacts[page_start..page_end].iter().enumerate() {
+                    let y = list_rect.top_left.y + (i as i32 * item_h);
+                    nodes.push(soul_core::a11y::A11yNode {
+                        bounds: Rectangle::new(Point::new(16, y), Size::new(208, 20)),
+                        label: name.clone(),
+                        role: "contact".into(),
+                    });
+                }
+                }
+                Mode::View(contact_id) => {
+                if let Some(record) = self.db.get(contact_id) {
+                    if let Ok(vcard) = VCard::from_vcard_data(&record.data) {
+                        nodes.push(soul_core::a11y::A11yNode {
+                            bounds: Rectangle::new(Point::new(0, 40), Size::new(240, 200)),
+                            label: format!("{}, {}, {}", vcard.display_name(), vcard.phone, vcard.email),
+                            role: "contact_details".into(),
+                        });
+                    }
+                }
+                }
+                Mode::Edit(_) => {
+                let field_names = ["Full Name", "Given Name", "Family Name", "Phone", "Email", "Note"];
+                for (i, name) in field_names.iter().enumerate() {
+                    nodes.push(soul_core::a11y::A11yNode {
+                        bounds: Self::field_input_rect(i),
+                        label: format!("{}: {}", name, self.edit_inputs[i].text()),
+                        role: "textinput".into(),
+                    });
+                }
+                }
+                }
+                nodes
+                }
+                }
