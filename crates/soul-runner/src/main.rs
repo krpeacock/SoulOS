@@ -1,5 +1,6 @@
 //! Desktop runner: hosts the launcher and the system strip.
 
+mod address;
 mod draw;
 mod launcher_store;
 mod notes;
@@ -23,6 +24,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use address::Address;
 use draw::Draw;
 use launcher_store::LauncherIconStore;
 use notes::Notes;
@@ -33,6 +35,7 @@ pub(crate) const APPS: &[&str] = &[
     "Notes", "Address", "Date", "ToDo", "Mail", "Calc", "Prefs", "Draw", "Sync",
 ];
 const NOTES_IDX: usize = 0;
+const ADDRESS_IDX: usize = 1;
 const DRAW_IDX: usize = 7;
 
 const LABEL_FONT_W: i32 = 6;
@@ -304,6 +307,7 @@ where
 enum Slot {
     Launcher,
     Notes,
+    Address,
     Draw,
 }
 
@@ -311,6 +315,7 @@ struct Host {
     launcher_icons: Rc<RefCell<LauncherIconStore>>,
     launcher: Launcher,
     notes: Notes,
+    address: Address,
     draw: Draw,
     active: Slot,
     /// `true` while a press that began inside the system strip is
@@ -325,6 +330,7 @@ impl Host {
             launcher_icons: Rc::clone(&launcher_icons),
             launcher: Launcher::new(Rc::clone(&launcher_icons)),
             notes: Notes::new(),
+            address: Address::new(),
             draw: Draw::new(Rc::clone(&launcher_icons)),
             active: Slot::Launcher,
             strip_pressed: false,
@@ -342,6 +348,7 @@ impl Host {
         match self.active {
             Slot::Launcher => "Launcher",
             Slot::Notes => "Notes",
+            Slot::Address => "Address",
             Slot::Draw => "Draw",
         }
     }
@@ -353,12 +360,15 @@ impl Host {
                 if let Some(idx) = self.launcher.take_launch() {
                     if idx == NOTES_IDX {
                         self.switch_to(Slot::Notes, ctx);
+                    } else if idx == ADDRESS_IDX {
+                        self.switch_to(Slot::Address, ctx);
                     } else if idx == DRAW_IDX {
                         self.switch_to(Slot::Draw, ctx);
                     }
                 }
             }
             Slot::Notes => self.notes.handle(event, ctx),
+            Slot::Address => self.address.handle(event, ctx),
             Slot::Draw => self.draw.handle(event, ctx),
         }
     }
@@ -409,6 +419,7 @@ impl App for Host {
         match self.active {
             Slot::Launcher => self.launcher.draw(canvas),
             Slot::Notes => self.notes.draw(canvas),
+            Slot::Address => self.address.draw(canvas),
             Slot::Draw => self.draw.draw(canvas),
         }
         draw_system_strip(canvas, self.active_label());
