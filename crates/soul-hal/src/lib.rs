@@ -155,4 +155,8 @@ pub enum HardButton {
     PageUp,
     /// Page-down hard button (list scrolling).
     PageDown,
+    /// Volume up.
+    VolumeUp,
+    /// Volume down.
+    VolumeDown,
 }

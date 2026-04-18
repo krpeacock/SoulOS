@@ -7,6 +7,11 @@
 //!
 //! Default directory: `assets/draw/` (override with `SOUL_DRAW_DIR`).
 //! Use **Menu** (system strip or **F6**) for file and background actions.
+//!
+//! Launcher icons live in the `launcher_icons` database, persisted under
+//! `.soulos/launcher_icons.sdb` (see `launcher_store`). The first run
+//! seeds from `assets/sprites/`. Use **Menu → Open icon…** to edit the
+//! launcher-sized icon in the centered region; **Save** writes back and flushes the cache.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -18,13 +23,20 @@ use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
 use soul_ui::{
     button, hit_test, label, title_bar, TextInput, TextInputOutput, BLACK, GRAY, TITLE_BAR_H,
 };
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use crate::launcher_store::LauncherIconStore;
+use crate::{APPS, ICON_CELL};
 
 const LOG_W: usize = 120;
 const LOG_H: usize = 120;
+const ICON_OX: usize = (LOG_W - ICON_CELL as usize) / 2;
+const ICON_OY: usize = (LOG_H - ICON_CELL as usize) / 2;
 const SCALE: i32 = 2;
 const CANVAS_PX: i32 = (LOG_W as i32) * SCALE;
 
@@ -42,6 +54,7 @@ const MENU_ITEMS: &[&str] = &[
     "Save",
     "Save as...",
     "Open...",
+    "Open icon...",
     "Load bg...",
     "Clear bg",
     "Close menu",
@@ -77,6 +90,13 @@ enum PaintTarget {
 enum OpenPurpose {
     Document,
     Background,
+    LauncherIcon,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditTarget {
+    Document,
+    Icon(usize),
 }
 
 enum Mode {
@@ -90,6 +110,8 @@ enum Mode {
 }
 
 pub struct Draw {
+    launcher_icons: Rc<RefCell<LauncherIconStore>>,
+    edit: EditTarget,
     fg: Vec<u8>,
     written: Vec<bool>,
     bg: Option<Vec<u8>>,
@@ -107,7 +129,7 @@ pub struct Draw {
 }
 
 impl Draw {
-    pub fn new() -> Self {
+    pub fn new(launcher_icons: Rc<RefCell<LauncherIconStore>>) -> Self {
         let draw_dir = std::env::var("SOUL_DRAW_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("assets/draw"));
@@ -139,6 +161,8 @@ impl Draw {
         };
 
         Self {
+            launcher_icons,
+            edit: EditTarget::Document,
             fg,
             written,
             bg: None,
@@ -183,18 +207,27 @@ impl Draw {
         )
     }
 
-    fn screen_to_cell(x: i16, y: i16) -> Option<(usize, usize)> {
+    fn screen_to_cell(&self, x: i16, y: i16) -> Option<(usize, usize)> {
         let r = Self::canvas_screen_rect();
         if !hit_test(&r, x, y) {
             return None;
         }
         let lx = ((x as i32 - r.top_left.x) / SCALE) as usize;
         let ly = ((y as i32 - r.top_left.y) / SCALE) as usize;
-        if lx < LOG_W && ly < LOG_H {
-            Some((lx, ly))
-        } else {
-            None
+        if lx >= LOG_W || ly >= LOG_H {
+            return None;
         }
+        if matches!(self.edit, EditTarget::Icon(_)) {
+            let cell = ICON_CELL as usize;
+            if lx < ICON_OX
+                || lx >= ICON_OX + cell
+                || ly < ICON_OY
+                || ly >= ICON_OY + cell
+            {
+                return None;
+            }
+        }
+        Some((lx, ly))
     }
 
     fn rect_tool_brush() -> Rectangle {
@@ -466,6 +499,7 @@ impl Draw {
                 self.fg = data;
                 self.written = vec![true; LOG_W * LOG_H];
                 self.bg = None;
+                self.edit = EditTarget::Document;
                 ctx.invalidate(Self::canvas_screen_rect());
                 eprintln!("draw: loaded {}", path.display());
                 true
@@ -530,6 +564,7 @@ impl Draw {
         let raw = input.text().to_string();
         if let Some(name) = sanitize_name(&raw) {
             self.doc_name = name;
+            self.edit = EditTarget::Document;
             let _ = self.try_save_to_path(&self.path_for_doc());
         } else {
             eprintln!("draw: invalid name (use letters, digits, _ -)");
@@ -554,6 +589,70 @@ impl Draw {
         };
     }
 
+    fn refresh_open_icon_list(&mut self) {
+        self.mode = Mode::OpenList {
+            files: APPS.iter().map(|s| (*s).to_string()).collect(),
+            scroll: 0,
+            purpose: OpenPurpose::LauncherIcon,
+        };
+    }
+
+    fn load_icon_from_db(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> bool {
+        let cell = ICON_CELL as usize;
+        let area = cell * cell;
+        let data = {
+            let store = self.launcher_icons.borrow();
+            let Some(rec) = store.db.iter_category(idx as u8).next() else {
+                return false;
+            };
+            if rec.data.len() != area {
+                return false;
+            }
+            rec.data.clone()
+        };
+        self.undo_stack.clear();
+        self.fg.fill(255);
+        self.written.fill(false);
+        self.bg = None;
+        for y in 0..cell {
+            for x in 0..cell {
+                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
+                let p = data[y * cell + x];
+                self.fg[i] = p;
+                self.written[i] = p != 255;
+            }
+        }
+        self.edit = EditTarget::Icon(idx);
+        self.doc_name = format!("icon:{}", APPS[idx]);
+        ctx.invalidate(Self::canvas_screen_rect());
+        true
+    }
+
+    fn save_icon_to_db(&mut self, idx: usize) -> bool {
+        let cell = ICON_CELL as usize;
+        let mut buf = Vec::with_capacity(cell * cell);
+        for y in 0..cell {
+            for x in 0..cell {
+                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
+                buf.push(self.display_value(i));
+            }
+        }
+        let ok = {
+            let mut store = self.launcher_icons.borrow_mut();
+            let Some(rec) = store.db.iter_category(idx as u8).next() else {
+                return false;
+            };
+            let id = rec.id;
+            store.db.update(id, buf)
+        };
+        if ok {
+            if let Err(e) = self.launcher_icons.borrow().persist() {
+                eprintln!("draw: could not persist launcher icon cache: {e}");
+            }
+        }
+        ok
+    }
+
     fn menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) {
         self.menu_open = false;
         match idx {
@@ -561,10 +660,20 @@ impl Draw {
                 self.clear_canvas(ctx);
                 self.doc_name = String::from("untitled");
                 self.bg = None;
+                self.edit = EditTarget::Document;
                 ctx.invalidate_all();
             }
             1 => {
-                let _ = self.try_save_to_path(&self.path_for_doc());
+                match self.edit {
+                    EditTarget::Icon(i) => {
+                        if self.save_icon_to_db(i) {
+                            eprintln!("draw: saved launcher icon {}", APPS[i]);
+                        }
+                    }
+                    EditTarget::Document => {
+                        let _ = self.try_save_to_path(&self.path_for_doc());
+                    }
+                }
                 ctx.invalidate_all();
             }
             2 => {
@@ -578,10 +687,14 @@ impl Draw {
                 ctx.invalidate_all();
             }
             4 => {
-                self.refresh_open_list(OpenPurpose::Background);
+                self.refresh_open_icon_list();
                 ctx.invalidate_all();
             }
             5 => {
+                self.refresh_open_list(OpenPurpose::Background);
+                ctx.invalidate_all();
+            }
+            6 => {
                 self.clear_background(ctx);
                 ctx.invalidate_all();
             }
@@ -596,14 +709,20 @@ impl Draw {
             Mode::OpenList { purpose, .. } => *purpose,
             _ => OpenPurpose::Document,
         };
-        let path = path_for(&self.draw_dir, stem);
         match purpose {
             OpenPurpose::Document => {
+                let path = path_for(&self.draw_dir, stem);
                 self.doc_name = stem.to_string();
                 let _ = self.try_load_doc_path(&path, ctx);
             }
             OpenPurpose::Background => {
+                let path = path_for(&self.draw_dir, stem);
                 let _ = self.try_load_background_path(&path, ctx);
+            }
+            OpenPurpose::LauncherIcon => {
+                if let Some(idx) = APPS.iter().position(|&n| n == stem) {
+                    let _ = self.load_icon_from_db(idx, ctx);
+                }
             }
         }
         self.mode = Mode::Normal;
@@ -611,7 +730,7 @@ impl Draw {
     }
 
     fn paint_zone_at(&self, x: i16, y: i16) -> PaintTarget {
-        if Self::screen_to_cell(x, y).is_some() {
+        if self.screen_to_cell(x, y).is_some() {
             return PaintTarget::Canvas;
         }
         if hit_test(&Self::rect_tool_brush(), x, y) {
@@ -794,7 +913,7 @@ impl App for Draw {
                     self.paint_touch = z;
                     match z {
                         PaintTarget::Canvas => {
-                            if let Some((lx, ly)) = Self::screen_to_cell(x, y) {
+                            if let Some((lx, ly)) = self.screen_to_cell(x, y) {
                                 match self.tool {
                                     Tool::Brush => {
                                         self.push_undo();
@@ -840,7 +959,7 @@ impl App for Draw {
                 if self.paint_touch == PaintTarget::Canvas
                     && matches!(self.tool, Tool::Brush | Tool::Eraser)
                 {
-                    if let Some((lx, ly)) = Self::screen_to_cell(x, y) {
+                    if let Some((lx, ly)) = self.screen_to_cell(x, y) {
                         if let Some((ox, oy)) = self.last_cell {
                             if (ox, oy) != (lx, ly) {
                                 self.plot_line(ox, oy, lx, ly, ctx);
@@ -942,6 +1061,22 @@ impl App for Draw {
             }
         }
 
+        if matches!(self.edit, EditTarget::Icon(_)) {
+            let ir = Rectangle::new(
+                Point::new(
+                    (ICON_OX as i32) * SCALE,
+                    TITLE_BAR_H as i32 + (ICON_OY as i32) * SCALE,
+                ),
+                Size::new(
+                    (ICON_CELL as u32) * (SCALE as u32),
+                    (ICON_CELL as u32) * (SCALE as u32),
+                ),
+            );
+            let _ = ir
+                .into_styled(PrimitiveStyleBuilder::new().stroke_color(BLACK).stroke_width(1).build())
+                .draw(canvas);
+        }
+
         let _ = button(
             canvas,
             Self::rect_tool_brush(),
@@ -1035,6 +1170,7 @@ impl App for Draw {
                 let hdr = match purpose {
                     OpenPurpose::Document => "Open",
                     OpenPurpose::Background => "Background (PGM)",
+                    OpenPurpose::LauncherIcon => "Launcher icon",
                 };
                 let _ = label(canvas, Point::new(12, 28), hdr);
                 if files.is_empty() {

@@ -9,7 +9,9 @@
 //! This is SoulOS's analogue to the PalmOS Database Manager. The
 //! distinction between `.pdb` (data) and `.prc` (resource)
 //! databases is not preserved here; there's just one type,
-//! [`Database`].
+//! [`Database`]. For platform persistence, [`Database::encode`] and
+//! [`Database::decode`] provide a versioned binary snapshot of active
+//! records (hosted runner cache files, sync bundles, etc.).
 //!
 //! # Why records, not files?
 //!
@@ -40,6 +42,11 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+
+const PERSIST_MAGIC: &[u8; 8] = b"SOULOSDB";
+const PERSIST_VERSION: u32 = 1;
+/// Hard cap per record payload when decoding from untrusted bytes (hosted cache files).
+const PERSIST_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum number of categories a single database can define.
 /// Matches the PalmOS convention.
@@ -185,5 +192,123 @@ impl Database {
     /// Whether the database has no non-deleted records.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Serialize for platform persistence (e.g. hosted cache file).
+    ///
+    /// Omits tombstoned records; preserves [`Database::name`] and
+    /// [`Database::next_id`], and serializes active [`Record`] fields.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PERSIST_MAGIC);
+        out.extend_from_slice(&PERSIST_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.name);
+        out.extend_from_slice(&self.next_id.to_le_bytes());
+        let active: Vec<&Record> = self.records.iter().filter(|r| !r.attrs.deleted).collect();
+        out.extend_from_slice(&(active.len() as u32).to_le_bytes());
+        for r in active {
+            out.extend_from_slice(&r.id.to_le_bytes());
+            out.push(r.category);
+            let mut flags: u8 = 0;
+            if r.attrs.secret {
+                flags |= 1;
+            }
+            if r.attrs.dirty {
+                flags |= 2;
+            }
+            out.push(flags);
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&(r.data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&r.data);
+        }
+        out
+    }
+
+    /// Deserialize from [`Self::encode`]. Returns `None` if the blob is
+    /// invalid or the version is unsupported.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 8 + 4 + 32 + 4 + 4 {
+            return None;
+        }
+        let mut i = 0usize;
+        if bytes.get(i..i + 8)? != PERSIST_MAGIC.as_slice() {
+            return None;
+        }
+        i += 8;
+        let ver = read_u32_le(bytes, &mut i)?;
+        if ver != PERSIST_VERSION {
+            return None;
+        }
+        let mut name = [0u8; 32];
+        name.copy_from_slice(bytes.get(i..i + 32)?);
+        i += 32;
+        let next_id = read_u32_le(bytes, &mut i)?;
+        let n = read_u32_le(bytes, &mut i)? as usize;
+        let mut records = Vec::new();
+        for _ in 0..n {
+            let id = read_u32_le(bytes, &mut i)?;
+            let category = *bytes.get(i)?;
+            i += 1;
+            if category as usize >= MAX_CATEGORIES {
+                return None;
+            }
+            let flags = *bytes.get(i)?;
+            i += 1;
+            let secret = (flags & 1) != 0;
+            let dirty = (flags & 2) != 0;
+            i += 2;
+            let len = read_u32_le(bytes, &mut i)? as usize;
+            if len > PERSIST_MAX_RECORD_BYTES {
+                return None;
+            }
+            let end = i.checked_add(len)?;
+            let data = bytes.get(i..end)?.to_vec();
+            i = end;
+            records.push(Record {
+                id,
+                category,
+                attrs: RecordAttrs {
+                    secret,
+                    dirty,
+                    deleted: false,
+                },
+                data,
+            });
+        }
+        if i != bytes.len() {
+            return None;
+        }
+        Some(Self {
+            name,
+            records,
+            next_id,
+        })
+    }
+}
+
+fn read_u32_le(bytes: &[u8], i: &mut usize) -> Option<u32> {
+    let slice = bytes.get(*i..*i + 4)?;
+    *i += 4;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let mut db = Database::new("testdb");
+        let id = db.insert(CATEGORY_UNFILED, Vec::from([1u8, 2, 3, 4]));
+        let mut hundred = Vec::new();
+        hundred.resize(100, 9u8);
+        assert!(db.update(id, hundred.clone()));
+        let bytes = db.encode();
+        let db2 = Database::decode(&bytes).expect("decode");
+        assert_eq!(db2.name, db.name);
+        assert_eq!(db2.next_id, db.next_id);
+        assert_eq!(db2.len(), 1);
+        assert_eq!(db2.get(id).unwrap().data, hundred);
     }
 }
