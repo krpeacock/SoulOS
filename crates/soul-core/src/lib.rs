@@ -130,6 +130,10 @@ pub enum Event {
     /// Sent once per frame after all input events have been
     /// dispatched. Useful for animations and timers.
     Tick(u64),
+    /// Application menu (e.g. Palm-style silk **Menu** or the
+    /// hard [`HardButton::Menu`] key). Delivered once per activation,
+    /// not paired with a release.
+    Menu,
 }
 
 /// Dirty-region accumulator used by the runtime.
@@ -256,15 +260,17 @@ pub trait App {
 }
 
 fn translate(input: InputEvent) -> Option<Event> {
-    Some(match input {
-        InputEvent::StylusDown { x, y } => Event::PenDown { x, y },
-        InputEvent::StylusMove { x, y } => Event::PenMove { x, y },
-        InputEvent::StylusUp { x, y } => Event::PenUp { x, y },
-        InputEvent::ButtonDown(b) => Event::ButtonDown(b),
-        InputEvent::ButtonUp(b) => Event::ButtonUp(b),
-        InputEvent::Key(k) => Event::Key(k),
-        InputEvent::Quit => return None,
-    })
+    match input {
+        InputEvent::StylusDown { x, y } => Some(Event::PenDown { x, y }),
+        InputEvent::StylusMove { x, y } => Some(Event::PenMove { x, y }),
+        InputEvent::StylusUp { x, y } => Some(Event::PenUp { x, y }),
+        InputEvent::ButtonDown(HardButton::Menu) => Some(Event::Menu),
+        InputEvent::ButtonUp(HardButton::Menu) => None,
+        InputEvent::ButtonDown(b) => Some(Event::ButtonDown(b)),
+        InputEvent::ButtonUp(b) => Some(Event::ButtonUp(b)),
+        InputEvent::Key(k) => Some(Event::Key(k)),
+        InputEvent::Quit => None,
+    }
 }
 
 /// Run `app` on `platform` until the platform emits a quit event.

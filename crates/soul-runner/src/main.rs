@@ -1,5 +1,6 @@
 //! Desktop runner: hosts the launcher and the system strip.
 
+mod draw;
 mod notes;
 
 use embedded_graphics::{
@@ -15,12 +16,14 @@ use soul_hal::HardButton;
 use soul_hal_hosted::HostedPlatform;
 use soul_ui::{button, hit_test, title_bar, BLACK, TITLE_BAR_H, WHITE};
 
+use draw::Draw;
 use notes::Notes;
 
 const APPS: &[&str] = &[
     "Notes", "Address", "Date", "ToDo", "Mail", "Calc", "Prefs", "Draw", "Sync",
 ];
 const NOTES_IDX: usize = 0;
+const DRAW_IDX: usize = 7;
 
 // --- Launcher -----------------------------------------------------------
 
@@ -92,6 +95,7 @@ impl App for Launcher {
             Event::ButtonDown(HardButton::AppB) => self.pending = Some(1),
             Event::ButtonDown(HardButton::AppC) => self.pending = Some(2),
             Event::ButtonDown(HardButton::AppD) => self.pending = Some(3),
+            Event::Menu => {}
             _ => {}
         }
     }
@@ -154,15 +158,14 @@ where
     let _ = Text::with_baseline(home, Point::new(home_x, y), style, Baseline::Top).draw(canvas);
 
     // Active-app name, centered in middle third.
-    let mid_x = STRIP_SEGMENT_W
-        + (STRIP_SEGMENT_W - active_label.chars().count() as i32 * FONT_W) / 2;
+    let mid_x =
+        STRIP_SEGMENT_W + (STRIP_SEGMENT_W - active_label.chars().count() as i32 * FONT_W) / 2;
     let _ =
         Text::with_baseline(active_label, Point::new(mid_x, y), style, Baseline::Top).draw(canvas);
 
     // Menu label, centered in right third.
     let menu = "Menu";
-    let menu_x =
-        2 * STRIP_SEGMENT_W + (STRIP_SEGMENT_W - menu.len() as i32 * FONT_W) / 2;
+    let menu_x = 2 * STRIP_SEGMENT_W + (STRIP_SEGMENT_W - menu.len() as i32 * FONT_W) / 2;
     let _ = Text::with_baseline(menu, Point::new(menu_x, y), style, Baseline::Top).draw(canvas);
 }
 
@@ -172,11 +175,13 @@ where
 enum Slot {
     Launcher,
     Notes,
+    Draw,
 }
 
 struct Host {
     launcher: Launcher,
     notes: Notes,
+    draw: Draw,
     active: Slot,
     /// `true` while a press that began inside the system strip is
     /// in flight. Child apps don't see any event during this window.
@@ -188,6 +193,7 @@ impl Host {
         Self {
             launcher: Launcher::new(),
             notes: Notes::new(),
+            draw: Draw::new(),
             active: Slot::Launcher,
             strip_pressed: false,
         }
@@ -204,6 +210,7 @@ impl Host {
         match self.active {
             Slot::Launcher => "Launcher",
             Slot::Notes => "Notes",
+            Slot::Draw => "Draw",
         }
     }
 
@@ -214,10 +221,13 @@ impl Host {
                 if let Some(idx) = self.launcher.take_launch() {
                     if idx == NOTES_IDX {
                         self.switch_to(Slot::Notes, ctx);
+                    } else if idx == DRAW_IDX {
+                        self.switch_to(Slot::Draw, ctx);
                     }
                 }
             }
             Slot::Notes => self.notes.handle(event, ctx),
+            Slot::Draw => self.draw.handle(event, ctx),
         }
     }
 }
@@ -244,7 +254,7 @@ impl App for Host {
                 if hit_test(&strip_home_rect(), x, y) {
                     self.switch_to(Slot::Launcher, ctx);
                 } else if hit_test(&strip_menu_rect(), x, y) {
-                    // Menu action — not wired to an app yet.
+                    self.forward_to_child(Event::Menu, ctx);
                 }
             }
             return;
@@ -260,16 +270,13 @@ impl App for Host {
         match self.active {
             Slot::Launcher => self.launcher.draw(canvas),
             Slot::Notes => self.notes.draw(canvas),
+            Slot::Draw => self.draw.draw(canvas),
         }
         draw_system_strip(canvas, self.active_label());
     }
 }
 
 fn main() {
-    let mut platform = HostedPlatform::new(
-        "SoulOS",
-        SCREEN_WIDTH as u32,
-        SCREEN_HEIGHT as u32,
-    );
+    let mut platform = HostedPlatform::new("SoulOS", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
     run(&mut platform, Host::new());
 }
