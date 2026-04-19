@@ -1,15 +1,12 @@
+use crate::primitives::{button, hit_test, label};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use embedded_graphics::{
+    draw_target::DrawTarget, pixelcolor::Gray8, prelude::*, primitives::Rectangle,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use embedded_graphics::{
-    draw_target::DrawTarget,
-    pixelcolor::Gray8,
-    prelude::*,
-    primitives::Rectangle,
-};
-use crate::primitives::{button, label, hit_test};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rect {
@@ -109,8 +106,8 @@ impl Form {
         } else if selector.starts_with('[') && selector.ends_with(']') {
             let content = &selector[1..selector.len() - 1];
             return self.components.iter().find(|c| {
-                c.properties.get("label").and_then(|v| v.as_str()) == Some(content) ||
-                c.properties.get("text").and_then(|v| v.as_str()) == Some(content)
+                c.properties.get("label").and_then(|v| v.as_str()) == Some(content)
+                    || c.properties.get("text").and_then(|v| v.as_str()) == Some(content)
             });
         }
         None
@@ -126,8 +123,8 @@ impl Form {
         } else if selector.starts_with('[') && selector.ends_with(']') {
             let content = &selector[1..selector.len() - 1];
             return self.components.iter_mut().find(|c| {
-                c.properties.get("label").and_then(|v| v.as_str()) == Some(content) ||
-                c.properties.get("text").and_then(|v| v.as_str()) == Some(content)
+                c.properties.get("label").and_then(|v| v.as_str()) == Some(content)
+                    || c.properties.get("text").and_then(|v| v.as_str()) == Some(content)
             });
         }
         None
@@ -145,22 +142,33 @@ impl Form {
                     if let Some(color_val) = comp.properties.get("color").and_then(|v| v.as_i64()) {
                         let color = Gray8::new(color_val as u8);
                         let style = if pressed {
-                            embedded_graphics::primitives::PrimitiveStyle::with_fill(crate::palette::BLACK)
+                            embedded_graphics::primitives::PrimitiveStyle::with_fill(
+                                crate::palette::BLACK,
+                            )
                         } else {
                             embedded_graphics::primitives::PrimitiveStyle::with_fill(color)
                         };
                         rect.into_styled(style).draw(target)?;
-                        rect.into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1))
-                            .draw(target)?;
+                        rect.into_styled(
+                            embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                                crate::palette::BLACK,
+                                1,
+                            ),
+                        )
+                        .draw(target)?;
                     } else {
-                        let text = comp.properties.get("label")
+                        let text = comp
+                            .properties
+                            .get("label")
                             .and_then(|v| v.as_str())
                             .unwrap_or(&comp.id);
                         button(target, rect, text, pressed)?;
                     }
                 }
                 ComponentType::Label => {
-                    let text = comp.properties.get("text")
+                    let text = comp
+                        .properties
+                        .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&comp.id);
                     label(target, rect.top_left, text)?;
@@ -169,49 +177,73 @@ impl Form {
                     // Draw a placeholder box for TextInput
                     target.fill_contiguous(
                         &rect,
-                        core::iter::repeat(crate::palette::WHITE).take(rect.size.width as usize * rect.size.height as usize)
+                        core::iter::repeat(crate::palette::WHITE)
+                            .take(rect.size.width as usize * rect.size.height as usize),
                     )?;
-                    rect.into_styled(
-                        embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1)
-                    ).draw(target)?;
-                    let text = comp.properties.get("text")
+                    rect.into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                        crate::palette::BLACK,
+                        1,
+                    ))
+                    .draw(target)?;
+                    let text = comp
+                        .properties
+                        .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     label(target, rect.top_left + Point::new(2, 2), text)?;
                 }
                 ComponentType::TextArea => {
                     // Draw a placeholder box for TextArea
-                    rect.into_styled(
-                        embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::GRAY, 1)
-                    ).draw(target)?;
+                    rect.into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                        crate::palette::GRAY,
+                        1,
+                    ))
+                    .draw(target)?;
                 }
                 ComponentType::Canvas => {
-                    rect.into_styled(
-                        embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1)
-                    ).draw(target)?;
+                    rect.into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                        crate::palette::BLACK,
+                        1,
+                    ))
+                    .draw(target)?;
                 }
                 ComponentType::Checkbox => {
-                    let checked = comp.properties.get("checked")
+                    let checked = comp
+                        .properties
+                        .get("checked")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let box_rect = Rectangle::new(rect.top_left, Size::new(12, 12));
-                    box_rect.into_styled(
-                        embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1)
-                    ).draw(target)?;
+                    box_rect
+                        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                            crate::palette::BLACK,
+                            1,
+                        ))
+                        .draw(target)?;
                     if checked {
                         // Draw a cross
                         embedded_graphics::primitives::Line::new(
                             box_rect.top_left,
-                            box_rect.top_left + Point::new(11, 11)
-                        ).into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1))
+                            box_rect.top_left + Point::new(11, 11),
+                        )
+                        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                            crate::palette::BLACK,
+                            1,
+                        ))
                         .draw(target)?;
                         embedded_graphics::primitives::Line::new(
                             box_rect.top_left + Point::new(11, 0),
-                            box_rect.top_left + Point::new(0, 11)
-                        ).into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(crate::palette::BLACK, 1))
+                            box_rect.top_left + Point::new(0, 11),
+                        )
+                        .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
+                            crate::palette::BLACK,
+                            1,
+                        ))
                         .draw(target)?;
                     }
-                    let text = comp.properties.get("label")
+                    let text = comp
+                        .properties
+                        .get("label")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&comp.id);
                     label(target, rect.top_left + Point::new(16, 1), text)?;
@@ -272,10 +304,13 @@ impl Form {
     }
 
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
-        self.components.iter().map(|c| soul_core::a11y::A11yNode {
-            bounds: c.bounds.to_eg_rect(),
-            label: c.a11y.label.clone(),
-            role: c.a11y.role.clone(),
-        }).collect()
+        self.components
+            .iter()
+            .map(|c| soul_core::a11y::A11yNode {
+                bounds: c.bounds.to_eg_rect(),
+                label: c.a11y.label.clone(),
+                role: c.a11y.role.clone(),
+            })
+            .collect()
     }
 }

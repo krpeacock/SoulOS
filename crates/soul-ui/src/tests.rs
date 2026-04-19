@@ -1,4 +1,4 @@
-use crate::form::{Action, Form, Component, ComponentType, Interaction, Rect, A11yHints, Trigger};
+use crate::form::{A11yHints, Action, Component, ComponentType, Form, Interaction, Rect, Trigger};
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -10,7 +10,10 @@ fn make_button(id: &str, x: i32, y: i32, interactions: Vec<Interaction>) -> Comp
         type_: ComponentType::Button,
         bounds: Rect { x, y, w: 60, h: 20 },
         properties: BTreeMap::from([("label".into(), id.into())]),
-        a11y: A11yHints { label: id.into(), role: "button".into() },
+        a11y: A11yHints {
+            label: id.into(),
+            role: "button".into(),
+        },
         interactions,
         binding: None,
     }
@@ -30,9 +33,15 @@ fn test_query_selector() {
 #[test]
 fn test_dispatch_returns_action_for_matching_trigger() {
     let mut form = Form::new("test");
-    form.components.push(make_button("btn_save", 10, 280, vec![
-        Interaction { trigger: Trigger::OnTap, action: Action::SaveRecord(0) },
-    ]));
+    form.components.push(make_button(
+        "btn_save",
+        10,
+        280,
+        vec![Interaction {
+            trigger: Trigger::OnTap,
+            action: Action::SaveRecord(0),
+        }],
+    ));
 
     let action = form.dispatch(Trigger::OnTap, "btn_save");
     assert!(matches!(action, Some(Action::SaveRecord(0))));
@@ -41,9 +50,15 @@ fn test_dispatch_returns_action_for_matching_trigger() {
 #[test]
 fn test_dispatch_returns_none_for_wrong_trigger() {
     let mut form = Form::new("test");
-    form.components.push(make_button("btn_save", 10, 280, vec![
-        Interaction { trigger: Trigger::OnTap, action: Action::SaveRecord(0) },
-    ]));
+    form.components.push(make_button(
+        "btn_save",
+        10,
+        280,
+        vec![Interaction {
+            trigger: Trigger::OnTap,
+            action: Action::SaveRecord(0),
+        }],
+    ));
 
     assert!(form.dispatch(Trigger::OnChange, "btn_save").is_none());
 }
@@ -57,9 +72,15 @@ fn test_dispatch_returns_none_for_unknown_component() {
 #[test]
 fn test_tap_dispatch_hits_component_with_action() {
     let mut form = Form::new("test");
-    form.components.push(make_button("btn_nav", 10, 10, vec![
-        Interaction { trigger: Trigger::OnTap, action: Action::Navigate("screen2".into()) },
-    ]));
+    form.components.push(make_button(
+        "btn_nav",
+        10,
+        10,
+        vec![Interaction {
+            trigger: Trigger::OnTap,
+            action: Action::Navigate("screen2".into()),
+        }],
+    ));
 
     let result = form.tap_dispatch(40, 20);
     assert!(result.is_some());
@@ -91,10 +112,24 @@ fn test_tap_dispatch_misses_returns_none() {
 #[test]
 fn test_dispatch_first_matching_trigger_wins() {
     let mut form = Form::new("test");
-    form.components.push(make_button("btn", 0, 0, vec![
-        Interaction { trigger: Trigger::OnTap, action: Action::CloseApp },
-        Interaction { trigger: Trigger::OnTap, action: Action::DeleteRecord },
-    ]));
+    form.components.push(make_button(
+        "btn",
+        0,
+        0,
+        vec![
+            Interaction {
+                trigger: Trigger::OnTap,
+                action: Action::CloseApp,
+            },
+            Interaction {
+                trigger: Trigger::OnTap,
+                action: Action::DeleteRecord,
+            },
+        ],
+    ));
 
-    assert!(matches!(form.dispatch(Trigger::OnTap, "btn"), Some(Action::CloseApp)));
+    assert!(matches!(
+        form.dispatch(Trigger::OnTap, "btn"),
+        Some(Action::CloseApp)
+    ));
 }

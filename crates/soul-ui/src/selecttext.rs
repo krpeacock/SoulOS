@@ -13,7 +13,7 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 
-use crate::{BLACK, WHITE, GRAY};
+use crate::{BLACK, GRAY, WHITE};
 
 /// Tracks text selection state and handles user interaction.
 #[derive(Clone, Debug)]
@@ -31,12 +31,12 @@ pub struct SelectableText {
 impl SelectableText {
     /// Create a new selectable text widget.
     pub fn new(area: Rectangle, text: String) -> Self {
-        let char_width = 6;  // FONT_6X10 character width
+        let char_width = 6; // FONT_6X10 character width
         let char_height = 10; // FONT_6X10 character height
         let chars_per_line = (area.size.width as i32 / char_width) as usize;
-        
+
         let lines = Self::wrap_text(&text, chars_per_line);
-        
+
         Self {
             area,
             text,
@@ -130,18 +130,18 @@ impl SelectableText {
     fn point_to_char(&self, x: i16, y: i16) -> Option<usize> {
         let x = x as i32;
         let y = y as i32;
-        
+
         let rel_x = x - self.area.top_left.x;
         let rel_y = y - self.area.top_left.y;
-        
+
         let line = (rel_y / self.char_height) as usize;
         let col = (rel_x / self.char_width) as usize;
-        
+
         if line >= self.lines.len() {
             // Past the end, select end of text
             return Some(self.text.len());
         }
-        
+
         let mut char_idx = 0;
         for (i, line_text) in self.lines.iter().enumerate() {
             if i == line {
@@ -150,7 +150,7 @@ impl SelectableText {
             }
             char_idx += line_text.len() + 1; // +1 for newline (conceptual)
         }
-        
+
         Some(char_idx)
     }
 
@@ -192,7 +192,8 @@ impl SelectableText {
         D: DrawTarget<Color = Gray8>,
     {
         // Draw background
-        let _ = self.area
+        let _ = self
+            .area
             .into_styled(PrimitiveStyle::with_fill(WHITE))
             .draw(canvas);
 
@@ -228,29 +229,27 @@ impl SelectableText {
         // This is a simplified version - in practice you'd need to handle
         // multi-line selections properly
         let mut current_char = 0;
-        
+
         for (line_idx, line) in self.lines.iter().enumerate() {
             let line_start = current_char;
             let line_end = current_char + line.len();
-            
+
             if start_idx < line_end && end_idx > line_start {
                 let sel_start = start_idx.max(line_start) - line_start;
                 let sel_end = end_idx.min(line_end) - line_start;
-                
+
                 let x = self.area.top_left.x + sel_start as i32 * self.char_width;
                 let y = self.area.top_left.y + line_idx as i32 * self.char_height;
                 let width = (sel_end - sel_start) as u32 * self.char_width as u32;
-                
-                let selection_rect = Rectangle::new(
-                    Point::new(x, y),
-                    Size::new(width, self.char_height as u32),
-                );
-                
+
+                let selection_rect =
+                    Rectangle::new(Point::new(x, y), Size::new(width, self.char_height as u32));
+
                 let _ = selection_rect
                     .into_styled(PrimitiveStyle::with_fill(GRAY))
                     .draw(canvas);
             }
-            
+
             current_char = line_end + 1; // +1 for conceptual newline
         }
     }
@@ -265,10 +264,10 @@ mod tests {
     fn test_wrap_text() {
         let lines = SelectableText::wrap_text("hello world test", 10);
         assert_eq!(lines, vec!["hello", "world test"]);
-        
+
         let lines = SelectableText::wrap_text("short", 10);
         assert_eq!(lines, vec!["short"]);
-        
+
         let lines = SelectableText::wrap_text("", 10);
         assert_eq!(lines, vec![""]);
     }
@@ -277,14 +276,14 @@ mod tests {
     fn test_selection() {
         let area = Rectangle::new(Point::new(0, 0), Size::new(100, 50));
         let mut text = SelectableText::new(area, "hello world".to_string());
-        
+
         assert!(text.selected_text().is_none());
-        
+
         // Simulate selection
         text.selection_start = Some(0);
         text.selection_end = Some(5);
         assert_eq!(text.selected_text(), Some("hello".to_string()));
-        
+
         text.clear_selection();
         assert!(text.selected_text().is_none());
     }

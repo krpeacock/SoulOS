@@ -1,9 +1,13 @@
 use embedded_graphics::{
-    draw_target::DrawTarget, pixelcolor::Gray8, prelude::*,
-    primitives::{Rectangle, PrimitiveStyle},
+    draw_target::DrawTarget,
+    pixelcolor::Gray8,
+    prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
 };
-use soul_core::{App, Ctx, Event, SCREEN_WIDTH, APP_HEIGHT};
-use soul_ui::{Form, Component, ComponentType, Rect, A11yHints, EditOverlay, title_bar, button, label};
+use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
+use soul_ui::{
+    button, label, title_bar, A11yHints, Component, ComponentType, EditOverlay, Form, Rect,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -42,6 +46,9 @@ const BUILDER_MENU: &[&str] = &[
 ];
 
 impl MobileBuilder {
+    pub const APP_ID: &'static str = "com.soulos.builder";
+    pub const NAME: &'static str = "Builder";
+
     pub fn new() -> Self {
         let db_path = std::env::var("SOUL_BUILDER_CACHE")
             .map(PathBuf::from)
@@ -58,7 +65,7 @@ impl MobileBuilder {
         }
     }
 
-    fn persist(&self) {
+    pub fn persist(&self) {
         if let Some(parent) = self.db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -68,14 +75,18 @@ impl MobileBuilder {
     }
 
     fn add_component(&mut self, type_: ComponentType) {
-        let id = format!("{}_{}", match type_ {
-            ComponentType::Button => "btn",
-            ComponentType::Label => "lbl",
-            ComponentType::TextInput => "input",
-            ComponentType::TextArea => "area",
-            ComponentType::Canvas => "canvas",
-            ComponentType::Checkbox => "check",
-        }, self.form.components.len());
+        let id = format!(
+            "{}_{}",
+            match type_ {
+                ComponentType::Button => "btn",
+                ComponentType::Label => "lbl",
+                ComponentType::TextInput => "input",
+                ComponentType::TextArea => "area",
+                ComponentType::Canvas => "canvas",
+                ComponentType::Checkbox => "check",
+            },
+            self.form.components.len()
+        );
 
         let mut properties = BTreeMap::new();
         let label_text = match type_ {
@@ -99,9 +110,17 @@ impl MobileBuilder {
             id: id.clone(),
             class: String::new(),
             type_,
-            bounds: Rect { x: 20 + offset, y: 40 + offset, w: 80, h: 24 },
+            bounds: Rect {
+                x: 20 + offset,
+                y: 40 + offset,
+                w: 80,
+                h: 24,
+            },
             properties,
-            a11y: A11yHints { label: id, role: "widget".into() },
+            a11y: A11yHints {
+                label: id,
+                role: "widget".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -111,22 +130,33 @@ impl MobileBuilder {
     fn menu_item_rect(i: usize) -> Rectangle {
         let col = (i % 2) as i32;
         let row = (i / 2) as i32;
-        Rectangle::new(Point::new(15 + col * 105, 25 + row * 24), Size::new(100, 22))
+        Rectangle::new(
+            Point::new(15 + col * 105, 25 + row * 24),
+            Size::new(100, 22),
+        )
     }
 
     fn start_editing(&mut self, field: EditField) {
         if let Some(id) = &self.edit_overlay.selected_id {
             if let Some(comp) = self.form.components.iter().find(|c| &c.id == id) {
-                let mut input = soul_ui::TextInput::with_placeholder(Rectangle::new(Point::new(20, 100), Size::new(200, 24)), match field {
-                    EditField::Id => "id",
-                    EditField::Class => "class",
-                    EditField::Label => "label",
-                    EditField::Binding => "binding",
-                });
+                let mut input = soul_ui::TextInput::with_placeholder(
+                    Rectangle::new(Point::new(20, 100), Size::new(200, 24)),
+                    match field {
+                        EditField::Id => "id",
+                        EditField::Class => "class",
+                        EditField::Label => "label",
+                        EditField::Binding => "binding",
+                    },
+                );
                 let current = match field {
                     EditField::Id => comp.id.clone(),
                     EditField::Class => comp.class.clone(),
-                    EditField::Label => comp.properties.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    EditField::Label => comp
+                        .properties
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     EditField::Binding => comp.binding.clone().unwrap_or_default(),
                 };
                 let _ = input.set_text(current);
@@ -146,7 +176,11 @@ impl App for MobileBuilder {
                     ctx.invalidate_all();
                     return;
                 }
-                Event::Key(soul_core::KeyCode::Backspace) => { let _ = input.backspace(); ctx.invalidate_all(); return; }
+                Event::Key(soul_core::KeyCode::Backspace) => {
+                    let _ = input.backspace();
+                    ctx.invalidate_all();
+                    return;
+                }
                 Event::Key(soul_core::KeyCode::Enter) => {
                     let new_val = input.text().to_string();
                     let old_id = self.edit_overlay.selected_id.clone();
@@ -156,8 +190,10 @@ impl App for MobileBuilder {
                                 EditField::Id => comp.id = new_val.clone(),
                                 EditField::Class => comp.class = new_val.clone(),
                                 EditField::Label => {
-                                    comp.properties.insert("label".into(), new_val.clone().into());
-                                    comp.properties.insert("text".into(), new_val.clone().into());
+                                    comp.properties
+                                        .insert("label".into(), new_val.clone().into());
+                                    comp.properties
+                                        .insert("text".into(), new_val.clone().into());
                                 }
                                 EditField::Binding => comp.binding = Some(new_val.clone()),
                             }
@@ -173,7 +209,9 @@ impl App for MobileBuilder {
                 Event::PenDown { x, y } => {
                     if (y as i32) >= (APP_HEIGHT as i32 - soul_ui::KEYBOARD_HEIGHT as i32) {
                         let out = self.keyboard.pen_moved(x, y);
-                        if let Some(r) = out { ctx.invalidate(r); }
+                        if let Some(r) = out {
+                            ctx.invalidate(r);
+                        }
                     } else if !input.contains(x, y) {
                         self.editing_value = None;
                         ctx.invalidate_all();
@@ -183,34 +221,50 @@ impl App for MobileBuilder {
                 Event::PenMove { x, y } => {
                     if (y as i32) >= (APP_HEIGHT as i32 - soul_ui::KEYBOARD_HEIGHT as i32) {
                         let out = self.keyboard.pen_moved(x, y);
-                        if let Some(r) = out { ctx.invalidate(r); }
+                        if let Some(r) = out {
+                            ctx.invalidate(r);
+                        }
                     }
                     return;
                 }
                 Event::PenUp { x, y } => {
                     if (y as i32) >= (APP_HEIGHT as i32 - soul_ui::KEYBOARD_HEIGHT as i32) {
                         let out = self.keyboard.pen_released(x, y);
-                        if let Some(r) = out.dirty { ctx.invalidate(r); }
+                        if let Some(r) = out.dirty {
+                            ctx.invalidate(r);
+                        }
                         if let Some(typed) = out.typed {
                             match typed {
                                 soul_ui::TypedKey::Char(c) => {
                                     ctx.a11y.speak(&c.to_string());
                                     let _ = input.insert_char(c);
                                 }
-                                soul_ui::TypedKey::Backspace => { let _ = input.backspace(); }
+                                soul_ui::TypedKey::Backspace => {
+                                    let _ = input.backspace();
+                                }
                                 soul_ui::TypedKey::Enter => {
                                     let new_val = input.text().to_string();
                                     let old_id = self.edit_overlay.selected_id.clone();
                                     if let Some(id) = old_id {
-                                        if let Some(comp) = self.form.components.iter_mut().find(|c| c.id == id) {
+                                        if let Some(comp) =
+                                            self.form.components.iter_mut().find(|c| c.id == id)
+                                        {
                                             match field {
                                                 EditField::Id => comp.id = new_val.clone(),
                                                 EditField::Class => comp.class = new_val.clone(),
                                                 EditField::Label => {
-                                                    comp.properties.insert("label".into(), new_val.clone().into());
-                                                    comp.properties.insert("text".into(), new_val.clone().into());
+                                                    comp.properties.insert(
+                                                        "label".into(),
+                                                        new_val.clone().into(),
+                                                    );
+                                                    comp.properties.insert(
+                                                        "text".into(),
+                                                        new_val.clone().into(),
+                                                    );
                                                 }
-                                                EditField::Binding => comp.binding = Some(new_val.clone()),
+                                                EditField::Binding => {
+                                                    comp.binding = Some(new_val.clone())
+                                                }
                                             }
                                             if matches!(field, EditField::Id) {
                                                 self.edit_overlay.selected_id = Some(new_val);
@@ -236,9 +290,8 @@ impl App for MobileBuilder {
             }
             Event::PenDown { x, y } => {
                 if self.menu_open {
-                    self.menu_touch = (0..BUILDER_MENU.len()).find(|&i| {
-                        soul_ui::hit_test(&Self::menu_item_rect(i), x, y)
-                    });
+                    self.menu_touch = (0..BUILDER_MENU.len())
+                        .find(|&i| soul_ui::hit_test(&Self::menu_item_rect(i), x, y));
                     ctx.invalidate_all();
                     return;
                 }
@@ -269,7 +322,9 @@ impl App for MobileBuilder {
                                 7 => self.start_editing(EditField::Class),
                                 8 => self.start_editing(EditField::Label),
                                 9 => self.start_editing(EditField::Binding),
-                                10 => { self.edit_overlay.delete_selected(&mut self.form); },
+                                10 => {
+                                    self.edit_overlay.delete_selected(&mut self.form);
+                                }
                                 11 => self.persist(),
                                 _ => {}
                             }
@@ -298,15 +353,28 @@ impl App for MobileBuilder {
         if let Some(id) = &self.edit_overlay.selected_id {
             if let Some(comp) = self.form.components.iter().find(|c| &c.id == id) {
                 let bind = comp.binding.as_deref().unwrap_or("none");
-                let info = format!("{} ({}): {},{} {}x{} [b:{}]", comp.id, comp.class, comp.bounds.x, comp.bounds.y, comp.bounds.w, comp.bounds.h, bind);
+                let info = format!(
+                    "{} ({}): {},{} {}x{} [b:{}]",
+                    comp.id,
+                    comp.class,
+                    comp.bounds.x,
+                    comp.bounds.y,
+                    comp.bounds.w,
+                    comp.bounds.h,
+                    bind
+                );
                 let _ = label(canvas, Point::new(4, APP_HEIGHT as i32 - 12), &info);
             }
         }
 
         if self.menu_open {
             let rect = Rectangle::new(Point::new(10, 15), Size::new(220, 210));
-            let _ = rect.into_styled(PrimitiveStyle::with_fill(soul_ui::WHITE)).draw(canvas);
-            let _ = rect.into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1)).draw(canvas);
+            let _ = rect
+                .into_styled(PrimitiveStyle::with_fill(soul_ui::WHITE))
+                .draw(canvas);
+            let _ = rect
+                .into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1))
+                .draw(canvas);
             for i in 0..BUILDER_MENU.len() {
                 let pressed = self.menu_touch == Some(i);
                 let _ = button(canvas, Self::menu_item_rect(i), BUILDER_MENU[i], pressed);
@@ -315,8 +383,12 @@ impl App for MobileBuilder {
 
         if let Some((input, field)) = &mut self.editing_value {
             let rect = Rectangle::new(Point::new(10, 20), Size::new(220, 60));
-            let _ = rect.into_styled(PrimitiveStyle::with_fill(soul_ui::WHITE)).draw(canvas);
-            let _ = rect.into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1)).draw(canvas);
+            let _ = rect
+                .into_styled(PrimitiveStyle::with_fill(soul_ui::WHITE))
+                .draw(canvas);
+            let _ = rect
+                .into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1))
+                .draw(canvas);
             let title = match field {
                 EditField::Id => "Edit Id:",
                 EditField::Class => "Edit Class:",
@@ -343,4 +415,3 @@ impl App for MobileBuilder {
         nodes
     }
 }
-

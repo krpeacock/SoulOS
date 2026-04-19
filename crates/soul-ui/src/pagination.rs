@@ -5,13 +5,10 @@
 
 use alloc::format;
 use embedded_graphics::{
-    draw_target::DrawTarget,
-    pixelcolor::Gray8,
-    prelude::*,
-    primitives::Rectangle,
+    draw_target::DrawTarget, pixelcolor::Gray8, prelude::*, primitives::Rectangle,
 };
 
-use crate::{button, label, hit_test};
+use crate::{button, hit_test, label};
 
 /// Pagination widget state and rendering.
 #[derive(Clone, Debug)]
@@ -43,7 +40,7 @@ impl Pagination {
         } else {
             (total_items + self.items_per_page - 1) / self.items_per_page
         };
-        
+
         // Ensure current page is valid
         if self.current_page >= self.total_pages {
             self.current_page = self.total_pages.saturating_sub(1);
@@ -145,10 +142,7 @@ impl Pagination {
     /// Get the rectangle for the next page button.
     fn next_button_rect(&self) -> Rectangle {
         let x = self.area.top_left.x + self.area.size.width as i32 - 30;
-        Rectangle::new(
-            Point::new(x, self.area.top_left.y),
-            Size::new(30, 20),
-        )
+        Rectangle::new(Point::new(x, self.area.top_left.y), Size::new(30, 20))
     }
 
     /// Draw the pagination widget.
@@ -162,12 +156,7 @@ impl Pagination {
 
         // Draw previous button
         let _prev_enabled = self.current_page > 0;
-        let _ = button(
-            canvas,
-            self.prev_button_rect(),
-            "‹",
-            false,
-        );
+        let _ = button(canvas, self.prev_button_rect(), "‹", false);
 
         // Draw page info in center
         let page_info = format!("{}/{}", self.current_page + 1, self.total_pages);
@@ -180,12 +169,7 @@ impl Pagination {
 
         // Draw next button
         let _next_enabled = self.current_page + 1 < self.total_pages;
-        let _ = button(
-            canvas,
-            self.next_button_rect(),
-            "›",
-            false,
-        );
+        let _ = button(canvas, self.next_button_rect(), "›", false);
 
         // Show additional info if space allows
         if self.area.size.width >= 200 {
@@ -216,10 +200,10 @@ mod tests {
     fn test_pagination_basic() {
         let area = Rectangle::new(Point::new(0, 0), Size::new(200, 30));
         let mut pagination = Pagination::new(area, 10);
-        
+
         assert_eq!(pagination.current_page(), 0);
         assert_eq!(pagination.total_pages(), 1);
-        
+
         pagination.set_total_items(25);
         assert_eq!(pagination.total_pages(), 3);
         assert_eq!(pagination.page_start_index(), 0);
@@ -231,19 +215,19 @@ mod tests {
         let area = Rectangle::new(Point::new(0, 0), Size::new(200, 30));
         let mut pagination = Pagination::new(area, 10);
         pagination.set_total_items(25);
-        
+
         assert!(pagination.next_page());
         assert_eq!(pagination.current_page(), 1);
         assert_eq!(pagination.page_start_index(), 10);
         assert_eq!(pagination.page_end_index(), 20);
-        
+
         assert!(pagination.next_page());
         assert_eq!(pagination.current_page(), 2);
         assert_eq!(pagination.page_start_index(), 20);
         assert_eq!(pagination.page_end_index(), 25);
-        
+
         assert!(!pagination.next_page()); // Can't go past last page
-        
+
         assert!(pagination.prev_page());
         assert_eq!(pagination.current_page(), 1);
     }
@@ -253,10 +237,10 @@ mod tests {
         let area = Rectangle::new(Point::new(0, 0), Size::new(200, 30));
         let mut pagination = Pagination::new(area, 10);
         pagination.set_total_items(50);
-        
+
         assert!(pagination.go_to_page(3));
         assert_eq!(pagination.current_page(), 3);
-        
+
         assert!(!pagination.go_to_page(10)); // Invalid page
         assert_eq!(pagination.current_page(), 3); // Unchanged
     }

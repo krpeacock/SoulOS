@@ -9,9 +9,10 @@
 //! Use **Menu** (system strip or **F6**) for file and background actions.
 //!
 //! Launcher icons live in the `launcher_icons` database, persisted under
-//! `.soulos/launcher_icons.sdb` (see `launcher_store`). The first run
-//! seeds from `assets/sprites/`. Use **Menu → Open icon…** to edit the
-//! launcher-sized icon in the centered region; **Save** writes back and flushes the cache.
+//! `.soulos/launcher_icons.sdb` (see `launcher_store`). The DB is seeded
+//! lazily from `assets/sprites/` the first time the icon picker is opened.
+//! Use **Menu → Open icon…** to edit the launcher-sized icon; **Save** writes
+//! back and persists the cache.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -20,18 +21,14 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
 };
 use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
-use soul_ui::{
-    button, hit_test, label, title_bar, TextInput, TextInputOutput, BLACK, GRAY, TITLE_BAR_H,
-};
-use std::cell::RefCell;
+use soul_ui::{button, hit_test, label, title_bar, TextInput, TextInputOutput, BLACK, TITLE_BAR_H};
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use crate::launcher_store::LauncherIconStore;
-use crate::{APPS, ICON_CELL};
+use crate::ICON_CELL;
 
 const LOG_W: usize = 48;
 const LOG_H: usize = 48;
@@ -113,7 +110,7 @@ enum Mode {
 }
 
 pub struct Draw {
-    launcher_icons: Rc<RefCell<LauncherIconStore>>,
+    launcher_icons: LauncherIconStore,
     edit: EditTarget,
     fg: Vec<u8>,
     written: Vec<bool>,
@@ -138,6 +135,9 @@ pub struct Draw {
 }
 
 impl Draw {
+    pub const APP_ID: &'static str = "com.soulos.draw";
+    pub const NAME: &'static str = "Draw";
+
     fn validate_background(&mut self) {
         if let Some(ref bg) = self.bg {
             if bg.len() != LOG_W * LOG_H {
@@ -147,7 +147,8 @@ impl Draw {
         }
     }
 
-    pub fn new(launcher_icons: Rc<RefCell<LauncherIconStore>>) -> Self {
+    pub fn new() -> Self {
+        let launcher_icons = LauncherIconStore::load_or_empty();
         let draw_dir = std::env::var("SOUL_DRAW_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("assets/draw"));
@@ -234,10 +235,10 @@ impl Draw {
     }
 
     fn default_draw_ui() -> soul_ui::Form {
-        use soul_ui::{Form, Component, ComponentType, Rect, A11yHints};
+        use soul_ui::{A11yHints, Component, ComponentType, Form, Rect};
         use std::collections::BTreeMap;
         let mut form = Form::new("draw_ui");
-        
+
         let row1_y = 15 + 240;
         let row2_y = row1_y + 26;
 
@@ -245,9 +246,17 @@ impl Draw {
             id: "tool_brush".into(),
             class: "tool".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 4, y: row1_y + 2, w: 32, h: 18 },
+            bounds: Rect {
+                x: 4,
+                y: row1_y + 2,
+                w: 32,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "Pen".into())]),
-            a11y: A11yHints { label: "Pen tool".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Pen tool".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -255,9 +264,17 @@ impl Draw {
             id: "tool_fill".into(),
             class: "tool".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 40, y: row1_y + 2, w: 32, h: 18 },
+            bounds: Rect {
+                x: 40,
+                y: row1_y + 2,
+                w: 32,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "Fill".into())]),
-            a11y: A11yHints { label: "Fill tool".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Fill tool".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -265,9 +282,17 @@ impl Draw {
             id: "tool_eraser".into(),
             class: "tool".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 60, y: row1_y + 2, w: 38, h: 18 },
+            bounds: Rect {
+                x: 60,
+                y: row1_y + 2,
+                w: 38,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "Erase".into())]),
-            a11y: A11yHints { label: "Eraser tool".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Eraser tool".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -276,9 +301,17 @@ impl Draw {
             id: "brush_minus".into(),
             class: "brush-ctrl".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 102, y: row1_y + 2, w: 20, h: 18 },
+            bounds: Rect {
+                x: 102,
+                y: row1_y + 2,
+                w: 20,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "-".into())]),
-            a11y: A11yHints { label: "Decrease brush size".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Decrease brush size".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -286,9 +319,17 @@ impl Draw {
             id: "brush_plus".into(),
             class: "brush-ctrl".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 126, y: row1_y + 2, w: 20, h: 18 },
+            bounds: Rect {
+                x: 126,
+                y: row1_y + 2,
+                w: 20,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "+".into())]),
-            a11y: A11yHints { label: "Increase brush size".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Increase brush size".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -296,9 +337,17 @@ impl Draw {
             id: "undo".into(),
             class: "action".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 154, y: row1_y + 2, w: 36, h: 18 },
+            bounds: Rect {
+                x: 154,
+                y: row1_y + 2,
+                w: 36,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "Undo".into())]),
-            a11y: A11yHints { label: "Undo last stroke".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Undo last stroke".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -306,9 +355,17 @@ impl Draw {
             id: "clear".into(),
             class: "action".into(),
             type_: ComponentType::Button,
-            bounds: Rect { x: 196, y: row1_y + 2, w: 40, h: 18 },
+            bounds: Rect {
+                x: 196,
+                y: row1_y + 2,
+                w: 40,
+                h: 18,
+            },
             properties: BTreeMap::from([("label".into(), "Clear".into())]),
-            a11y: A11yHints { label: "Clear canvas".into(), role: "button".into() },
+            a11y: A11yHints {
+                label: "Clear canvas".into(),
+                role: "button".into(),
+            },
             interactions: Vec::new(),
             binding: None,
         });
@@ -319,14 +376,22 @@ impl Draw {
                 id: format!("ink_{}", i),
                 class: "ink".into(),
                 type_: ComponentType::Button,
-                bounds: Rect { x, y: row2_y + 2, w: 24, h: 16 },
+                bounds: Rect {
+                    x,
+                    y: row2_y + 2,
+                    w: 24,
+                    h: 16,
+                },
                 properties: BTreeMap::from([("color".into(), (*g as i64).into())]),
-                a11y: A11yHints { label: format!("Gray level {}", i), role: "button".into() },
+                a11y: A11yHints {
+                    label: format!("Gray level {}", i),
+                    role: "button".into(),
+                },
                 interactions: Vec::new(),
                 binding: None,
             });
         }
-        
+
         form
     }
 
@@ -369,11 +434,7 @@ impl Draw {
         }
         if matches!(self.edit, EditTarget::Icon(_)) {
             let cell = ICON_CELL as usize;
-            if lx < ICON_OX
-                || lx >= ICON_OX + cell
-                || ly < ICON_OY
-                || ly >= ICON_OY + cell
-            {
+            if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell {
                 return None;
             }
         }
@@ -383,7 +444,10 @@ impl Draw {
     fn rect_menu_entry(i: usize) -> Rectangle {
         let col = (i % 2) as i32;
         let row = (i / 2) as i32;
-        Rectangle::new(Point::new(15 + col * 105, 60 + row * 26), Size::new(100, 22))
+        Rectangle::new(
+            Point::new(15 + col * 105, 60 + row * 26),
+            Size::new(100, 22),
+        )
     }
 
     fn rect_save_as_input() -> Rectangle {
@@ -465,19 +529,16 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
-                
+
                 // In icon editing mode, only paint within icon bounds
                 if matches!(self.edit, EditTarget::Icon(_)) {
                     let cell = ICON_CELL as usize;
-                    if lx < ICON_OX
-                        || lx >= ICON_OX + cell
-                        || ly < ICON_OY
-                        || ly >= ICON_OY + cell
+                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell
                     {
                         continue;
                     }
                 }
-                
+
                 let i = ly * LOG_W + lx;
                 if self.written[i] && self.fg[i] == self.brush {
                     continue;
@@ -507,19 +568,16 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
-                
+
                 // In icon editing mode, only erase within icon bounds
                 if matches!(self.edit, EditTarget::Icon(_)) {
                     let cell = ICON_CELL as usize;
-                    if lx < ICON_OX
-                        || lx >= ICON_OX + cell
-                        || ly < ICON_OY
-                        || ly >= ICON_OY + cell
+                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell
                     {
                         continue;
                     }
                 }
-                
+
                 let i = ly * LOG_W + lx;
                 if !self.written[i] {
                     continue;
@@ -546,7 +604,7 @@ impl Draw {
         if target == self.brush {
             return;
         }
-        
+
         self.push_undo();
         let mut seen = vec![false; LOG_W * LOG_H];
         let mut q = VecDeque::new();
@@ -691,8 +749,14 @@ impl Draw {
                 let scaled_data = scale_image_to_canvas(&data, w, h, LOG_W, LOG_H);
                 self.bg = Some(scaled_data);
                 ctx.invalidate(Self::canvas_screen_rect());
-                eprintln!("draw: background {} scaled from {}×{} to {}×{}", 
-                         path.display(), w, h, LOG_W, LOG_H);
+                eprintln!(
+                    "draw: background {} scaled from {}×{} to {}×{}",
+                    path.display(),
+                    w,
+                    h,
+                    LOG_W,
+                    LOG_H
+                );
                 true
             }
             Err(e) => {
@@ -743,20 +807,55 @@ impl Draw {
         };
     }
 
+    fn ensure_icons_seeded(&mut self) {
+        let list = soul_script::app_list();
+        if self.launcher_icons.is_valid_for(list.len()) {
+            return;
+        }
+        let cell = ICON_CELL as usize;
+        for (i, entry) in list.iter().enumerate() {
+            let data = if !entry.icon_stem.is_empty() {
+                let path = std::path::PathBuf::from("assets/sprites")
+                    .join(format!("{}_icon.pgm", entry.icon_stem));
+                match load_pgm(&path) {
+                    Ok((w, h, pix)) if w == cell && h == cell => pix,
+                    _ => vec![255u8; cell * cell],
+                }
+            } else {
+                vec![255u8; cell * cell]
+            };
+            self.launcher_icons.db.insert(i as u8, data);
+        }
+        if let Err(e) = self.launcher_icons.persist() {
+            eprintln!("draw: could not persist seeded icons: {e}");
+        }
+    }
+
     fn refresh_open_icon_list(&mut self) {
+        self.ensure_icons_seeded();
         self.mode = Mode::OpenList {
-            files: APPS.iter().map(|s| (*s).to_string()).collect(),
+            files: soul_script::app_list()
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             scroll: 0,
             purpose: OpenPurpose::LauncherIcon,
         };
     }
 
+    /// Persist the launcher-icon cache to disk (called on `AppStop`).
+    pub fn persist(&self) {
+        if let Err(e) = self.launcher_icons.persist() {
+            eprintln!("draw: could not persist icon cache: {e}");
+        }
+    }
+
     fn load_icon_from_db(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> bool {
+        self.ensure_icons_seeded();
         let cell = ICON_CELL as usize;
         let area = cell * cell;
         let data = {
-            let store = self.launcher_icons.borrow();
-            let Some(rec) = store.db.iter_category(idx as u8).next() else {
+            let Some(rec) = self.launcher_icons.db.iter_category(idx as u8).next() else {
                 return false;
             };
             if rec.data.len() != area {
@@ -777,7 +876,13 @@ impl Draw {
             }
         }
         self.edit = EditTarget::Icon(idx);
-        self.doc_name = format!("icon:{}", APPS[idx]);
+        self.doc_name = format!(
+            "icon:{}",
+            soul_script::app_list()
+                .get(idx)
+                .map(|e| e.name.as_str())
+                .unwrap_or("?")
+        );
         ctx.invalidate(Self::canvas_screen_rect());
         true
     }
@@ -791,16 +896,13 @@ impl Draw {
                 buf.push(self.display_value(i));
             }
         }
-        let ok = {
-            let mut store = self.launcher_icons.borrow_mut();
-            let Some(rec) = store.db.iter_category(idx as u8).next() else {
-                return false;
-            };
-            let id = rec.id;
-            store.db.update(id, buf)
+        let Some(rec) = self.launcher_icons.db.iter_category(idx as u8).next() else {
+            return false;
         };
+        let id = rec.id;
+        let ok = self.launcher_icons.db.update(id, buf);
         if ok {
-            if let Err(e) = self.launcher_icons.borrow().persist() {
+            if let Err(e) = self.launcher_icons.persist() {
                 eprintln!("draw: could not persist launcher icon cache: {e}");
             }
         }
@@ -821,7 +923,13 @@ impl Draw {
                 match self.edit {
                     EditTarget::Icon(i) => {
                         if self.save_icon_to_db(i) {
-                            eprintln!("draw: saved launcher icon {}", APPS[i]);
+                            eprintln!(
+                                "draw: saved launcher icon {}",
+                                soul_script::app_list()
+                                    .get(i)
+                                    .map(|e| e.name.as_str())
+                                    .unwrap_or("?")
+                            );
                         }
                     }
                     EditTarget::Document => {
@@ -888,7 +996,7 @@ impl Draw {
                 let _ = self.try_load_background_path(&path, ctx);
             }
             OpenPurpose::LauncherIcon => {
-                if let Some(idx) = APPS.iter().position(|&n| n == stem) {
+                if let Some(idx) = soul_script::app_list().iter().position(|e| e.name == stem) {
                     let _ = self.load_icon_from_db(idx, ctx);
                 }
             }
@@ -901,7 +1009,7 @@ impl Draw {
         if self.screen_to_cell(x, y).is_some() {
             return PaintTarget::Canvas;
         }
-        
+
         if let Some(comp) = self.ui_form.hit_test(x, y) {
             match comp.id.as_str() {
                 "tool_brush" => return PaintTarget::ToolBrush,
@@ -919,7 +1027,7 @@ impl Draw {
                 _ => {}
             }
         }
-        
+
         PaintTarget::None
     }
 
@@ -1251,7 +1359,12 @@ impl App for Draw {
                 ),
             );
             let _ = ir
-                .into_styled(PrimitiveStyleBuilder::new().stroke_color(BLACK).stroke_width(1).build())
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .stroke_color(BLACK)
+                        .stroke_width(1)
+                        .build(),
+                )
                 .draw(canvas);
         }
 
@@ -1279,15 +1392,27 @@ impl App for Draw {
         // Draw selection highlight for current gray level
         for (i, g) in GRAY_LEVELS.iter().enumerate() {
             if self.brush == *g {
-                if let Some(comp) = self.ui_form.components.iter().find(|c| c.id == format!("ink_{}", i)) {
+                if let Some(comp) = self
+                    .ui_form
+                    .components
+                    .iter()
+                    .find(|c| c.id == format!("ink_{}", i))
+                {
                     let rect = comp.bounds.to_eg_rect();
-                    let _ = rect.into_styled(PrimitiveStyle::with_stroke(BLACK, 2)).draw(canvas);
+                    let _ = rect
+                        .into_styled(PrimitiveStyle::with_stroke(BLACK, 2))
+                        .draw(canvas);
                 }
             }
         }
 
         // Overlay brush radius label
-        if let Some(comp) = self.ui_form.components.iter().find(|c| c.id == "brush_minus") {
+        if let Some(comp) = self
+            .ui_form
+            .components
+            .iter()
+            .find(|c| c.id == "brush_minus")
+        {
             let _ = label(
                 canvas,
                 Point::new(comp.bounds.x + comp.bounds.w as i32 + 6, comp.bounds.y + 4),
@@ -1355,7 +1480,9 @@ impl App for Draw {
                     let _ = rect
                         .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                         .draw(canvas);
-                    let _ = rect.into_styled(PrimitiveStyle::with_stroke(BLACK, 1)).draw(canvas);
+                    let _ = rect
+                        .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
+                        .draw(canvas);
                     let _ = label(canvas, Point::new(15, 38), "Menu");
                     for i in 0..MENU_ITEMS.len() {
                         let pressed = self.menu_touch == Some(i);
@@ -1405,31 +1532,37 @@ impl App for Draw {
     }
 }
 
-fn scale_image_to_canvas(data: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+fn scale_image_to_canvas(
+    data: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
     let mut result = vec![255u8; dst_w * dst_h];
-    
+
     // Calculate scale factor to fit image within canvas while maintaining aspect ratio
     let scale_x = dst_w as f32 / src_w as f32;
     let scale_y = dst_h as f32 / src_h as f32;
     let scale = scale_x.min(scale_y); // Use the smaller scale to ensure it fits
-    
+
     let scaled_w = (src_w as f32 * scale) as usize;
     let scaled_h = (src_h as f32 * scale) as usize;
-    
+
     // Center the scaled image in the canvas
     let offset_x = (dst_w - scaled_w) / 2;
     let offset_y = (dst_h - scaled_h) / 2;
-    
+
     for dy in 0..scaled_h {
         for dx in 0..scaled_w {
             let src_x = (dx as f32 / scale) as usize;
             let src_y = (dy as f32 / scale) as usize;
-            
+
             if src_x < src_w && src_y < src_h {
                 let src_idx = src_y * src_w + src_x;
                 let dst_x = offset_x + dx;
                 let dst_y = offset_y + dy;
-                
+
                 if dst_x < dst_w && dst_y < dst_h {
                     let dst_idx = dst_y * dst_w + dst_x;
                     result[dst_idx] = data[src_idx];
@@ -1437,7 +1570,7 @@ fn scale_image_to_canvas(data: &[u8], src_w: usize, src_h: usize, dst_w: usize, 
             }
         }
     }
-    
+
     result
 }
 

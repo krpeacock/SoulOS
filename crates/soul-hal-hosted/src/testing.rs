@@ -1,9 +1,9 @@
 //! Testing utilities for SoulOS applications
 //! Provides programmatic input injection and state inspection
 
-use std::collections::VecDeque;
 use embedded_graphics::{pixelcolor::Gray8, prelude::*};
 use soul_hal::InputEvent;
+use std::collections::VecDeque;
 
 /// A test scenario that can be programmatically executed
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ impl TestEvent {
             },
         ]
     }
-    
+
     pub fn type_string(text: &str) -> Vec<Self> {
         text.chars()
             .map(|c| Self {
@@ -45,7 +45,7 @@ impl TestEvent {
             })
             .collect()
     }
-    
+
     pub fn key(key: soul_hal::KeyCode, description: &str) -> Self {
         Self {
             event: InputEvent::Key(key),
@@ -53,7 +53,7 @@ impl TestEvent {
             description: description.to_string(),
         }
     }
-    
+
     pub fn hard_button(button: soul_hal::HardButton, description: &str) -> Vec<Self> {
         vec![
             Self {
@@ -74,13 +74,13 @@ impl TestEvent {
 pub trait TestingPlatform {
     /// Inject a sequence of test events
     fn inject_events(&mut self, events: Vec<TestEvent>);
-    
+
     /// Take a screenshot and save to file
     fn screenshot(&self, filename: &str) -> Result<(), std::io::Error>;
-    
+
     /// Get the current display buffer for analysis
     fn get_display_buffer(&self) -> &embedded_graphics_simulator::SimulatorDisplay<Gray8>;
-    
+
     /// Wait for a specific number of frames
     fn wait_frames(&mut self, frames: u32);
 }
@@ -91,15 +91,15 @@ impl TestingPlatform for crate::HostedPlatform {
             self.pending.push_back(test_event.event);
         }
     }
-    
+
     fn screenshot(&self, filename: &str) -> Result<(), std::io::Error> {
         Ok(())
     }
-    
+
     fn get_display_buffer(&self) -> &embedded_graphics_simulator::SimulatorDisplay<Gray8> {
         &self.display
     }
-    
+
     fn wait_frames(&mut self, frames: u32) {
         for _ in 0..frames {
             std::thread::sleep(std::time::Duration::from_millis(16));
@@ -110,7 +110,7 @@ impl TestingPlatform for crate::HostedPlatform {
 /// Predefined test scenarios for common SoulOS operations
 pub mod scenarios {
     use super::*;
-    
+
     pub fn test_notes_app() -> TestScenario {
         let mut events = Vec::new();
         events.extend(TestEvent::click(363, 170, "Click Notes app"));
@@ -120,20 +120,23 @@ pub mod scenarios {
             description: "Wait for Notes app to load".to_string(),
         });
         events.extend(TestEvent::type_string("Hello from automated test!"));
-        events.push(TestEvent::key(soul_hal::KeyCode::Enter, "Press Enter to confirm"));
+        events.push(TestEvent::key(
+            soul_hal::KeyCode::Enter,
+            "Press Enter to confirm",
+        ));
         TestScenario {
             name: "Test Notes App".to_string(),
             events,
         }
     }
-    
+
     pub fn return_to_home() -> TestScenario {
         TestScenario {
             name: "Return to Home".to_string(),
             events: TestEvent::hard_button(soul_hal::HardButton::Home, "Press Home button"),
         }
     }
-    
+
     pub fn test_address_app() -> TestScenario {
         let mut events = Vec::new();
         events.extend(TestEvent::click(320, 170, "Click Address app"));
@@ -146,13 +149,22 @@ pub mod scenarios {
     pub fn build_todo_app() -> TestScenario {
         let mut events = Vec::new();
         events.extend(TestEvent::click(86, 119, "Open Builder"));
-        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::hard_button(
+            soul_hal::HardButton::Menu,
+            "Open Menu",
+        ));
         events.extend(TestEvent::click(100, 89, "Add Label"));
-        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::hard_button(
+            soul_hal::HardButton::Menu,
+            "Open Menu",
+        ));
         events.extend(TestEvent::click(100, 193, "Edit Label"));
         events.extend(TestEvent::type_string("My Tasks"));
         events.push(TestEvent::key(soul_hal::KeyCode::Enter, "Confirm Label"));
-        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::hard_button(
+            soul_hal::HardButton::Menu,
+            "Open Menu",
+        ));
         events.extend(TestEvent::click(100, 167, "Add Checkbox"));
         events.push(TestEvent {
             event: InputEvent::StylusDown { x: 30, y: 50 },
@@ -169,7 +181,10 @@ pub mod scenarios {
             delay_ms: 100,
             description: "Drop Checkbox".to_string(),
         });
-        events.extend(TestEvent::hard_button(soul_hal::HardButton::Menu, "Open Menu"));
+        events.extend(TestEvent::hard_button(
+            soul_hal::HardButton::Menu,
+            "Open Menu",
+        ));
         events.extend(TestEvent::click(100, 245, "Save Form"));
         TestScenario {
             name: "Build Todo App".to_string(),
