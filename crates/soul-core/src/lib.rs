@@ -97,13 +97,47 @@ pub const SYSTEM_STRIP_H: u16 = 16;
 /// bottom for the system strip.
 pub const APP_HEIGHT: u16 = SCREEN_HEIGHT - SYSTEM_STRIP_H;
 
+/// Data carried by an [`Event::Exchange`] delivery.
+///
+/// The kernel routes exchange payloads between apps without either
+/// side knowing the other's internal structure. New payload kinds
+/// can be added here without changing the exchange protocol.
+#[derive(Debug, Clone)]
+pub enum ExchangePayload {
+    /// Raw grayscale bitmap. `pixels.len() == width as usize * height as usize`.
+    Bitmap {
+        width: u16,
+        height: u16,
+        pixels: alloc::vec::Vec<u8>,
+    },
+    /// Plain text — a script, a note, a template.
+    Text(alloc::string::String),
+    /// A named resource belonging to a specific app — used for kernel-mediated
+    /// resource get/set without launching the owning app's UI.
+    ///
+    /// `app_id` identifies the owning app. `kind` names the resource type
+    /// ("icon", "script", "form", …). For get requests `pixels` and `text`
+    /// are empty; for set/return they carry the resource data.
+    Resource {
+        app_id: alloc::string::String,
+        kind: alloc::string::String,
+        width: u16,
+        height: u16,
+        pixels: alloc::vec::Vec<u8>,
+        text: alloc::string::String,
+    },
+}
+
 /// An event delivered to [`App::handle`].
 ///
 /// Events are strictly in-order and delivered one at a time; the
 /// runtime never concurrently invokes `handle`. Handlers should
 /// update internal state and, if rendering changed, call
 /// [`Ctx::invalidate`] with the affected screen rectangle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Event` is `Clone` but not `Copy` because [`Event::Exchange`]
+/// carries heap-allocated payload data.
+#[derive(Debug, Clone)]
 pub enum Event {
     /// Fired once, before the first `draw`, when the runtime begins
     /// running this app.
@@ -134,6 +168,18 @@ pub enum Event {
     /// hard [`HardButton::Menu`] key). Delivered once per activation,
     /// not paired with a release.
     Menu,
+    /// The kernel is delivering an exchange payload to this app.
+    ///
+    /// Fired when another app (or the system) called `system_send` or
+    /// when this app's `system_request` was fulfilled. `action` names
+    /// what kind of data is arriving; `sender` is the originating
+    /// app's ID. The app should inspect `action` and handle `payload`
+    /// accordingly, then call `system_return` when done.
+    Exchange {
+        action: alloc::string::String,
+        payload: ExchangePayload,
+        sender: alloc::string::String,
+    },
 }
 
 /// Dirty-region accumulator used by the runtime.
