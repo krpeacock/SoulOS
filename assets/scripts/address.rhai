@@ -1,6 +1,10 @@
 // assets/scripts/address.rhai
 // A simple Address Book app rewritten in Rhai
 
+let app_id   = "com.soulos.address";
+let app_name = "Address";
+let app_icon = "address";
+
 let name_input = new_text_input(10, 150, 220, 20);
 let phone_input = new_text_input(10, 180, 220, 20);
 let focus = "name"; // or "phone"
@@ -11,9 +15,9 @@ fn on_event(event) {
     }
     
     if event.type == "Key" {
-        let active = if focus == "name" { name_input } else { phone_input };
         if event.key == "Backspace" {
-            active.backspace();
+            if focus == "name" { name_input.backspace(); }
+            else { phone_input.backspace(); }
         } else if event.key == "Enter" {
             if focus == "name" { focus = "phone"; }
             else {
@@ -27,7 +31,8 @@ fn on_event(event) {
                 }
             }
         } else if event.key != "Other" {
-            active.insert_char(event.key);
+            if focus == "name" { name_input.insert_char(event.key); }
+            else { phone_input.insert_char(event.key); }
         }
         invalidate_all();
     }

@@ -1,6 +1,10 @@
 // assets/scripts/notes.rhai
 // A simple Notes app rewritten in Rhai
 
+let app_id   = "com.soulos.notes";
+let app_name = "Notes";
+let app_icon = "notes";
+
 let area = new_text_area(0, 15, 240, 190);
 let kb = new_keyboard();
 let active_id = 0;

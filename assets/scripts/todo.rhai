@@ -1,6 +1,10 @@
 // assets/scripts/todo.rhai
 // A simple Todo app rewritten in Rhai with Add/Delete support and Text Input
 
+let app_id   = "com.soulos.todo";
+let app_name = "Todo";
+let app_icon = "todo";
+
 let input = new_text_input(10, 170, 160, 24);
 
 fn on_event(event) {
