@@ -1,9 +1,8 @@
 //! Testing utilities for SoulOS applications
 //! Provides programmatic input injection and state inspection
 
-use embedded_graphics::{pixelcolor::Gray8, prelude::*};
+use embedded_graphics::pixelcolor::Gray8;
 use soul_hal::InputEvent;
-use std::collections::VecDeque;
 
 /// A test scenario that can be programmatically executed
 #[derive(Debug, Clone)]
@@ -92,7 +91,7 @@ impl TestingPlatform for crate::HostedPlatform {
         }
     }
 
-    fn screenshot(&self, filename: &str) -> Result<(), std::io::Error> {
+    fn screenshot(&self, _filename: &str) -> Result<(), std::io::Error> {
         Ok(())
     }
 

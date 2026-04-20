@@ -153,7 +153,7 @@ impl ScriptError {
         let (line, position) = match error.position() {
             Position::NONE => (None, None),
             pos => {
-                let line_num = pos.line().map(|l| l as usize);
+                let line_num = pos.line();
                 (line_num, Some(pos))
             }
         };
@@ -427,6 +427,755 @@ impl ScriptedApp {
                 }
             }
             "".to_string()
+        });
+
+        // --- Modern layout system ---
+        // Global layout state for proper positioning
+        static mut LAYOUT_Y: i32 = 30;
+        static mut LAYOUT_X: i32 = 10;
+        static mut LAYOUT_MAX_WIDTH: i32 = 220;
+        static mut IN_HORIZONTAL: bool = false;
+        static mut HORIZONTAL_START_X: i32 = 10;
+        
+        // Input focus and keyboard state
+        static mut INPUT_FOCUSED: bool = false;
+        static mut SHOW_KEYBOARD: bool = false;
+        static mut FOCUSED_INPUT_BOUNDS: (i32, i32, i32, i32) = (0, 0, 0, 0); // x, y, w, h
+
+        engine.register_fn("ui_begin", || unsafe {
+            LAYOUT_Y = 30;
+            LAYOUT_X = 10;
+            LAYOUT_MAX_WIDTH = 220;
+            IN_HORIZONTAL = false;
+        });
+
+        engine.register_fn("ui_heading", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &text);
+                LAYOUT_Y += 25;
+            }
+        });
+
+        engine.register_fn("ui_label", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += text.len() as i32 * 6 + 10; // Approximate text width
+                }
+            }
+        });
+
+        engine.register_fn("ui_button", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let width = (text.len() as i32 * 7 + 16).max(60);
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, width as u32, 20, &text, false);
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += width + 5;
+                }
+            }
+        });
+
+
+        engine.register_fn("ui_small_button", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let width = 20;
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, width, 15, &text, false);
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += width as i32 + 5;
+                }
+            }
+        });
+
+        engine.register_fn("ui_text_input", |current: String, placeholder: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let display_text = if current.is_empty() { &placeholder } else { &current };
+                let is_focused = INPUT_FOCUSED && 
+                    FOCUSED_INPUT_BOUNDS.0 == LAYOUT_X &&
+                    FOCUSED_INPUT_BOUNDS.1 == LAYOUT_Y;
+                
+                // Store bounds for focus detection
+                FOCUSED_INPUT_BOUNDS = (LAYOUT_X, LAYOUT_Y, 160, 24);
+                
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 160, 24, display_text, is_focused);
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 30;
+                } else {
+                    LAYOUT_X += 165;
+                }
+            }
+        });
+
+        // Functions to manage input focus and keyboard
+        engine.register_fn("ui_set_input_focus", |x: i32, y: i32, w: i32, h: i32| unsafe {
+            INPUT_FOCUSED = true;
+            SHOW_KEYBOARD = true;
+            FOCUSED_INPUT_BOUNDS = (x, y, w, h);
+        });
+
+        engine.register_fn("ui_clear_input_focus", || unsafe {
+            INPUT_FOCUSED = false;
+            SHOW_KEYBOARD = false;
+        });
+
+        engine.register_fn("ui_is_input_focused", || -> bool {
+            unsafe { INPUT_FOCUSED }
+        });
+
+        engine.register_fn("ui_should_show_keyboard", || -> bool {
+            unsafe { SHOW_KEYBOARD }
+        });
+
+        engine.register_fn("ui_checkbox", |checked: bool, label: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let symbol = if checked { "[X]" } else { "[ ]" };
+                let text = if label.is_empty() { 
+                    symbol.to_string() 
+                } else { 
+                    let mut result = String::from(symbol);
+                    result.push(' ');
+                    result.push_str(&label);
+                    result
+                };
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &text);
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        engine.register_fn("ui_selectable", |selected: bool, text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let width = (text.len() as i32 * 7 + 16).max(60);
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, width as u32, 20, &text, selected);
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += width + 5;
+                }
+            }
+        });
+
+        engine.register_fn("ui_separator", || unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y, LAYOUT_MAX_WIDTH as u32, 1, 128);
+                LAYOUT_Y += 10;
+            }
+        });
+
+        engine.register_fn("ui_space", |height: i32| unsafe {
+            LAYOUT_Y += height;
+        });
+
+        engine.register_fn("ui_horizontal_begin", || unsafe {
+            IN_HORIZONTAL = true;
+            HORIZONTAL_START_X = LAYOUT_X;
+        });
+
+        engine.register_fn("ui_horizontal_end", || unsafe {
+            IN_HORIZONTAL = false;
+            LAYOUT_X = HORIZONTAL_START_X;
+            LAYOUT_Y += 25;
+        });
+
+        engine.register_fn("ui_same_line", || unsafe {
+            // Keep on same line for next element
+            if !IN_HORIZONTAL {
+                LAYOUT_Y -= 25; // Undo the last Y advance
+            }
+        });
+
+        // === TEXT & INPUT COMPONENTS ===
+
+        // Rich text label with formatting options
+        engine.register_fn("ui_rich_text", |text: String, _color: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                // For now, just render as regular label - could add color support later
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Hyperlink label
+        engine.register_fn("ui_hyperlink", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                // Render as underlined-style text
+                let mut underlined = String::from("_");
+                underlined.push_str(&text);
+                underlined.push('_');
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &underlined);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Monospace text
+        engine.register_fn("ui_monospace", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut mono_text = String::from("[");
+                mono_text.push_str(&text);
+                mono_text.push(']');
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &mono_text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Text input with hint
+        engine.register_fn("ui_text_edit_hint", |current: String, hint: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let display_text = if current.is_empty() { 
+                    let mut result = String::from("(");
+                    result.push_str(&hint);
+                    result.push(')');
+                    result
+                } else { 
+                    current.clone()
+                };
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 160, 24, &display_text, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 30;
+                } else {
+                    LAYOUT_X += 165;
+                }
+            }
+        });
+
+        // Password input
+        engine.register_fn("ui_text_edit_password", |current: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let masked = "*".repeat(current.len());
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 160, 24, &masked, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 30;
+                } else {
+                    LAYOUT_X += 165;
+                }
+            }
+        });
+
+        // Multiline text edit
+        engine.register_fn("ui_text_edit_multiline", |current: String, height: i32| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let h = if height <= 0 { 60 } else { height };
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 200, h as u32, &current, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += h + 10;
+                } else {
+                    LAYOUT_X += 205;
+                }
+            }
+        });
+
+        // Code editor (simplified)
+        engine.register_fn("ui_code_editor", |current: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut code_text = String::from("{ ");
+                code_text.push_str(&current);
+                code_text.push_str(" }");
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 200, 60, &code_text, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 70;
+                } else {
+                    LAYOUT_X += 205;
+                }
+            }
+        });
+
+        // === SELECTION & INTERACTION COMPONENTS ===
+
+        // Radio button
+        engine.register_fn("ui_radio", |selected: bool, text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let symbol = if selected { "(*)" } else { "( )" };
+                let mut radio_text = String::from(symbol);
+                radio_text.push(' ');
+                radio_text.push_str(&text);
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &radio_text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += radio_text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Radio button with value
+        engine.register_fn("ui_radio_value", |current_value: String, button_value: String, text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let selected = current_value == button_value;
+                let symbol = if selected { "(*)" } else { "( )" };
+                let mut radio_text = String::from(symbol);
+                radio_text.push(' ');
+                radio_text.push_str(&text);
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &radio_text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += radio_text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Slider (horizontal)
+        engine.register_fn("ui_slider", |value: i32, min: i32, max: i32| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut slider_text = String::from("◀");
+                let range = max - min;
+                let position = if range > 0 { (value - min) * 10 / range } else { 0 };
+                for i in 0..10 {
+                    if i == position {
+                        slider_text.push('●');
+                    } else {
+                        slider_text.push('─');
+                    }
+                }
+                slider_text.push_str("▶ ");
+                slider_text.push_str(&value.to_string());
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &slider_text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += 100;
+                }
+            }
+        });
+
+        // Drag value (click and drag to change)
+        engine.register_fn("ui_drag_value", |value: i32, prefix: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut drag_text = String::new();
+                if !prefix.is_empty() {
+                    drag_text.push_str(&prefix);
+                    drag_text.push(' ');
+                }
+                drag_text.push_str(&value.to_string());
+                drag_text.push_str(" ↔");
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 80, 20, &drag_text, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += 85;
+                }
+            }
+        });
+
+        // ComboBox / Dropdown
+        engine.register_fn("ui_combo_box", |label: String, selected: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut combo_text = String::new();
+                combo_text.push_str(&selected);
+                combo_text.push_str(" ▼");
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 120, 20, &combo_text, false);
+                if !label.is_empty() {
+                    (*canvas).label(LAYOUT_X - 60, LAYOUT_Y, &label);
+                }
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += 125;
+                }
+            }
+        });
+
+        // Progress bar
+        engine.register_fn("ui_progress_bar", |progress: f32| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut bar_text = String::from("[");
+                let filled = (progress * 10.0) as i32;
+                for i in 0..10 {
+                    if i < filled {
+                        bar_text.push('█');
+                    } else {
+                        bar_text.push('░');
+                    }
+                }
+                bar_text.push(']');
+                bar_text.push(' ');
+                bar_text.push_str(&((progress * 100.0) as i32).to_string());
+                bar_text.push('%');
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, &bar_text);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += bar_text.len() as i32 * 6 + 10;
+                }
+            }
+        });
+
+        // Spinner (loading indicator)
+        engine.register_fn("ui_spinner", || unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                (*canvas).label(LAYOUT_X, LAYOUT_Y, "⟲ Loading...");
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 20;
+                } else {
+                    LAYOUT_X += 80;
+                }
+            }
+        });
+
+        // Color picker (simplified)
+        engine.register_fn("ui_color_edit", |color_name: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut color_text = String::from("■ ");
+                color_text.push_str(&color_name);
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 100, 20, &color_text, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += 105;
+                }
+            }
+        });
+
+        // === LAYOUT & CONTAINER COMPONENTS ===
+
+        static mut GROUP_DEPTH: i32 = 0;
+        static mut GROUP_START_Y: i32 = 0;
+
+        // Group (visual container)
+        engine.register_fn("ui_group", |title: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                if !title.is_empty() {
+                    (*canvas).label(LAYOUT_X, LAYOUT_Y, &title);
+                    LAYOUT_Y += 20;
+                }
+                // Draw group border
+                (*canvas).rect(LAYOUT_X - 2, LAYOUT_Y, 220, 1, 128);
+                GROUP_START_Y = LAYOUT_Y;
+                GROUP_DEPTH += 1;
+                LAYOUT_X += 10; // Indent group contents
+                LAYOUT_Y += 5;
+            }
+        });
+
+        engine.register_fn("ui_group_end", || unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                if GROUP_DEPTH > 0 {
+                    LAYOUT_X -= 10; // Restore indent
+                    LAYOUT_Y += 5;
+                    // Draw bottom border
+                    (*canvas).rect(LAYOUT_X - 2, LAYOUT_Y, 220, 1, 128);
+                    GROUP_DEPTH -= 1;
+                    LAYOUT_Y += 10;
+                }
+            }
+        });
+
+        // Collapsing header
+        engine.register_fn("ui_collapsing", |title: String, open: bool| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let arrow = if open { "▼" } else { "▶" };
+                let mut header_text = String::from(arrow);
+                header_text.push(' ');
+                header_text.push_str(&title);
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 200, 20, &header_text, false);
+                LAYOUT_Y += 25;
+                if open {
+                    LAYOUT_X += 15; // Indent collapsed content
+                }
+            }
+        });
+
+        engine.register_fn("ui_collapsing_end", |was_open: bool| unsafe {
+            if was_open {
+                LAYOUT_X -= 15; // Restore indent
+            }
+        });
+
+        // Vertical layout
+        engine.register_fn("ui_vertical", || {
+            // Already vertical by default, no-op
+        });
+
+        // Columns layout
+        static mut COLUMN_COUNT: i32 = 1;
+        static mut COLUMN_WIDTH: i32 = 220;
+        static mut CURRENT_COLUMN: i32 = 0;
+        static mut COLUMN_START_X: i32 = 10;
+        static mut COLUMN_START_Y: i32 = 30;
+
+        engine.register_fn("ui_columns", |count: i32| unsafe {
+            COLUMN_COUNT = count.max(1);
+            COLUMN_WIDTH = LAYOUT_MAX_WIDTH / COLUMN_COUNT;
+            CURRENT_COLUMN = 0;
+            COLUMN_START_X = LAYOUT_X;
+            COLUMN_START_Y = LAYOUT_Y;
+        });
+
+        engine.register_fn("ui_next_column", || unsafe {
+            CURRENT_COLUMN += 1;
+            if CURRENT_COLUMN < COLUMN_COUNT {
+                LAYOUT_X = COLUMN_START_X + (CURRENT_COLUMN * COLUMN_WIDTH);
+                LAYOUT_Y = COLUMN_START_Y;
+            }
+        });
+
+        engine.register_fn("ui_columns_end", || unsafe {
+            LAYOUT_X = COLUMN_START_X;
+            // Find the maximum Y across all columns
+            LAYOUT_Y += 20; // Approximate spacing after columns
+            COLUMN_COUNT = 1;
+            CURRENT_COLUMN = 0;
+        });
+
+        // Grid layout (simplified)
+        static mut GRID_COLUMNS: i32 = 2;
+        static mut GRID_CURRENT_COL: i32 = 0;
+        static mut GRID_ROW_HEIGHT: i32 = 25;
+
+        engine.register_fn("ui_grid", |columns: i32| unsafe {
+            GRID_COLUMNS = columns.max(1);
+            GRID_CURRENT_COL = 0;
+        });
+
+        engine.register_fn("ui_grid_next", || unsafe {
+            GRID_CURRENT_COL += 1;
+            if GRID_CURRENT_COL >= GRID_COLUMNS {
+                GRID_CURRENT_COL = 0;
+                LAYOUT_Y += GRID_ROW_HEIGHT;
+                LAYOUT_X = 10;
+            } else {
+                LAYOUT_X += LAYOUT_MAX_WIDTH / GRID_COLUMNS;
+            }
+        });
+
+        // Indent/Unindent
+        engine.register_fn("ui_indent", |amount: i32| unsafe {
+            LAYOUT_X += amount;
+        });
+
+        engine.register_fn("ui_unindent", |amount: i32| unsafe {
+            LAYOUT_X = (LAYOUT_X - amount).max(10);
+        });
+
+        // Scope (temporary layout state)
+        static mut SCOPE_X: i32 = 10;
+        static mut SCOPE_Y: i32 = 30;
+
+        engine.register_fn("ui_scope_begin", || unsafe {
+            SCOPE_X = LAYOUT_X;
+            SCOPE_Y = LAYOUT_Y;
+        });
+
+        engine.register_fn("ui_scope_end", || unsafe {
+            LAYOUT_X = SCOPE_X;
+            LAYOUT_Y = SCOPE_Y;
+        });
+
+        // === VISUAL & STYLING COMPONENTS ===
+
+        // Image placeholder
+        engine.register_fn("ui_image", |width: i32, height: i32, alt_text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let w = if width <= 0 { 64 } else { width };
+                let h = if height <= 0 { 64 } else { height };
+                
+                // Draw image placeholder border
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y, w as u32, h as u32, 200);
+                (*canvas).rect(LAYOUT_X + 1, LAYOUT_Y + 1, (w-2) as u32, (h-2) as u32, 240);
+                
+                // Add alt text in center
+                if !alt_text.is_empty() {
+                    let text_x = LAYOUT_X + w / 2 - (alt_text.len() as i32 * 3);
+                    let text_y = LAYOUT_Y + h / 2 - 5;
+                    (*canvas).label(text_x, text_y, &alt_text);
+                }
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += h + 10;
+                } else {
+                    LAYOUT_X += w + 10;
+                }
+            }
+        });
+
+        // Plot/Chart placeholder
+        engine.register_fn("ui_plot", |title: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                if !title.is_empty() {
+                    (*canvas).label(LAYOUT_X, LAYOUT_Y, &title);
+                    LAYOUT_Y += 15;
+                }
+                
+                // Draw plot area
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y, 180, 100, 220);
+                (*canvas).rect(LAYOUT_X + 1, LAYOUT_Y + 1, 178, 98, 250);
+                
+                // Add grid lines
+                for i in 1..4 {
+                    let grid_y = LAYOUT_Y + (i * 25);
+                    (*canvas).rect(LAYOUT_X + 5, grid_y, 170, 1, 230);
+                }
+                for i in 1..6 {
+                    let grid_x = LAYOUT_X + (i * 30);
+                    (*canvas).rect(grid_x, LAYOUT_Y + 5, 1, 90, 230);
+                }
+                
+                // Add sample line
+                (*canvas).label(LAYOUT_X + 80, LAYOUT_Y + 45, "📈");
+                
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 110;
+                } else {
+                    LAYOUT_X += 190;
+                }
+            }
+        });
+
+        // Table
+        static mut TABLE_ROWS: i32 = 0;
+        static mut TABLE_COLS: i32 = 0;
+        static mut TABLE_COL_WIDTH: i32 = 50;
+        static mut TABLE_START_X: i32 = 10;
+        static mut TABLE_START_Y: i32 = 30;
+
+        engine.register_fn("ui_table", |columns: i32| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                TABLE_COLS = columns.max(1);
+                TABLE_ROWS = 0;
+                TABLE_COL_WIDTH = LAYOUT_MAX_WIDTH / TABLE_COLS;
+                TABLE_START_X = LAYOUT_X;
+                TABLE_START_Y = LAYOUT_Y;
+                
+                // Draw table header line
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y, (TABLE_COLS * TABLE_COL_WIDTH) as u32, 1, 128);
+                LAYOUT_Y += 5;
+            }
+        });
+
+        engine.register_fn("ui_table_header", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let col = TABLE_ROWS % TABLE_COLS;
+                let cell_x = TABLE_START_X + (col * TABLE_COL_WIDTH);
+                (*canvas).label(cell_x + 2, LAYOUT_Y, &text);
+                
+                // Draw vertical separator
+                if col < TABLE_COLS - 1 {
+                    (*canvas).rect(cell_x + TABLE_COL_WIDTH, LAYOUT_Y - 2, 1, 18, 128);
+                }
+                
+                TABLE_ROWS += 1;
+                if TABLE_ROWS % TABLE_COLS == 0 {
+                    LAYOUT_Y += 20;
+                    // Draw horizontal line after header row
+                    (*canvas).rect(TABLE_START_X, LAYOUT_Y, (TABLE_COLS * TABLE_COL_WIDTH) as u32, 1, 128);
+                    LAYOUT_Y += 5;
+                }
+            }
+        });
+
+        engine.register_fn("ui_table_cell", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let col = TABLE_ROWS % TABLE_COLS;
+                let cell_x = TABLE_START_X + (col * TABLE_COL_WIDTH);
+                (*canvas).label(cell_x + 2, LAYOUT_Y, &text);
+                
+                // Draw vertical separator
+                if col < TABLE_COLS - 1 {
+                    (*canvas).rect(cell_x + TABLE_COL_WIDTH, LAYOUT_Y - 2, 1, 18, 192);
+                }
+                
+                TABLE_ROWS += 1;
+                if TABLE_ROWS % TABLE_COLS == 0 {
+                    LAYOUT_Y += 20;
+                }
+            }
+        });
+
+        engine.register_fn("ui_table_end", || unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                // Draw bottom border
+                (*canvas).rect(TABLE_START_X, LAYOUT_Y, (TABLE_COLS * TABLE_COL_WIDTH) as u32, 1, 128);
+                LAYOUT_Y += 10;
+            }
+        });
+
+        // Menu and menu items
+        engine.register_fn("ui_menu", |title: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut menu_text = String::from("≡ ");
+                menu_text.push_str(&title);
+                (*canvas).button(LAYOUT_X, LAYOUT_Y, 80, 20, &menu_text, false);
+                if !IN_HORIZONTAL {
+                    LAYOUT_Y += 25;
+                } else {
+                    LAYOUT_X += 85;
+                }
+            }
+        });
+
+        engine.register_fn("ui_menu_item", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let mut item_text = String::from("  ");
+                item_text.push_str(&text);
+                (*canvas).button(LAYOUT_X + 10, LAYOUT_Y, 120, 18, &item_text, false);
+                LAYOUT_Y += 20;
+            }
+        });
+
+        // Tooltip simulation
+        engine.register_fn("ui_tooltip", |text: String| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                // Draw tooltip box
+                let tooltip_width = (text.len() as i32 * 6 + 10).min(200);
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y - 25, tooltip_width as u32, 20, 100);
+                (*canvas).rect(LAYOUT_X + 1, LAYOUT_Y - 24, (tooltip_width - 2) as u32, 18, 255);
+                (*canvas).label(LAYOUT_X + 5, LAYOUT_Y - 20, &text);
+            }
+        });
+
+        // Window (simplified)
+        engine.register_fn("ui_window", |title: String, width: i32, height: i32| unsafe {
+            if let Some(canvas) = ACTIVE_CANVAS {
+                let w = if width <= 0 { 200 } else { width };
+                let h = if height <= 0 { 150 } else { height };
+                
+                // Window border
+                (*canvas).rect(LAYOUT_X, LAYOUT_Y, w as u32, h as u32, 128);
+                (*canvas).rect(LAYOUT_X + 1, LAYOUT_Y + 1, (w-2) as u32, (h-2) as u32, 240);
+                
+                // Title bar
+                (*canvas).rect(LAYOUT_X + 2, LAYOUT_Y + 2, (w-4) as u32, 20, 200);
+                (*canvas).label(LAYOUT_X + 5, LAYOUT_Y + 6, &title);
+                
+                // Close button
+                (*canvas).label(LAYOUT_X + w - 15, LAYOUT_Y + 6, "×");
+                
+                // Set content area
+                LAYOUT_X += 5;
+                LAYOUT_Y += 25;
+            }
+        });
+
+        engine.register_fn("ui_window_end", |width: i32, height: i32| unsafe {
+            let _w = if width <= 0 { 200 } else { width };
+            let h = if height <= 0 { 150 } else { height };
+            LAYOUT_X -= 5;
+            LAYOUT_Y = LAYOUT_Y - 25 + h + 10; // Reset to after window
         });
 
         let ast = engine.compile(script)?;

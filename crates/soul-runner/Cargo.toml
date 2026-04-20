@@ -12,5 +12,6 @@ soul-db.workspace = true
 soul-script = { path = "../soul-script" }
 soul-hal-hosted.workspace = true
 embedded-graphics.workspace = true
+rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float", "debugging", "std"] }
 env_logger = "0.11"
 log = "0.4"

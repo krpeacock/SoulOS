@@ -300,11 +300,10 @@ impl App for MobileBuilder {
                 }
             }
             Event::PenMove { x, y } => {
-                if !self.menu_open {
-                    if self.edit_overlay.pen_move(&mut self.form, x, y) {
+                if !self.menu_open
+                    && self.edit_overlay.pen_move(&mut self.form, x, y) {
                         ctx.invalidate_all();
                     }
-                }
             }
             Event::PenUp { x, y } => {
                 if self.menu_open {
@@ -375,9 +374,9 @@ impl App for MobileBuilder {
             let _ = rect
                 .into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1))
                 .draw(canvas);
-            for i in 0..BUILDER_MENU.len() {
+            for (i, &item) in BUILDER_MENU.iter().enumerate() {
                 let pressed = self.menu_touch == Some(i);
-                let _ = button(canvas, Self::menu_item_rect(i), BUILDER_MENU[i], pressed);
+                let _ = button(canvas, Self::menu_item_rect(i), item, pressed);
             }
         }
 
@@ -404,10 +403,10 @@ impl App for MobileBuilder {
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
         let mut nodes = self.form.a11y_nodes();
         if self.menu_open {
-            for i in 0..BUILDER_MENU.len() {
+            for (i, &item) in BUILDER_MENU.iter().enumerate() {
                 nodes.push(soul_core::a11y::A11yNode {
                     bounds: Self::menu_item_rect(i),
-                    label: BUILDER_MENU[i].to_string(),
+                    label: item.to_string(),
                     role: "menuitem".into(),
                 });
             }

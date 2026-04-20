@@ -97,11 +97,9 @@ impl Form {
     }
 
     pub fn query_selector(&self, selector: &str) -> Option<&Component> {
-        if selector.starts_with('#') {
-            let id = &selector[1..];
+        if let Some(id) = selector.strip_prefix('#') {
             return self.components.iter().find(|c| c.id == id);
-        } else if selector.starts_with('.') {
-            let class = &selector[1..];
+        } else if let Some(class) = selector.strip_prefix('.') {
             return self.components.iter().find(|c| c.class == class);
         } else if selector.starts_with('[') && selector.ends_with(']') {
             let content = &selector[1..selector.len() - 1];
@@ -114,11 +112,9 @@ impl Form {
     }
 
     pub fn query_selector_mut(&mut self, selector: &str) -> Option<&mut Component> {
-        if selector.starts_with('#') {
-            let id = &selector[1..];
+        if let Some(id) = selector.strip_prefix('#') {
             return self.components.iter_mut().find(|c| c.id == id);
-        } else if selector.starts_with('.') {
-            let class = &selector[1..];
+        } else if let Some(class) = selector.strip_prefix('.') {
             return self.components.iter_mut().find(|c| c.class == class);
         } else if selector.starts_with('[') && selector.ends_with(']') {
             let content = &selector[1..selector.len() - 1];
@@ -177,8 +173,7 @@ impl Form {
                     // Draw a placeholder box for TextInput
                     target.fill_contiguous(
                         &rect,
-                        core::iter::repeat(crate::palette::WHITE)
-                            .take(rect.size.width as usize * rect.size.height as usize),
+                        core::iter::repeat_n(crate::palette::WHITE, rect.size.width as usize * rect.size.height as usize),
                     )?;
                     rect.into_styled(embedded_graphics::primitives::PrimitiveStyle::with_stroke(
                         crate::palette::BLACK,
@@ -254,21 +249,11 @@ impl Form {
     }
 
     pub fn hit_test(&self, x: i16, y: i16) -> Option<&Component> {
-        for comp in self.components.iter().rev() {
-            if hit_test(&comp.bounds.to_eg_rect(), x, y) {
-                return Some(comp);
-            }
-        }
-        None
+        self.components.iter().rev().find(|&comp| hit_test(&comp.bounds.to_eg_rect(), x, y))
     }
 
     pub fn hit_test_mut(&mut self, x: i16, y: i16) -> Option<&mut Component> {
-        for comp in self.components.iter_mut().rev() {
-            if hit_test(&comp.bounds.to_eg_rect(), x, y) {
-                return Some(comp);
-            }
-        }
-        None
+        self.components.iter_mut().rev().find(|comp| hit_test(&comp.bounds.to_eg_rect(), x, y))
     }
 
     /// Find the first [`Action`] wired to `component_id` for the given `trigger`.

@@ -661,7 +661,7 @@ impl Draw {
         let dy = (y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
         let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx as i32 - dy as i32;
+        let mut err = dx - dy;
         loop {
             self.paint_at(x0, y0, ctx);
             if x0 == x1 && y0 == y1 {
@@ -1174,12 +1174,11 @@ impl App for Draw {
                 Mode::SaveAs(_) => self.handle_save_as_pen(true, false, x, y, ctx),
                 Mode::OpenList { .. } => self.handle_open_pen(true, false, x, y, ctx),
                 Mode::Normal => {
-                    if self.builder_mode {
-                        if self.edit_overlay.pen_down(&self.ui_form, x, y) {
+                    if self.builder_mode
+                        && self.edit_overlay.pen_down(&self.ui_form, x, y) {
                             ctx.invalidate_all();
                             return;
                         }
-                    }
                     if self.menu_open {
                         self.handle_menu_pen(true, false, false, x, y, ctx);
                         return;
@@ -1225,12 +1224,11 @@ impl App for Draw {
                 }
             },
             Event::PenMove { x, y } => {
-                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open {
-                    if self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
+                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open
+                    && self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
                         ctx.invalidate_all();
                         return;
                     }
-                }
                 if matches!(self.mode, Mode::Normal) && self.menu_open {
                     return;
                 }
@@ -1354,8 +1352,8 @@ impl App for Draw {
                     TITLE_BAR_H as i32 + (ICON_OY as i32) * SCALE,
                 ),
                 Size::new(
-                    (ICON_CELL as u32) * (SCALE as u32),
-                    (ICON_CELL as u32) * (SCALE as u32),
+                    ICON_CELL * (SCALE as u32),
+                    ICON_CELL * (SCALE as u32),
                 ),
             );
             let _ = ir
@@ -1484,9 +1482,9 @@ impl App for Draw {
                         .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
                         .draw(canvas);
                     let _ = label(canvas, Point::new(15, 38), "Menu");
-                    for i in 0..MENU_ITEMS.len() {
+                    for (i, &item) in MENU_ITEMS.iter().enumerate() {
                         let pressed = self.menu_touch == Some(i);
-                        let _ = button(canvas, Self::rect_menu_entry(i), MENU_ITEMS[i], pressed);
+                        let _ = button(canvas, Self::rect_menu_entry(i), item, pressed);
                     }
                 }
             }

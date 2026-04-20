@@ -1,0 +1,11 @@
+{
+  "files.associations": {
+    "*.rhai": "rhai"
+  },
+  "[rhai]": {
+    "editor.defaultFormatter": "rhaiscript.vscode-rhai",
+    "editor.formatOnSave": true
+  },
+  "rhai.executable": "rhai",
+  "rhai.lsp.enable": true
+}

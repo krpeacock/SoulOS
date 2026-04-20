@@ -20,6 +20,7 @@ use soul_core::{
 use soul_hal_hosted::HostedPlatform;
 use soul_script::ScriptedApp;
 use soul_ui::{hit_test, BLACK, WHITE};
+use rhai::Position;
 use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
@@ -36,7 +37,7 @@ pub(crate) const ICON_CELL: u32 = 32;
 /// straight through with zero indirection or intermediate buffer.
 pub(crate) enum NativeKind {
     Launcher(Launcher),
-    Draw(Draw),
+    Draw(Box<Draw>),
     Builder(MobileBuilder),
 }
 
@@ -158,6 +159,18 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
     },
     AppDescriptor {
         kind: AppKind::Scripted {
+            script: "assets/scripts/egui_demo.rhai",
+            db: ".soulos/egui_demo.sdb",
+        },
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
+            script: "assets/scripts/kitchen_sink.rhai",
+            db: ".soulos/kitchen_sink.sdb",
+        },
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
             script: "assets/scripts/mail.rhai",
             db: ".soulos/mail.sdb",
         },
@@ -193,7 +206,7 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
 /// `APP_MANIFEST` in order.
 enum AppSlot {
     /// A Rhai scripted app. Identity is declared inside the script.
-    Scripted { app: ScriptedApp, db_path: PathBuf },
+    Scripted { app: Box<ScriptedApp>, db_path: PathBuf },
     /// Any native app — stored inline, dispatched statically, no heap overhead.
     Native(NativeKind),
 }
@@ -227,10 +240,60 @@ impl AppSlot {
                             app.declared_name().as_deref().unwrap_or(script_stem),
                             script_stem
                         );
-                        AppSlot::Scripted { app, db_path }
+                        AppSlot::Scripted { app: Box::new(app), db_path }
                     }
                     Err(e) => {
-                        log::error!("Failed to compile {}: {}", script_stem, e);
+                        // Enhanced error reporting with detailed position information
+                        let error_details = match e.position() {
+                            Position::NONE => {
+                                format!("Failed to compile {}: {}", script_stem, e)
+                            }
+                            pos => {
+                                let line = pos.line().unwrap_or(0);
+                                let col = pos.position().unwrap_or(0);
+                                format!(
+                                    "Failed to compile {} at line {}, column {}: {}",
+                                    script_stem, line, col, e
+                                )
+                            }
+                        };
+                        
+                        log::error!("{}", error_details);
+                        
+                        // Try to show context around the error
+                        if let Some(line_num) = e.position().line() {
+                            let script_lines: Vec<&str> = script.lines().collect();
+                            let line_idx = line_num - 1;
+                            
+                            if line_idx < script_lines.len() {
+                                log::error!("Context around error:");
+                                
+                                // Show 2 lines before
+                                if line_idx >= 2 {
+                                    log::error!("  {} | {}", line_num - 2, script_lines[line_idx - 2]);
+                                }
+                                if line_idx >= 1 {
+                                    log::error!("  {} | {}", line_num - 1, script_lines[line_idx - 1]);
+                                }
+                                
+                                // Show the error line with pointer
+                                log::error!("▶ {} | {}", line_num, script_lines[line_idx]);
+                                
+                                if let Some(col) = e.position().position() {
+                                    let pointer = " ".repeat((col - 1) + format!("▶ {} | ", line_num).len()) + "^";
+                                    log::error!("{}", pointer);
+                                }
+                                
+                                // Show 2 lines after
+                                if line_idx + 1 < script_lines.len() {
+                                    log::error!("  {} | {}", line_num + 1, script_lines[line_idx + 1]);
+                                }
+                                if line_idx + 2 < script_lines.len() {
+                                    log::error!("  {} | {}", line_num + 2, script_lines[line_idx + 2]);
+                                }
+                            }
+                        }
+                        
                         let err_script = format!(
                             "let app_id = \"error.{script_stem}\";\
                              let app_name = \"{script_stem}\";\
@@ -241,13 +304,13 @@ impl AppSlot {
                         let err_app = ScriptedApp::new(script_stem, &err_script, err_db)
                             .expect("error fallback script is always valid");
                         AppSlot::Scripted {
-                            app: err_app,
+                            app: Box::new(err_app),
                             db_path: PathBuf::new(),
                         }
                     }
                 }
             }
-            AppKind::Draw => AppSlot::Native(NativeKind::Draw(Draw::new())),
+            AppKind::Draw => AppSlot::Native(NativeKind::Draw(Box::new(Draw::new()))),
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
         }
     }
