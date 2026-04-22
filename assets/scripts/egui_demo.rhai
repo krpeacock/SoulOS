@@ -71,7 +71,7 @@ fn on_draw() {
     ui_slider(slider_value, 0, 100);
     ui_drag_value(42, "Value:");
     ui_combo_box("Choose:", combo_selection);
-    ui_progress_bar(progress_value);
+    ui_label("Progress: " + progress_value + "%");
     ui_spinner();
     ui_color_edit(selected_color);
     

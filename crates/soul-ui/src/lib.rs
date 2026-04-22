@@ -73,6 +73,9 @@
 extern crate alloc;
 
 pub mod builder;
+pub mod egui_layout;
+pub mod egui_scroll;
+pub mod egui_widgets;
 pub mod form;
 pub mod keyboard;
 pub mod pagination;
@@ -89,6 +92,9 @@ mod tests;
 /// Convenience re-exports for apps that prefer one glob import.
 pub mod prelude {
     pub use crate::builder::*;
+    pub use crate::egui_layout::*;
+    pub use crate::egui_scroll::*;
+    pub use crate::egui_widgets::*;
     pub use crate::form::*;
     pub use crate::keyboard::{Keyboard, KeyboardOutput, Layer, TypedKey};
     pub use crate::pagination::{Pagination, PaginationAction};
@@ -101,6 +107,9 @@ pub mod prelude {
 }
 
 pub use builder::*;
+pub use egui_layout::*;
+pub use egui_scroll::*;
+pub use egui_widgets::*;
 pub use form::*;
 pub use keyboard::{Keyboard, KeyboardOutput, Layer, TypedKey, KEYBOARD_HEIGHT, KEYBOARD_WIDTH};
 pub use pagination::{Pagination, PaginationAction};

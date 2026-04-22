@@ -564,6 +564,59 @@ impl ScrollableView {
         }
     }
 
+    /// Resize the scroll view area (e.g., when keyboard appears/disappears).
+    pub fn resize(&mut self, new_area: Rectangle) -> ScrollbarOutput {
+        let old_area = self.area;
+        self.area = new_area;
+        
+        let viewport_height = new_area.size.height;
+        let viewport_ratio = if self.content_height > 0 {
+            (viewport_height as f32 / self.content_height as f32).min(1.0)
+        } else {
+            1.0
+        };
+        
+        let was_visible = self.scrollbar_visible;
+        self.scrollbar_visible = viewport_ratio < 1.0;
+        
+        if self.scrollbar_visible {
+            let scrollbar_area = Rectangle::new(
+                Point::new(
+                    new_area.top_left.x + new_area.size.width as i32 - Scrollbar::MIN_WIDTH as i32,
+                    new_area.top_left.y,
+                ),
+                Size::new(Scrollbar::MIN_WIDTH, new_area.size.height),
+            );
+            self.scrollbar = Scrollbar::new(scrollbar_area, viewport_ratio);
+        }
+        
+        let dirty = if old_area != new_area || was_visible != self.scrollbar_visible {
+            // Return the union of old and new areas to ensure complete redraw
+            let union_x = old_area.top_left.x.min(new_area.top_left.x);
+            let union_y = old_area.top_left.y.min(new_area.top_left.y);
+            let union_right = (old_area.top_left.x + old_area.size.width as i32)
+                .max(new_area.top_left.x + new_area.size.width as i32);
+            let union_bottom = (old_area.top_left.y + old_area.size.height as i32)
+                .max(new_area.top_left.y + new_area.size.height as i32);
+            
+            Some(Rectangle::new(
+                Point::new(union_x, union_y),
+                Size::new(
+                    (union_right - union_x) as u32,
+                    (union_bottom - union_y) as u32,
+                ),
+            ))
+        } else {
+            None
+        };
+        
+        ScrollbarOutput {
+            dirty,
+            position: self.scrollbar.position(),
+            position_changed: false,
+        }
+    }
+
     /// Update the content height and recalculate scrollbar.
     pub fn set_content_height(&mut self, height: u32) -> ScrollbarOutput {
         self.content_height = height;

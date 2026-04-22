@@ -2,6 +2,7 @@
 
 mod builder;
 mod draw;
+mod egui_demo;
 mod launcher;
 mod launcher_store;
 
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
 use draw::Draw;
+use egui_demo::EguiDemo;
 use launcher::Launcher;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
@@ -39,6 +41,7 @@ pub(crate) enum NativeKind {
     Launcher(Launcher),
     Draw(Box<Draw>),
     Builder(MobileBuilder),
+    EguiDemo(EguiDemo),
 }
 
 impl NativeKind {
@@ -47,6 +50,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::APP_ID,
             NativeKind::Draw(_) => Draw::APP_ID,
             NativeKind::Builder(_) => MobileBuilder::APP_ID,
+            NativeKind::EguiDemo(_) => EguiDemo::APP_ID,
         }
     }
 
@@ -55,6 +59,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::NAME,
             NativeKind::Draw(_) => Draw::NAME,
             NativeKind::Builder(_) => MobileBuilder::NAME,
+            NativeKind::EguiDemo(_) => EguiDemo::NAME,
         }
     }
 
@@ -65,6 +70,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => None,
             NativeKind::Draw(_) => Some("draw"),
             NativeKind::Builder(_) => Some("builder"),
+            NativeKind::EguiDemo(_) => Some("egui_demo"),
         }
     }
 
@@ -79,6 +85,10 @@ impl NativeKind {
                 b.handle(event, ctx);
                 None
             }
+            NativeKind::EguiDemo(e) => {
+                e.handle(event, ctx);
+                None
+            }
         }
     }
 
@@ -87,6 +97,7 @@ impl NativeKind {
             NativeKind::Launcher(l) => l.draw(canvas),
             NativeKind::Draw(d) => d.draw(canvas),
             NativeKind::Builder(b) => b.draw(canvas),
+            NativeKind::EguiDemo(e) => e.draw(canvas),
         }
     }
 
@@ -95,6 +106,7 @@ impl NativeKind {
             NativeKind::Launcher(l) => l.a11y_nodes(),
             NativeKind::Draw(d) => d.a11y_nodes(),
             NativeKind::Builder(b) => b.a11y_nodes(),
+            NativeKind::EguiDemo(e) => e.a11y_nodes(),
         }
     }
 
@@ -103,6 +115,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => {}
             NativeKind::Draw(d) => d.persist(),
             NativeKind::Builder(b) => b.persist(),
+            NativeKind::EguiDemo(e) => e.persist(),
         }
     }
 }
@@ -128,6 +141,7 @@ enum AppKind {
     },
     Draw,
     Builder,
+    EguiDemo,
 }
 
 /// The app manifest. Only the minimum needed to locate and load each app.
@@ -198,6 +212,9 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
     },
     AppDescriptor {
         kind: AppKind::Builder,
+    },
+    AppDescriptor {
+        kind: AppKind::EguiDemo,
     },
 ];
 
@@ -312,6 +329,7 @@ impl AppSlot {
             }
             AppKind::Draw => AppSlot::Native(NativeKind::Draw(Box::new(Draw::new()))),
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
+            AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
         }
     }
 
@@ -480,7 +498,7 @@ struct Host {
     stack: Vec<usize>,
 
     /// Heap-stable app registry for Rhai's `system_list_apps()`.
-    _app_meta: Box<Vec<soul_script::AppEntry>>,
+    _app_meta: Vec<soul_script::AppEntry>,
 
     strip_pressed: bool,
     a11y_enabled: bool,
@@ -503,19 +521,17 @@ impl Host {
 
         // Build and register the app metadata for Rhai's `system_list_apps()`.
         // Excludes Launcher (index 0). `icon_stem` lets the Launcher load PGM icons.
-        let app_meta: Box<Vec<soul_script::AppEntry>> = Box::new(
-            apps.iter()
-                .enumerate()
-                .skip(1)
-                .map(|(slot_idx, slot)| soul_script::AppEntry {
-                    app_id: slot.app_id(),
-                    name: slot.name(),
-                    slot_idx,
-                    icon_stem: slot.icon_stem().unwrap_or_default(),
-                })
-                .collect(),
-        );
-        // SAFETY: app_meta is boxed (heap-stable) and lives as long as Host.
+        let app_meta: Vec<soul_script::AppEntry> = apps.iter()
+            .enumerate()
+            .skip(1)
+            .map(|(slot_idx, slot)| soul_script::AppEntry {
+                app_id: slot.app_id(),
+                name: slot.name(),
+                slot_idx,
+                icon_stem: slot.icon_stem().unwrap_or_default(),
+            })
+            .collect();
+        // SAFETY: app_meta is heap-stable and lives as long as Host.
         unsafe {
             soul_script::set_app_list(app_meta.as_ref() as *const _);
         }
