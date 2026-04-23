@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
+    mono_font::{ascii::FONT_5X8, MonoTextStyle},
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, Rectangle},
@@ -60,8 +60,8 @@ use embedded_graphics::{
 
 use crate::palette::{BLACK, WHITE};
 
-const CHAR_W: i32 = 6;
-const LINE_H: i32 = 12;
+const CHAR_W: i32 = 5;
+const LINE_H: i32 = 10;
 const TEXT_PAD: i32 = 4;
 
 /// Time (ms) a motionless press must persist before it becomes a
@@ -117,6 +117,9 @@ pub struct TextArea {
     anchor: Option<usize>,
     layout: Vec<VisualLine>,
     press: Option<Press>,
+    /// Index of the first visual line shown at the top of the widget.
+    /// Adjusted automatically whenever the cursor moves out of view.
+    scroll_line: usize,
 }
 
 impl TextArea {
@@ -130,6 +133,7 @@ impl TextArea {
             anchor: None,
             layout: Vec::new(),
             press: None,
+            scroll_line: 0,
         };
         this.recompute_layout();
         this
@@ -150,14 +154,15 @@ impl TextArea {
         &self.buffer
     }
 
-    /// Replace the buffer contents. Clears any selection and clamps
-    /// the cursor. Returns the full widget area as the dirty rect.
+    /// Replace the buffer contents. Clears any selection, resets
+    /// scroll to the top, and clamps the cursor.
     pub fn set_text(&mut self, text: String) -> Option<Rectangle> {
         self.buffer = text;
         if self.cursor > self.buffer.len() {
             self.cursor = self.buffer.len();
         }
         self.anchor = None;
+        self.scroll_line = 0;
         self.recompute_layout();
         Some(self.area)
     }
@@ -280,6 +285,7 @@ impl TextArea {
         self.buffer.insert_str(pos, s);
         self.cursor = pos + s.len();
         self.recompute_layout();
+        self.ensure_cursor_visible();
         TextAreaOutput {
             dirty: Some(self.area),
             text_changed: true,
@@ -291,6 +297,7 @@ impl TextArea {
     pub fn backspace(&mut self) -> TextAreaOutput {
         if self.delete_selection() {
             self.recompute_layout();
+            self.ensure_cursor_visible();
             return TextAreaOutput {
                 dirty: Some(self.area),
                 text_changed: true,
@@ -305,6 +312,7 @@ impl TextArea {
             self.buffer.replace_range(prev..self.cursor, "");
             self.cursor = prev;
             self.recompute_layout();
+            self.ensure_cursor_visible();
             return TextAreaOutput {
                 dirty: Some(self.area),
                 text_changed: true,
@@ -320,8 +328,7 @@ impl TextArea {
 
     // --- cursor navigation --------------------------------------------
 
-    /// Move the cursor one character to the left. Collapses any
-    /// selection.
+    /// Move the cursor one character to the left. Collapses any selection.
     pub fn cursor_left(&mut self) -> Option<Rectangle> {
         self.anchor = None;
         if self.cursor > 0 {
@@ -331,47 +338,111 @@ impl TextArea {
                 .unwrap()
                 .0;
             self.cursor = prev;
+            self.ensure_cursor_visible();
             return Some(self.area);
         }
         None
     }
 
-    /// Move the cursor one character to the right. Collapses any
-    /// selection.
+    /// Move the cursor one character to the right. Collapses any selection.
     pub fn cursor_right(&mut self) -> Option<Rectangle> {
         self.anchor = None;
         if self.cursor < self.buffer.len() {
             let c = self.buffer[self.cursor..].chars().next().unwrap();
             self.cursor += c.len_utf8();
+            self.ensure_cursor_visible();
             return Some(self.area);
         }
         None
     }
 
-    /// Move the cursor to the same column on the previous visual
-    /// line. Collapses any selection.
+    /// Move the cursor to the same column on the previous visual line.
     pub fn cursor_up(&mut self) -> Option<Rectangle> {
         self.anchor = None;
-        if let Some(p) = self.caret_position(self.cursor) {
-            if p.y > self.area.top_left.y + TEXT_PAD {
-                let new_y = p.y - LINE_H;
-                self.cursor = self.char_at_point(p.x as i16, new_y as i16);
-                return Some(self.area);
-            }
+        let line_idx = self.cursor_line_idx();
+        if line_idx > 0 {
+            let col = self.cursor_col_in_line(line_idx);
+            let prev = self.layout[line_idx - 1];
+            let line_text = &self.buffer[prev.start..prev.end];
+            let char_count = line_text.chars().count();
+            let target_col = col.min(char_count);
+            let byte_off = line_text
+                .char_indices()
+                .nth(target_col)
+                .map(|(i, _)| i)
+                .unwrap_or(line_text.len());
+            self.cursor = prev.start + byte_off;
+            self.ensure_cursor_visible();
+            return Some(self.area);
         }
         None
     }
 
     /// Move the cursor to the same column on the next visual line.
-    /// Collapses any selection.
     pub fn cursor_down(&mut self) -> Option<Rectangle> {
         self.anchor = None;
-        if let Some(p) = self.caret_position(self.cursor) {
-            let new_y = p.y + LINE_H;
-            self.cursor = self.char_at_point(p.x as i16, new_y as i16);
+        let line_idx = self.cursor_line_idx();
+        if line_idx + 1 < self.layout.len() {
+            let col = self.cursor_col_in_line(line_idx);
+            let next = self.layout[line_idx + 1];
+            let line_text = &self.buffer[next.start..next.end];
+            let char_count = line_text.chars().count();
+            let target_col = col.min(char_count);
+            let byte_off = line_text
+                .char_indices()
+                .nth(target_col)
+                .map(|(i, _)| i)
+                .unwrap_or(line_text.len());
+            self.cursor = next.start + byte_off;
+            self.ensure_cursor_visible();
             return Some(self.area);
         }
         None
+    }
+
+    /// Scroll up one page (keeping cursor in view).
+    pub fn page_up(&mut self) -> Option<Rectangle> {
+        let vis = self.visible_lines();
+        let line_idx = self.cursor_line_idx();
+        let new_line = line_idx.saturating_sub(vis);
+        if new_line == line_idx {
+            return None;
+        }
+        // Move cursor to the same column on new_line.
+        let col = self.cursor_col_in_line(line_idx);
+        let vl = self.layout[new_line];
+        let line_text = &self.buffer[vl.start..vl.end];
+        let char_count = line_text.chars().count();
+        let byte_off = line_text
+            .char_indices()
+            .nth(col.min(char_count))
+            .map(|(i, _)| i)
+            .unwrap_or(line_text.len());
+        self.cursor = vl.start + byte_off;
+        self.ensure_cursor_visible();
+        Some(self.area)
+    }
+
+    /// Scroll down one page (keeping cursor in view).
+    pub fn page_down(&mut self) -> Option<Rectangle> {
+        let vis = self.visible_lines();
+        let line_idx = self.cursor_line_idx();
+        let new_line = (line_idx + vis).min(self.layout.len().saturating_sub(1));
+        if new_line == line_idx {
+            return None;
+        }
+        let col = self.cursor_col_in_line(line_idx);
+        let vl = self.layout[new_line];
+        let line_text = &self.buffer[vl.start..vl.end];
+        let char_count = line_text.chars().count();
+        let byte_off = line_text
+            .char_indices()
+            .nth(col.min(char_count))
+            .map(|(i, _)| i)
+            .unwrap_or(line_text.len());
+        self.cursor = vl.start + byte_off;
+        self.ensure_cursor_visible();
+        Some(self.area)
     }
 
     // --- render --------------------------------------------------------
@@ -381,13 +452,17 @@ impl TextArea {
     where
         D: DrawTarget<Color = Gray8>,
     {
-        let black_style = MonoTextStyle::new(&FONT_6X10, BLACK);
-        let white_style = MonoTextStyle::new(&FONT_6X10, WHITE);
+        let black_style = MonoTextStyle::new(&FONT_5X8, BLACK);
+        let white_style = MonoTextStyle::new(&FONT_5X8, WHITE);
         let max_y = self.area.top_left.y + self.area.size.height as i32;
 
-        // Pass 1: paint all text in black.
+        // Pass 1: paint visible lines in black.
         for (idx, line) in self.layout.iter().enumerate() {
-            let y = self.area.top_left.y + TEXT_PAD + idx as i32 * LINE_H;
+            if idx < self.scroll_line {
+                continue;
+            }
+            let row = (idx - self.scroll_line) as i32;
+            let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
             if y + LINE_H > max_y {
                 break;
             }
@@ -404,21 +479,21 @@ impl TextArea {
         // Pass 2: invert selected spans.
         let selection = self.anchor.and_then(|a| {
             let (lo, hi) = (a.min(self.cursor), a.max(self.cursor));
-            if lo == hi {
-                None
-            } else {
-                Some((lo, hi))
-            }
+            if lo == hi { None } else { Some((lo, hi)) }
         });
 
         if let Some((sel_start, sel_end)) = selection {
             for (idx, line) in self.layout.iter().enumerate() {
+                if idx < self.scroll_line {
+                    continue;
+                }
                 let ls = sel_start.max(line.start);
                 let le = sel_end.min(line.end);
                 if ls >= le {
                     continue;
                 }
-                let y = self.area.top_left.y + TEXT_PAD + idx as i32 * LINE_H;
+                let row = (idx - self.scroll_line) as i32;
+                let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
                 if y + LINE_H > max_y {
                     break;
                 }
@@ -428,8 +503,7 @@ impl TextArea {
                     Point::new(self.area.top_left.x + TEXT_PAD + s_chars * CHAR_W, y),
                     Size::new(((e_chars - s_chars) * CHAR_W) as u32, LINE_H as u32),
                 );
-                rect.into_styled(PrimitiveStyle::with_fill(BLACK))
-                    .draw(canvas)?;
+                rect.into_styled(PrimitiveStyle::with_fill(BLACK)).draw(canvas)?;
                 let selected_text = &self.buffer[ls..le];
                 Text::with_baseline(
                     selected_text,
@@ -476,7 +550,9 @@ impl TextArea {
             return 0;
         }
         let y_rel = (y as i32 - self.area.top_left.y - TEXT_PAD).max(0);
-        let line_idx = ((y_rel / LINE_H) as usize).min(self.layout.len() - 1);
+        // Offset by scroll_line so tapping the top row hits layout[scroll_line].
+        let line_idx = (self.scroll_line + (y_rel / LINE_H) as usize)
+            .min(self.layout.len() - 1);
         let line = self.layout[line_idx];
         let x_rel = (x as i32 - self.area.top_left.x - TEXT_PAD).max(0);
         let char_in_line = (x_rel / CHAR_W) as usize;
@@ -491,16 +567,60 @@ impl TextArea {
         line.start + byte_offset
     }
 
+    /// Returns the screen position of the cursor's leading edge, or
+    /// `None` when the cursor is scrolled out of the visible area.
     fn caret_position(&self, cursor: usize) -> Option<Point> {
         for (idx, line) in self.layout.iter().enumerate() {
             if cursor >= line.start && cursor <= line.end {
+                if idx < self.scroll_line {
+                    return None; // scrolled above view
+                }
+                let row = (idx - self.scroll_line) as i32;
+                let max_row = self.visible_lines() as i32;
+                if row >= max_row {
+                    return None; // scrolled below view
+                }
                 let char_offset = self.buffer[line.start..cursor].chars().count() as i32;
                 let x = self.area.top_left.x + TEXT_PAD + char_offset * CHAR_W;
-                let y = self.area.top_left.y + TEXT_PAD + idx as i32 * LINE_H;
+                let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
                 return Some(Point::new(x, y));
             }
         }
         None
+    }
+
+    // --- scroll helpers ------------------------------------------------
+
+    /// How many text rows fit in the visible area.
+    fn visible_lines(&self) -> usize {
+        ((self.area.size.height as i32 - TEXT_PAD) / LINE_H).max(1) as usize
+    }
+
+    /// Visual-line index (into `self.layout`) that contains the cursor.
+    fn cursor_line_idx(&self) -> usize {
+        self.layout
+            .iter()
+            .position(|vl| self.cursor >= vl.start && self.cursor <= vl.end)
+            .unwrap_or(self.layout.len().saturating_sub(1))
+    }
+
+    /// Column (char index within the line) of the cursor.
+    fn cursor_col_in_line(&self, line_idx: usize) -> usize {
+        let vl = self.layout[line_idx];
+        self.buffer[vl.start..self.cursor.min(vl.end)]
+            .chars()
+            .count()
+    }
+
+    /// Adjust `scroll_line` so the cursor's visual line is visible.
+    fn ensure_cursor_visible(&mut self) {
+        let line_idx = self.cursor_line_idx();
+        let vis = self.visible_lines();
+        if line_idx < self.scroll_line {
+            self.scroll_line = line_idx;
+        } else if line_idx >= self.scroll_line + vis {
+            self.scroll_line = line_idx + 1 - vis;
+        }
     }
 }
 

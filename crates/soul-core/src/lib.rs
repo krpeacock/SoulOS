@@ -65,7 +65,7 @@ extern crate alloc;
 
 use embedded_graphics::{
     draw_target::{DrawTarget, DrawTargetExt},
-    pixelcolor::{Gray8, GrayColor},
+    pixelcolor::Gray8,
     prelude::*,
     primitives::{PrimitiveStyle, Rectangle},
 };
@@ -300,12 +300,14 @@ pub trait App {
 
     /// Paint the current app state into `canvas`.
     ///
-    /// The runtime only calls this when there's a non-empty dirty
-    /// region, and `canvas` is a clipped view of the real display:
-    /// draws outside the dirty region are discarded. You can and
-    /// should draw the entire scene unconditionally — the clipper
-    /// makes this cheap.
-    fn draw<D>(&mut self, canvas: &mut D)
+    /// Only called when there is a non-empty dirty region.  `canvas`
+    /// is already clipped to `dirty` — writes outside it are
+    /// discarded by the hardware/simulator.
+    ///
+    /// **Do not draw unconditionally.**  Use `dirty` to restrict your
+    /// iteration to only the changed region.  On SoulOS every wasted
+    /// pixel write costs real cycles on slow hardware.
+    fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>;
 
@@ -337,11 +339,11 @@ fn translate(input: InputEvent) -> Option<Event> {
 /// 2. Drain all pending input events through [`App::handle`].
 /// 3. Deliver a [`Event::Tick`] with the current monotonic time.
 /// 4. If any handler called [`Ctx::invalidate`], clip the display
-///    to the dirty region, fill it with [`Gray8::WHITE`], and call
-///    [`App::draw`].
-/// 5. Flush the platform (present frame, pump events) and sleep
-///    for ~16 ms.
-/// 6. On quit, deliver [`Event::AppStop`] and return.
+///    to the dirty region and call [`App::draw`] with that rect.
+///    The app owns its own background — no blanket white fill.
+/// 5. Flush the platform (present frame, pump new events).
+/// 6. Sleep for the remainder of a 16 ms budget (adaptive).
+/// 7. On quit, deliver [`Event::AppStop`] and return.
 ///
 /// Apps never call `run` themselves — the `soul-runner` binary
 /// does. This function is public so alternative platforms (tests,
@@ -359,6 +361,8 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
         app.handle(Event::AppStart, &mut ctx);
     }
     loop {
+        let frame_start = platform.now_ms();
+
         while let Some(ev) = platform.poll_event() {
             if matches!(ev, InputEvent::Quit) {
                 let now = platform.now_ms();
@@ -391,10 +395,12 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
         }
         if let Some(rect) = dirty.take() {
             let mut clip = platform.display().clipped(&rect);
+            // Clear only the dirty region to white before drawing.
+            // This is bounded to the invalidated rect, not the full screen.
             let _ = rect
                 .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                 .draw(&mut clip);
-            app.draw(&mut clip);
+            app.draw(&mut clip, rect);
         }
 
         // Drain accessibility speech
@@ -402,7 +408,14 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
             platform.speak(&text);
         }
 
+        // Flush (present frame + pump new events into the HAL queue).
         platform.flush();
-        platform.sleep_ms(16);
+
+        // Adaptive sleep: hold ~16 ms per frame, accounting for work done.
+        let elapsed = platform.now_ms().saturating_sub(frame_start);
+        let budget: u64 = 16;
+        if elapsed < budget {
+            platform.sleep_ms((budget - elapsed) as u32);
+        }
     }
 }

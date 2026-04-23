@@ -232,6 +232,29 @@ impl Launcher {
                     }
                 }
             }
+            "script" => {
+                // Write the script source back to the .rhai file on disk.
+                let path = soul_script::app_list()
+                    .iter()
+                    .find(|e| e.app_id == app_id)
+                    .and_then(|e| {
+                        let stem = e.icon_stem.as_str();
+                        if stem.is_empty() { None }
+                        else {
+                            Some(std::path::PathBuf::from("assets/scripts")
+                                .join(format!("{stem}.rhai")))
+                        }
+                    });
+                if let Some(p) = path {
+                    if let Err(e) = std::fs::write(&p, _text.as_bytes()) {
+                        log::warn!("launcher: could not save script for '{app_id}': {e}");
+                    } else {
+                        log::info!("launcher: saved script for '{app_id}' → {}", p.display());
+                    }
+                } else {
+                    log::warn!("launcher: set_resource: no script path found for '{app_id}'");
+                }
+            }
             _ => {
                 log::warn!("launcher: set_resource: unknown kind '{kind}' for '{app_id}'");
             }
@@ -304,7 +327,7 @@ impl Launcher {
         }
     }
 
-    pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
+    pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, _dirty: Rectangle) {
         let title = if self.picker_mode { "Pick App" } else { Self::NAME };
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, title);
         let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);

@@ -1,7 +1,7 @@
 // Script-based launcher — exercises draw_pixels, load_icon, and system_list_apps.
 
 let app_id   = "com.soulos.launcher2";
-let app_name = "Launcher 2";
+let app_name = "Home2";
 
 let apps  = [];   // [{id, name, icon}] from system_list_apps()
 let icons = [];   // parallel array of raw pixel blobs from load_icon()

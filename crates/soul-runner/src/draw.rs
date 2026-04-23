@@ -20,7 +20,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use crate::ICON_CELL;
-use crate::launcher::Launcher;
 
 const LOG_W: usize = 48;
 const LOG_H: usize = 48;
@@ -48,8 +47,7 @@ const MENU_ITEMS: &[&str] = &[
     "Save",
     "Name...",
     "Gallery",
-    "Import icon",
-    "Export icon",
+    "Done",      // returns edited bitmap to Builder; no-op when not in exchange mode
     "Load bg",
     "Clear bg",
     "Edit Layout",
@@ -100,21 +98,16 @@ enum Mode {
     },
 }
 
-/// What background exchange operation we're waiting for.
-enum PendingExchange {
-    PickForImport,
-    PickForExport,
-}
-
 pub struct Draw {
     db: soul_db::Database,
     db_path: PathBuf,
     current_record: Option<u32>,
     current_name: String,
-    /// True when the canvas holds an imported app icon (icon-sized region centred).
+    /// True when the canvas holds an icon-sized image for editing.
     icon_mode: bool,
-    exchange_app_id: String,
-    pending_exchange: Option<PendingExchange>,
+    /// When set, "Done" in the menu returns a SendResult with this action name
+    /// (e.g. "return_bitmap") back to the app that opened Draw via exchange.
+    return_action: Option<String>,
     fg: Vec<u8>,
     written: Vec<bool>,
     bg: Option<Vec<u8>>,
@@ -146,8 +139,7 @@ impl Draw {
             current_record,
             current_name,
             icon_mode: false,
-            exchange_app_id: String::new(),
-            pending_exchange: None,
+            return_action: None,
             fg,
             written,
             bg: None,
@@ -208,7 +200,6 @@ impl Draw {
                 self.current_record = Some(id);
                 self.current_name = decode_canvas_name(&rec.data.clone());
                 self.icon_mode = false;
-                self.exchange_app_id.clear();
                 ctx.invalidate(Self::canvas_screen_rect());
             }
             GalleryPurpose::Background => {
@@ -226,92 +217,25 @@ impl Draw {
             self.fg.fill(255);
             self.written.fill(false);
             self.icon_mode = false;
-            self.exchange_app_id.clear();
             ctx.invalidate(Self::canvas_screen_rect());
         }
     }
 
     // --- Exchange helpers -------------------------------------------------
 
-    fn start_import_icon(&mut self) -> Option<SystemRequest> {
-        self.pending_exchange = Some(PendingExchange::PickForImport);
-        Some(SystemRequest::Request { action: "pick_app".to_string() })
-    }
-
-    fn start_export_icon(&mut self) -> Option<SystemRequest> {
-        if self.exchange_app_id.is_empty() {
-            // No target yet; ask the user to pick an app first.
-            self.pending_exchange = Some(PendingExchange::PickForExport);
-            return Some(SystemRequest::Request { action: "pick_app".to_string() });
-        }
-        self.do_export_icon()
-    }
-
-    fn do_export_icon(&self) -> Option<SystemRequest> {
-        let app_id = self.exchange_app_id.clone();
-        if app_id.is_empty() {
-            return None;
-        }
-        let cell = ICON_CELL as usize;
-        let mut buf = Vec::with_capacity(cell * cell);
-        for y in 0..cell {
-            for x in 0..cell {
-                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
-                buf.push(self.display_value(i));
-            }
-        }
-        Some(SystemRequest::BackgroundSend {
-            action: "set_resource".to_string(),
-            payload: soul_core::ExchangePayload::Resource {
-                app_id,
-                kind: "icon".to_string(),
-                width: ICON_CELL as u16,
-                height: ICON_CELL as u16,
-                pixels: buf,
-                text: String::new(),
-            },
-            target: Launcher::APP_ID.to_string(),
-        })
-    }
-
     fn handle_exchange(&mut self, action: &str, payload: soul_core::ExchangePayload, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         match action {
-            "return_app" => {
-                // We got back an app_id from a pick_app request.
-                let soul_core::ExchangePayload::Text(app_id) = payload else { return None };
-                let app_id = app_id; // bind
-                match self.pending_exchange.take() {
-                    Some(PendingExchange::PickForImport) => {
-                        self.exchange_app_id = app_id.clone();
-                        // Fetch the icon from the Launcher via background call.
-                        Some(SystemRequest::BackgroundSend {
-                            action: "get_resource".to_string(),
-                            payload: soul_core::ExchangePayload::Resource {
-                                app_id,
-                                kind: "icon".to_string(),
-                                width: 0,
-                                height: 0,
-                                pixels: vec![],
-                                text: String::new(),
-                            },
-                            target: Launcher::APP_ID.to_string(),
-                        })
-                    }
-                    Some(PendingExchange::PickForExport) => {
-                        self.exchange_app_id = app_id;
-                        self.do_export_icon()
-                    }
-                    None => None,
-                }
-            }
-            "return_resource" => {
-                if let soul_core::ExchangePayload::Resource { pixels, width, height, .. } = payload {
+            // Builder opened Draw for icon editing and supplied the pixels directly.
+            "open_bitmap" => {
+                if let soul_core::ExchangePayload::Bitmap { width, height, ref pixels } = payload {
                     let w = width as usize;
                     let h = height as usize;
                     if !pixels.is_empty() && w > 0 && h > 0 {
-                        self.load_icon_pixels(&pixels, w, h, ctx);
+                        self.load_icon_pixels(pixels, w, h, ctx);
                     }
                 }
+                // Mark that "Done" should return the result to the caller.
+                self.return_action = Some("return_bitmap".to_string());
                 None
             }
             _ => None,
@@ -340,7 +264,7 @@ impl Draw {
         }
         self.icon_mode = true;
         self.current_record = None;
-        self.current_name = format!("icon:{}", self.exchange_app_id);
+        self.current_name = "icon".to_string();
         // Auto-save immediately — Palm principle: data is never lost on switch.
         self.save_canvas();
         save_db(&self.db, &self.db_path);
@@ -652,7 +576,7 @@ impl Draw {
                 self.current_name = "untitled".to_string();
                 self.bg = None;
                 self.icon_mode = false;
-                self.exchange_app_id.clear();
+                self.return_action = None;
                 ctx.invalidate_all();
                 None
             }
@@ -683,14 +607,31 @@ impl Draw {
                 None
             }
             4 => {
-                ctx.invalidate_all(); // close the menu visually before navigation
-                self.start_import_icon()
+                // Done — return edited bitmap to the app that opened Draw via exchange.
+                if let Some(action) = self.return_action.take() {
+                    // Extract just the icon cell from the canvas (fg is the full
+                    // LOG_W×LOG_H buffer; the icon lives at [ICON_OY..][ICON_OX..]).
+                    let cell = ICON_CELL as usize;
+                    let mut buf = Vec::with_capacity(cell * cell);
+                    for y in 0..cell {
+                        for x in 0..cell {
+                            let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
+                            buf.push(self.display_value(i));
+                        }
+                    }
+                    return Some(soul_script::SystemRequest::SendResult {
+                        action,
+                        payload: soul_core::ExchangePayload::Bitmap {
+                            width: ICON_CELL as u16,
+                            height: ICON_CELL as u16,
+                            pixels: buf,
+                        },
+                    });
+                }
+                ctx.invalidate_all();
+                None
             }
             5 => {
-                ctx.invalidate_all(); // close the menu visually before export
-                self.start_export_icon()
-            }
-            6 => {
                 // Load bg — open gallery as background picker
                 let records = self.list_gallery();
                 self.mode = Mode::Gallery {
@@ -701,23 +642,23 @@ impl Draw {
                 ctx.invalidate_all();
                 None
             }
-            7 => {
+            6 => {
                 self.clear_background(ctx);
                 ctx.invalidate_all();
                 None
             }
-            8 => {
+            7 => {
                 self.builder_mode = !self.builder_mode;
                 ctx.invalidate_all();
                 None
             }
-            9 => {
+            8 => {
                 self.edit_overlay.delete_selected(&mut self.ui_form);
                 self.persist_form();
                 ctx.invalidate_all();
                 None
             }
-            10 => {
+            9 => {
                 self.ui_form = Self::default_draw_ui();
                 self.persist_form();
                 ctx.invalidate_all();
@@ -1145,15 +1086,11 @@ impl App for Draw {
         self.handle_event(event, ctx);
     }
 
-    fn draw<D>(&mut self, canvas: &mut D)
+    fn draw<D>(&mut self, canvas: &mut D, _dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {
-        let title = if self.icon_mode {
-            format!("Draw · icon:{}", truncate_name(&self.exchange_app_id, 14))
-        } else {
-            format!("Draw · {}", truncate_name(&self.current_name, 22))
-        };
+        let title = format!("Draw · {}", truncate_name(&self.current_name, 22));
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, &title);
 
         let r = Self::canvas_screen_rect();

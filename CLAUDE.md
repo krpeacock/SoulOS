@@ -34,6 +34,11 @@ Corollary: *the event loop is the memory model.* An app's in-memory state **is**
 
 ## Architectural Invariants
 
+### Performance ###
+PalmOS had no busy cursor. Everything needs to respond fast enough to not need one.
+This needs to be true even on low end hardware like an Esp32. 
+Memory is also critical. Assume a very minimal footprint for this software.
+
 ### Database-centric storage (no files)
 
 PalmOS had no file system; records were the primitive. We keep this. `soul-db` stores categorized records. Apps do not write files; they mutate records. The platform handles durability, sync, and HotSync-style conflict resolution.

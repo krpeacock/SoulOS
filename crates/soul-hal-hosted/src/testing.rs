@@ -1,9 +1,7 @@
 //! Testing utilities for SoulOS applications
 //! Provides programmatic input injection and state inspection
 
-use embedded_graphics::{pixelcolor::Gray8, prelude::*};
 use soul_hal::InputEvent;
-use std::collections::VecDeque;
 
 /// A test scenario that can be programmatically executed
 #[derive(Debug, Clone)]
@@ -78,8 +76,8 @@ pub trait TestingPlatform {
     /// Take a screenshot and save to file
     fn screenshot(&self, filename: &str) -> Result<(), std::io::Error>;
 
-    /// Get the current display buffer for analysis
-    fn get_display_buffer(&self) -> &embedded_graphics_simulator::SimulatorDisplay<Gray8>;
+    /// Get the current display for analysis (implements `DrawTarget<Color = Gray8>`).
+    fn get_display_buffer(&self) -> &crate::MiniFbDisplay;
 
     /// Wait for a specific number of frames
     fn wait_frames(&mut self, frames: u32);
@@ -96,7 +94,7 @@ impl TestingPlatform for crate::HostedPlatform {
         Ok(())
     }
 
-    fn get_display_buffer(&self) -> &embedded_graphics_simulator::SimulatorDisplay<Gray8> {
+    fn get_display_buffer(&self) -> &crate::MiniFbDisplay {
         &self.display
     }
 

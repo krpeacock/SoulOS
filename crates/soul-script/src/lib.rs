@@ -121,8 +121,13 @@ pub enum SystemRequest {
     },
     /// Ask the kernel to launch the registered handler for `action` and
     /// deliver its result back to this app as [`soul_core::Event::Exchange`].
+    /// `payload` is forwarded to the handler in the opening Exchange event;
+    /// scripted apps use [`soul_core::ExchangePayload::Text`] with an empty
+    /// string (the Rhai `system_request` function).  Native apps can pass
+    /// richer payloads (e.g. a `Bitmap` when opening Draw for icon editing).
     Request {
         action: String,
+        payload: soul_core::ExchangePayload,
     },
     /// Return a result payload to the app that `Request`-ed this one.
     ///
@@ -350,6 +355,12 @@ impl ScriptedApp {
         engine.register_fn("pen_up", |area: &mut TextArea, x: i32, y: i32| {
             area.pen_released(x as i16, y as i16);
         });
+        engine.register_fn("cursor_left",  |area: &mut TextArea| { let _ = area.cursor_left(); });
+        engine.register_fn("cursor_right", |area: &mut TextArea| { let _ = area.cursor_right(); });
+        engine.register_fn("cursor_up",    |area: &mut TextArea| { let _ = area.cursor_up(); });
+        engine.register_fn("cursor_down",  |area: &mut TextArea| { let _ = area.cursor_down(); });
+        engine.register_fn("page_up",      |area: &mut TextArea| { let _ = area.page_up(); });
+        engine.register_fn("page_down",    |area: &mut TextArea| { let _ = area.page_down(); });
 
         // Register Keyboard type
         engine.register_type_with_name::<Keyboard>("Keyboard");
@@ -482,7 +493,10 @@ impl ScriptedApp {
         // result back to this app as an Exchange event.
         // In Rhai: system_request("pick_contact")
         engine.register_fn("system_request", |action: String| unsafe {
-            PENDING_SYSTEM = Some(SystemRequest::Request { action });
+            PENDING_SYSTEM = Some(SystemRequest::Request {
+                action,
+                payload: soul_core::ExchangePayload::Text(String::new()),
+            });
         });
         // System call: return a bitmap result to the app that request-ed this one.
         // In Rhai: system_send_result("return_bitmap", w, h, pixels)
@@ -836,9 +850,13 @@ impl App for ScriptedApp {
             Event::Key(code) => {
                 map.insert("type".into(), "Key".into());
                 match code {
-                    soul_core::KeyCode::Char(c) => map.insert("key".into(), c.to_string().into()),
+                    soul_core::KeyCode::Char(c)  => map.insert("key".into(), c.to_string().into()),
                     soul_core::KeyCode::Backspace => map.insert("key".into(), "Backspace".into()),
-                    soul_core::KeyCode::Enter => map.insert("key".into(), "Enter".into()),
+                    soul_core::KeyCode::Enter     => map.insert("key".into(), "Enter".into()),
+                    soul_core::KeyCode::ArrowLeft  => map.insert("key".into(), "ArrowLeft".into()),
+                    soul_core::KeyCode::ArrowRight => map.insert("key".into(), "ArrowRight".into()),
+                    soul_core::KeyCode::ArrowUp    => map.insert("key".into(), "ArrowUp".into()),
+                    soul_core::KeyCode::ArrowDown  => map.insert("key".into(), "ArrowDown".into()),
                     _ => map.insert("key".into(), "Other".into()),
                 };
             }
@@ -873,6 +891,9 @@ impl App for ScriptedApp {
                         map.insert("payload".into(), Dynamic::from_map(p));
                     }
                 }
+            }
+            Event::Menu => {
+                map.insert("type".into(), "Menu".into());
             }
             Event::ButtonDown(btn) => {
                 map.insert("type".into(), "ButtonDown".into());
@@ -918,7 +939,7 @@ impl App for ScriptedApp {
         }
     }
 
-    fn draw<D>(&mut self, canvas: &mut D)
+    fn draw<D>(&mut self, canvas: &mut D, _dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {

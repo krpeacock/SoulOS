@@ -3,6 +3,7 @@
 mod builder;
 mod draw;
 mod launcher;
+mod paint;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use builder::MobileBuilder;
 use draw::Draw;
 use launcher::Launcher;
+use paint::Paint;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
@@ -42,6 +44,7 @@ pub(crate) enum NativeKind {
     Launcher(Launcher),
     Draw(Draw),
     Builder(MobileBuilder),
+    Paint(Paint),
 }
 
 impl NativeKind {
@@ -50,6 +53,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::APP_ID,
             NativeKind::Draw(_) => Draw::APP_ID,
             NativeKind::Builder(_) => MobileBuilder::APP_ID,
+            NativeKind::Paint(_) => Paint::APP_ID,
         }
     }
 
@@ -58,6 +62,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::NAME,
             NativeKind::Draw(_) => Draw::NAME,
             NativeKind::Builder(_) => MobileBuilder::NAME,
+            NativeKind::Paint(_) => Paint::NAME,
         }
     }
 
@@ -68,6 +73,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => None,
             NativeKind::Draw(_) => Some("draw"),
             NativeKind::Builder(_) => Some("builder"),
+            NativeKind::Paint(_) => Some("paint"),
         }
     }
 
@@ -75,18 +81,17 @@ impl NativeKind {
         match self {
             NativeKind::Launcher(l) => l.handle(event, ctx),
             NativeKind::Draw(d) => d.handle_event(event, ctx),
-            NativeKind::Builder(b) => {
-                b.handle(event, ctx);
-                None
-            }
+            NativeKind::Builder(b) => b.handle_event(event, ctx),
+            NativeKind::Paint(p) => p.handle_event(event, ctx),
         }
     }
 
-    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
+    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         match self {
-            NativeKind::Launcher(l) => l.draw(canvas),
-            NativeKind::Draw(d) => d.draw(canvas),
-            NativeKind::Builder(b) => b.draw(canvas),
+            NativeKind::Launcher(l) => l.draw(canvas, dirty),
+            NativeKind::Draw(d) => d.draw(canvas, dirty),
+            NativeKind::Builder(b) => b.draw(canvas, dirty),
+            NativeKind::Paint(p) => p.draw(canvas, dirty),
         }
     }
 
@@ -95,6 +100,7 @@ impl NativeKind {
             NativeKind::Launcher(l) => l.a11y_nodes(),
             NativeKind::Draw(d) => d.a11y_nodes(),
             NativeKind::Builder(b) => b.a11y_nodes(),
+            NativeKind::Paint(p) => p.a11y_nodes(),
         }
     }
 
@@ -103,6 +109,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => {}
             NativeKind::Draw(d) => d.persist(),
             NativeKind::Builder(b) => b.persist(),
+            NativeKind::Paint(p) => p.persist(),
         }
     }
 }
@@ -132,6 +139,7 @@ enum AppKind {
         db: &'static str,
     },
     Draw { db: &'static str },
+    Paint { db: &'static str },
     Builder,
 }
 
@@ -197,6 +205,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
             db: ".soulos/sync.sdb",
         },
         handles: &["export_bitmap", "export_text", "import"],
+    },
+    AppDescriptor {
+        kind: AppKind::Paint { db: ".soulos/paint.sdb" },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Builder,
@@ -271,6 +283,7 @@ impl AppSlot {
                 }
             }
             AppKind::Draw { db } => AppSlot::Native(NativeKind::Draw(Draw::new(PathBuf::from(db)))),
+            AppKind::Paint { db } => AppSlot::Native(NativeKind::Paint(Paint::new(PathBuf::from(db)))),
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
         }
     }
@@ -320,13 +333,13 @@ impl AppSlot {
         }
     }
 
-    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
+    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         match self {
             AppSlot::Scripted { app, .. } => {
-                app.draw(canvas);
+                app.draw(canvas, dirty);
                 Self::drain_script_errors(app);
             }
-            AppSlot::Native(n) => n.draw(canvas),
+            AppSlot::Native(n) => n.draw(canvas, dirty),
         }
     }
 
@@ -648,8 +661,8 @@ impl Host {
             soul_script::SystemRequest::Send { action, payload, target } => {
                 self.route_send(action, payload, target, ctx);
             }
-            soul_script::SystemRequest::Request { action } => {
-                self.route_request(action, ctx);
+            soul_script::SystemRequest::Request { action, payload } => {
+                self.route_request(action, payload, ctx);
             }
             soul_script::SystemRequest::SendResult { action, payload } => {
                 self.route_send_result(action, payload, ctx);
@@ -689,9 +702,17 @@ impl Host {
     ///
     /// When the handler is the home app (Launcher), navigate back to it rather
     /// than trying to push it — it is always at the base of the stack. The
-    /// Launcher receives an `Exchange { action }` event so it can enter the
-    /// appropriate mode (e.g. picker for "pick_app").
-    fn route_request(&mut self, action: String, ctx: &mut Ctx<'_>) {
+    /// Launcher receives an `Exchange { action, payload }` event so it can enter
+    /// the appropriate mode (e.g. picker for "pick_app") or receive data to work
+    /// with (e.g. Bitmap pixels when opening Draw for icon editing).
+    /// Any follow-up request the handler emits immediately on receiving the
+    /// Exchange is processed (e.g. a BackgroundSend to fetch the icon).
+    fn route_request(
+        &mut self,
+        action: String,
+        payload: soul_core::ExchangePayload,
+        ctx: &mut Ctx<'_>,
+    ) {
         let requester = self.active_idx();
         let sender_id = self.apps[requester].app_id();
         let handler_idx = self.capability_index
@@ -708,15 +729,13 @@ impl Host {
         } else {
             self.launch_app(idx, ctx);
         }
-        // Tell the handler which action it was invoked for.
-        let ev = Event::Exchange {
-            action,
-            payload: soul_core::ExchangePayload::Text(String::new()),
-            sender: sender_id,
-        };
+        // Deliver the action and payload to the handler.
+        let ev = Event::Exchange { action, payload, sender: sender_id };
         let result = self.apps[idx].handle(ev, ctx);
-        if let Some(soul_script::SystemRequest::SendResult { action: ra, payload: rp }) = result {
-            self.route_send_result(ra, rp, ctx);
+        // Process any immediate follow-up (e.g. Draw doing a BackgroundSend to
+        // fetch the icon resource after receiving open_bitmap).
+        if let Some(req) = result {
+            self.process_request(req, ctx);
         }
     }
 
@@ -753,13 +772,19 @@ impl Host {
         let result = self.apps[idx].handle(ev, ctx);
 
         // If the handler returned a result, deliver it back to the requester.
+        // Process any follow-up request the requester emits (e.g. Builder
+        // receiving return_resource and then issuing Request { open_bitmap }).
         if let Some(soul_script::SystemRequest::SendResult { action: res_action, payload: res_payload }) = result {
+            let sender = self.apps[idx].app_id();
             let result_ev = Event::Exchange {
                 action: res_action,
                 payload: res_payload,
-                sender: self.apps[idx].app_id(),
+                sender,
             };
-            self.apps[requester].handle(result_ev, ctx);
+            let follow_up = self.apps[requester].handle(result_ev, ctx);
+            if let Some(req) = follow_up {
+                self.process_request(req, ctx);
+            }
         }
 
         // Redraw after background exchange so any visual state change (e.g.
@@ -921,12 +946,12 @@ impl App for Host {
         self.dispatch_event(event, ctx);
     }
 
-    fn draw<D>(&mut self, canvas: &mut D)
+    fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {
         let active = self.active_idx();
-        self.apps[active].draw(canvas);
+        self.apps[active].draw(canvas, dirty);
         let label = self.active_label().to_string();
         draw_system_strip(canvas, &label);
 
@@ -1009,7 +1034,8 @@ fn run_headless_test(name: &str) {
 
         host.handle(core_event, &mut ctx);
         let mut display = platform.get_display_buffer().clone();
-        host.draw(&mut display);
+        let display_size = display.size();
+        host.draw(&mut display, Rectangle::new(Point::zero(), display_size));
         std::thread::sleep(std::time::Duration::from_millis(event.delay_ms));
     }
     println!("Headless test finished.");

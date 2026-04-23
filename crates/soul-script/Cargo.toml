@@ -12,7 +12,7 @@ std = ["rhai/std"]
 soul-core = { workspace = true }
 soul-ui = { workspace = true }
 soul-db = { workspace = true }
-rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float", "debugging"] }
+rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float"] }
 serde.workspace = true
 serde_json.workspace = true
 embedded-graphics.workspace = true
