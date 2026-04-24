@@ -98,14 +98,14 @@ const SHEET_COL_W: usize = 18;
 /// (y_start, y_end inclusive) for each of the 8 tool rows in the sheet.
 /// Adjust these if the sheet is regenerated at different dimensions.
 const TOOL_BANDS: [(usize, usize); 8] = [
-    (1,   18),   // row 0: Pen      | Eraser
-    (20,  37),   // row 1: Lines    | Selection
-    (39,  56),   // row 2: Text     | Scroll
-    (58,  75),   // row 3: Brush    | Spray
-    (77,  92),   // row 4: SolidRect| RoundRect
-    (94,  110),  // row 5: Frame    | RoundFrame
-    (112, 129),  // row 6: Undo     | Magnify
-    (131, 148),  // row 7: Transparent | (empty)
+    (1, 18),    // row 0: Pen      | Eraser
+    (20, 37),   // row 1: Lines    | Selection
+    (39, 56),   // row 2: Text     | Scroll
+    (58, 75),   // row 3: Brush    | Spray
+    (77, 92),   // row 4: SolidRect| RoundRect
+    (94, 110),  // row 5: Frame    | RoundFrame
+    (112, 129), // row 6: Undo     | Magnify
+    (131, 148), // row 7: Transparent | (empty)
 ];
 
 impl ToolSheet {
@@ -127,8 +127,14 @@ impl ToolSheet {
     ) {
         let row = cell_idx / 2;
         let col = cell_idx % 2;
-        let Some(&(sy0, sy1)) = TOOL_BANDS.get(row) else { return };
-        let sx0 = if col == 0 { SHEET_LEFT_X } else { SHEET_RIGHT_X };
+        let Some(&(sy0, sy1)) = TOOL_BANDS.get(row) else {
+            return;
+        };
+        let sx0 = if col == 0 {
+            SHEET_LEFT_X
+        } else {
+            SHEET_RIGHT_X
+        };
         let src_w = SHEET_COL_W;
         let src_h = sy1 - sy0 + 1;
 
@@ -225,14 +231,22 @@ impl Tool {
 /// Left-to-right, top-to-bottom order of the two-column palette grid.
 /// `None` at index 12 = Undo action button (not a persistent tool mode).
 const PALETTE_CELLS: &[Option<Tool>; 16] = &[
-    Some(Tool::Pen),         Some(Tool::Eraser),
-    Some(Tool::Lines),       Some(Tool::Selection),
-    Some(Tool::Text),        Some(Tool::Scroll),
-    Some(Tool::Brush),       Some(Tool::Spray),
-    Some(Tool::SolidRect),   Some(Tool::RoundRect),
-    Some(Tool::Frame),       Some(Tool::RoundFrame),
-    None,                    Some(Tool::Magnify),   // None = Undo action
-    Some(Tool::Transparent), None,
+    Some(Tool::Pen),
+    Some(Tool::Eraser),
+    Some(Tool::Lines),
+    Some(Tool::Selection),
+    Some(Tool::Text),
+    Some(Tool::Scroll),
+    Some(Tool::Brush),
+    Some(Tool::Spray),
+    Some(Tool::SolidRect),
+    Some(Tool::RoundRect),
+    Some(Tool::Frame),
+    Some(Tool::RoundFrame),
+    None,
+    Some(Tool::Magnify), // None = Undo action
+    Some(Tool::Transparent),
+    None,
 ];
 
 // ---------------------------------------------------------------------------
@@ -246,8 +260,8 @@ const PALETTE_CELLS: &[Option<Tool>; 16] = &[
 pub const PATTERNS: [[u8; 8]; 8] = [
     [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], // 0: solid black
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 1: white
-    [0x00; 8],                                          // 2: dark gray (solid 64)
-    [0x00; 8],                                          // 3: light gray (solid 192)
+    [0x00; 8],                                        // 2: dark gray (solid 64)
+    [0x00; 8],                                        // 3: light gray (solid 192)
     [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01], // 4: diagonal
     [0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55], // 5: 50% dots
     [0xFF, 0x88, 0x88, 0x88, 0xFF, 0x88, 0x88, 0x88], // 6: crosshatch
@@ -260,15 +274,18 @@ pub const PATTERNS: [[u8; 8]; 8] = [
 #[inline]
 pub fn pattern_value(pat: usize, x: i32, y: i32) -> u8 {
     match pat {
-        2 => 64,   // dark gray
-        3 => 192,  // light gray
+        2 => 64,  // dark gray
+        3 => 192, // light gray
         _ => {
             let row = PATTERNS[pat][(y.rem_euclid(8)) as usize];
-            if (row >> (7 - x.rem_euclid(8))) & 1 == 1 { 0 } else { 255 }
+            if (row >> (7 - x.rem_euclid(8))) & 1 == 1 {
+                0
+            } else {
+                255
+            }
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Touch target
@@ -299,8 +316,8 @@ enum TouchTarget {
 struct PixelRect {
     x0: i32,
     y0: i32,
-    w:  usize,
-    h:  usize,
+    w: usize,
+    h: usize,
     data: Vec<u8>,
 }
 
@@ -313,9 +330,11 @@ impl PixelRect {
         let y0 = by0.max(0);
         let x1 = bx1.min(CANVAS_W - 1);
         let y1 = by1.min(CANVAS_H - 1);
-        if x1 < x0 || y1 < y0 { return None; }
-        let w  = (x1 - x0 + 1) as usize;
-        let h  = (y1 - y0 + 1) as usize;
+        if x1 < x0 || y1 < y0 {
+            return None;
+        }
+        let w = (x1 - x0 + 1) as usize;
+        let h = (y1 - y0 + 1) as usize;
         let cw = CANVAS_W as usize;
         let mut data = vec![255u8; w * h];
         for row in 0..h {
@@ -332,16 +351,18 @@ impl PixelRect {
         for row in 0..self.h {
             let dst_off = (self.y0 as usize + row) * cw + self.x0 as usize;
             let src_off = row * self.w;
-            dst[dst_off..dst_off + self.w]
-                .copy_from_slice(&self.data[src_off..src_off + self.w]);
+            dst[dst_off..dst_off + self.w].copy_from_slice(&self.data[src_off..src_off + self.w]);
         }
     }
 
     /// Canvas-local bounding box (x0, y0, x1, y1).
     fn bounds(&self) -> (i32, i32, i32, i32) {
-        (self.x0, self.y0,
-         self.x0 + self.w as i32 - 1,
-         self.y0 + self.h as i32 - 1)
+        (
+            self.x0,
+            self.y0,
+            self.x0 + self.w as i32 - 1,
+            self.y0 + self.h as i32 - 1,
+        )
     }
 }
 
@@ -351,8 +372,10 @@ impl PixelRect {
 
 #[derive(Clone, Debug)]
 struct Selection {
-    x0: i32, y0: i32,
-    x1: i32, y1: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
     /// Pixels lifted from the canvas, if any.
     #[allow(dead_code)]
     pixels: Option<Vec<u8>>,
@@ -371,7 +394,7 @@ pub struct Paint {
 
     tool: Tool,
     pen_width: usize, // 0 = thinnest (1 px), 3 = widest (4 px)
-    pattern: usize,    // index into PATTERNS
+    pattern: usize,   // index into PATTERNS
 
     pen_active: bool,
     pen_pos: (i32, i32),
@@ -400,8 +423,8 @@ pub struct Paint {
     undo_stack: Vec<PixelRect>,
 
     /// Marching-ants animation state.
-    ant_phase: usize,   // 0..=6, advances by 2 each step
-    ant_last_ms: u64,   // platform time of last phase step
+    ant_phase: usize, // 0..=6, advances by 2 each step
+    ant_last_ms: u64, // platform time of last phase step
 
     touch: TouchTarget,
     menu_open: bool,
@@ -416,7 +439,7 @@ impl Paint {
 
     pub fn new(db_path: PathBuf) -> Self {
         let (db, pixels) = load_db(&db_path);
-        let ghost = pixels.clone();  // ghost starts equal to screen; one clone at startup only
+        let ghost = pixels.clone(); // ghost starts equal to screen; one clone at startup only
         let tool_sheet = ToolSheet::load();
         Self {
             db,
@@ -553,8 +576,12 @@ impl Paint {
         if let Some(pr) = PixelRect::capture(&self.ghost, 0, 0, CANVAS_W - 1, CANVAS_H - 1) {
             self.push_undo_record(pr);
         }
-        for px in self.pixels.iter_mut() { *px = 255; }
-        for px in self.ghost.iter_mut()  { *px = 255; }  // keep in sync
+        for px in self.pixels.iter_mut() {
+            *px = 255;
+        }
+        for px in self.ghost.iter_mut() {
+            *px = 255;
+        } // keep in sync
         ctx.invalidate(Self::canvas_rect());
     }
 
@@ -570,13 +597,17 @@ impl Paint {
             Some(s) => s,
             None => return,
         };
-        if sel.pixels.is_some() { return; }  // already captured
+        if sel.pixels.is_some() {
+            return;
+        } // already captured
 
         let x0 = sel.x0.max(0) as usize;
         let y0 = sel.y0.max(0) as usize;
         let x1 = (sel.x1).min(CANVAS_W - 1) as usize;
         let y1 = (sel.y1).min(CANVAS_H - 1) as usize;
-        if x1 < x0 || y1 < y0 { return; }
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
 
         let sw = x1 - x0 + 1;
         let sh = y1 - y0 + 1;
@@ -633,7 +664,9 @@ impl Paint {
         let y0 = cy.max(0);
         let x1 = (cx + w - 1).min(CANVAS_W - 1);
         let y1 = (cy + h - 1).min(CANVAS_H - 1);
-        if x1 < x0 || y1 < y0 { return None; }
+        if x1 < x0 || y1 < y0 {
+            return None;
+        }
         Some(Rectangle::new(
             Point::new(CANVAS_X + x0, CANVAS_Y + y0),
             Size::new((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32),
@@ -657,10 +690,7 @@ impl Paint {
     }
 
     /// Union of two canvas-local bounding boxes.
-    fn union_bounds(
-        a: (i32, i32, i32, i32),
-        b: (i32, i32, i32, i32),
-    ) -> (i32, i32, i32, i32) {
+    fn union_bounds(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
         (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
     }
 
@@ -670,7 +700,9 @@ impl Paint {
         let y0 = (b.1).max(0);
         let x1 = (b.2).min(CANVAS_W - 1);
         let y1 = (b.3).min(CANVAS_H - 1);
-        if x1 < x0 || y1 < y0 { return; }
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
         ctx.invalidate(Rectangle::new(
             Point::new(CANVAS_X + x0, CANVAS_Y + y0),
             Size::new((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32),
@@ -685,8 +717,10 @@ impl Paint {
         let y0 = b.1.max(0) as usize;
         let x1 = b.2.min(CANVAS_W - 1) as usize;
         let y1 = b.3.min(CANVAS_H - 1) as usize;
-        if x1 < x0 || y1 < y0 { return; }
-        let w   = CANVAS_W as usize;
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
+        let w = CANVAS_W as usize;
         let len = x1 - x0 + 1;
         for y in y0..=y1 {
             let off = y * w + x0;
@@ -700,41 +734,45 @@ impl Paint {
         old
     }
 
-
     // Maps CnvRoundRect — draws a rounded rectangle or circle.
     ///
     /// `diam_x` / `diam_y` control the corner ellipse diameters.
     /// Pass 32767 / 32767 for a full circle/ellipse.
-    pub fn draw_round_rect(&mut self, ctx: &mut Ctx<'_> , r: &Rectangle, mut diam_x: i32, mut diam_y: i32) {
+    pub fn draw_round_rect(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        r: &Rectangle,
+        mut diam_x: i32,
+        mut diam_y: i32,
+    ) {
         let width = r.size.width as i32;
         let height = r.size.height as i32;
         let mut a0: i32;
         let mut b0: i32;
-        let mut x:  i32;
-        let mut y:  i32;
+        let mut x: i32;
+        let mut y: i32;
         let mut x1: i32;
         let mut y1: i32;
 
         // long (32-bit) precision in the original; use i64 for safety
-        let asquared:      i64;
-        let two_asquared:  i64;
-        let bsquared:      i64;
-        let two_bsquared:  i64;
-        let mut d:  i64;
+        let asquared: i64;
+        let two_asquared: i64;
+        let bsquared: i64;
+        let two_bsquared: i64;
+        let mut d: i64;
         let mut dx: i64;
         let mut dy: i64;
 
-        let asquared1:     i64;
+        let asquared1: i64;
         let two_asquared1: i64;
-        let bsquared1:     i64;
+        let bsquared1: i64;
         let two_bsquared1: i64;
-        let mut d1:  i64;
+        let mut d1: i64;
         let mut dx1: i64;
         let mut dy1: i64;
 
-        let mut ry = Rectangle::default();
         let square_edge: bool;
-        let solid_fill:  bool;
+        let solid_fill: bool;
 
         // Save the caller's border-thickness (actual pixels) and set the
         // internal draw radius to 0 (= 1-pixel spans).  In the C original
@@ -749,21 +787,29 @@ impl Paint {
             diam_y += pen_width << 1;
         }
 
-        if diam_x > width { diam_x = width; }
-        if diam_y > height { diam_y = height; }
-        if diam_x < 2 { diam_x = 0; }
-        if diam_y < 2 { diam_y = 0; }
+        if diam_x > width {
+            diam_x = width;
+        }
+        if diam_y > height {
+            diam_y = height;
+        }
+        if diam_x < 2 {
+            diam_x = 0;
+        }
+        if diam_y < 2 {
+            diam_y = 0;
+        }
 
         square_edge = (diam_x | diam_y) == 0;
-        solid_fill  = (pen_width > (width >> 1)) || (pen_width > (height >> 1));
+        solid_fill = (pen_width > (width >> 1)) || (pen_width > (height >> 1));
 
         let extra_x: i32;
         let extra_y = height - diam_y;
         a0 = diam_x >> 1;
         b0 = diam_y >> 1;
-        let xc_left   = r.top_left.x + a0;
-        let xc_right  = xc_left + width - diam_x - 1;
-        let yc_top    = r.top_left.y + b0;
+        let xc_left = r.top_left.x + a0;
+        let xc_right = xc_left + width - diam_x - 1;
+        let yc_top = r.top_left.y + b0;
         let yc_bottom = yc_top + height - diam_y - 1;
 
         if extra_y != 0 {
@@ -817,26 +863,30 @@ impl Paint {
         // ── Outer arc ─────────────────────────────────────────────────────────────
         x = 0;
         y = b0;
-        asquared     = (a0 as i64) * (a0 as i64);
+        asquared = (a0 as i64) * (a0 as i64);
         two_asquared = asquared << 1;
-        bsquared     = (b0 as i64) * (b0 as i64);
+        bsquared = (b0 as i64) * (b0 as i64);
         two_bsquared = bsquared << 1;
-        d  = bsquared - asquared * (b0 as i64) + (asquared >> 2);
+        d = bsquared - asquared * (b0 as i64) + (asquared >> 2);
         dx = 0;
         dy = two_asquared * (b0 as i64);
 
         // ── Inner arc (inset by pen_width − 1) ────────────────────────────────────
         a0 -= pen_width - 1;
         b0 -= pen_width - 1;
-        if a0 < 0 { a0 = 0; }
-        if b0 < 0 { b0 = 0; }
+        if a0 < 0 {
+            a0 = 0;
+        }
+        if b0 < 0 {
+            b0 = 0;
+        }
         x1 = 0;
         y1 = b0;
-        asquared1     = (a0 as i64) * (a0 as i64);
+        asquared1 = (a0 as i64) * (a0 as i64);
         two_asquared1 = asquared1 << 1;
-        bsquared1     = (b0 as i64) * (b0 as i64);
+        bsquared1 = (b0 as i64) * (b0 as i64);
         two_bsquared1 = bsquared1 << 1;
-        d1  = bsquared1 - asquared1 * (b0 as i64) + (asquared1 >> 2);
+        d1 = bsquared1 - asquared1 * (b0 as i64) + (asquared1 >> 2);
         dx1 = 0;
         dy1 = two_asquared1 * (b0 as i64);
 
@@ -847,20 +897,20 @@ impl Paint {
                 y -= 1;
                 while (y < y1) && (dx1 < dy1) {
                     if d1 > 0 {
-                        y1  -= 1;
+                        y1 -= 1;
                         dy1 -= two_asquared1;
-                        d1  -= dy1;
+                        d1 -= dy1;
                     }
-                    x1  += 1;
+                    x1 += 1;
                     dx1 += two_bsquared1;
-                    d1  += bsquared1 + dx1;
+                    d1 += bsquared1 + dx1;
                 }
                 dy -= two_asquared;
-                d  -= dy;
+                d -= dy;
             }
-            x  += 1;
+            x += 1;
             dx += two_bsquared;
-            d  += bsquared + dx;
+            d += bsquared + dx;
         }
 
         d += ((3 * (asquared - bsquared) >> 1) - (dx + dy)) >> 1;
@@ -869,23 +919,23 @@ impl Paint {
         while (y >= 0) && (dx1 < dy1) {
             self.set4_pixels(ctx, xc_left, xc_right, yc_top, yc_bottom, x1, x, y);
             if d < 0 {
-                x  += 1;
+                x += 1;
                 dx += two_bsquared;
-                d  += dx;
+                d += dx;
             }
             y -= 1;
             while (y < y1) && (dx1 < dy1) {
                 if d1 > 0 {
-                    y1  -= 1;
+                    y1 -= 1;
                     dy1 -= two_asquared1;
-                    d1  -= dy1;
+                    d1 -= dy1;
                 }
-                x1  += 1;
+                x1 += 1;
                 dx1 += two_bsquared1;
-                d1  += bsquared1 + dx1;
+                d1 += bsquared1 + dx1;
             }
             dy -= two_asquared;
-            d  += asquared - dy;
+            d += asquared - dy;
         }
 
         d1 += ((3 * (asquared1 - bsquared1) >> 1) - (dx1 + dy1)) >> 1;
@@ -894,23 +944,23 @@ impl Paint {
         while y >= 0 {
             self.set4_pixels(ctx, xc_left, xc_right, yc_top, yc_bottom, x1, x, y);
             if d < 0 {
-                x  += 1;
+                x += 1;
                 dx += two_bsquared;
-                d  += dx;
+                d += dx;
             }
             y -= 1;
             if y < y1 {
                 y1 -= 1;
                 if d1 < 0 {
-                    x1  += 1;
+                    x1 += 1;
                     dx1 += two_bsquared1;
-                    d1  += dx1;
+                    d1 += dx1;
                 }
                 dy1 -= two_asquared1;
-                d1  += asquared1 - dy1;
+                d1 += asquared1 - dy1;
             }
             dy -= two_asquared;
-            d  += asquared - dy;
+            d += asquared - dy;
         }
 
         self.set_pen_width(pen_width as usize);
@@ -919,26 +969,32 @@ impl Paint {
     // ── Internal helper ───────────────────────────────────────────────────────────
 
     /// Maps Set4Pixels — draws symmetric horizontal spans in all four quadrants.
-    fn set4_pixels(&mut self, ctx: &mut Ctx<'_>,
-        xc_left: i32, xc_right: i32,
-        yc_top: i32,  yc_bottom: i32,
-        x1: i32, x: i32, y: i32,
+    fn set4_pixels(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        xc_left: i32,
+        xc_right: i32,
+        yc_top: i32,
+        yc_bottom: i32,
+        x1: i32,
+        x: i32,
+        y: i32,
     ) {
-        let y_top         = yc_top    - y;
-        let y_bottom      = yc_bottom + y;
-        let x_left_start  = xc_left   - x;
-        let x_left_end    = xc_left   - x1;
-        let x_right_start = xc_right  + x1;
-        let x_right_end   = xc_right  + x;
+        let y_top = yc_top - y;
+        let y_bottom = yc_bottom + y;
+        let x_left_start = xc_left - x;
+        let x_left_end = xc_left - x1;
+        let x_right_start = xc_right + x1;
+        let x_right_end = xc_right + x;
 
         if x1 != 0 {
-            self.draw_line(x_right_start, y_bottom, x_right_end,  y_bottom, ctx);
-            self.draw_line(x_left_start,  y_bottom, x_left_end,   y_bottom, ctx);
+            self.draw_line(x_right_start, y_bottom, x_right_end, y_bottom, ctx);
+            self.draw_line(x_left_start, y_bottom, x_left_end, y_bottom, ctx);
             // api.win_pattern_line(x_right_start, y_bottom, x_right_end,  y_bottom);
             // api.win_pattern_line(x_left_start,  y_bottom, x_left_end,   y_bottom);
             if y != 0 {
                 self.draw_line(x_right_start, y_top, x_right_end, y_top, ctx);
-                self.draw_line(x_left_start,  y_top, x_left_end,  y_top, ctx);
+                self.draw_line(x_left_start, y_top, x_left_end, y_top, ctx);
                 // api.win_pattern_line(x_right_start, y_top, x_right_end, y_top);
                 // api.win_pattern_line(x_left_start,  y_top, x_left_end,  y_top);
             }
@@ -952,9 +1008,6 @@ impl Paint {
         }
     }
 
-
-
-
     // -----------------------------------------------------------------------
     // Pixel helpers
     // -----------------------------------------------------------------------
@@ -966,7 +1019,9 @@ impl Paint {
     }
 
     pub fn get_pixel(&self, x: i32, y: i32) -> u8 {
-        Self::canvas_index(x, y).map(|i| self.pixels[i]).unwrap_or(255)
+        Self::canvas_index(x, y)
+            .map(|i| self.pixels[i])
+            .unwrap_or(255)
     }
 
     /// Filled circle at `(cx, cy)` of radius `r`, drawn with the current pattern.
@@ -996,10 +1051,18 @@ impl Paint {
         let mut err = dx - dy;
         loop {
             self.stamp_circle(x, y, r, ctx);
-            if x == x1 && y == y1 { break; }
+            if x == x1 && y == y1 {
+                break;
+            }
             let e2 = 2 * err;
-            if e2 > -dy { err -= dy; x += sx; }
-            if e2 < dx  { err += dx; y += sy; }
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                y += sy;
+            }
         }
     }
 
@@ -1046,9 +1109,9 @@ impl Paint {
                 if inside {
                     // Ghost = pre-drag state (pixels and ghost are in sync here).
                     // Full canvas capture since destination is unknown at drag-start.
-                    if let Some(pr) = PixelRect::capture(
-                        &self.ghost, 0, 0, CANVAS_W - 1, CANVAS_H - 1,
-                    ) {
+                    if let Some(pr) =
+                        PixelRect::capture(&self.ghost, 0, 0, CANVAS_W - 1, CANVAS_H - 1)
+                    {
                         self.push_undo_record(pr);
                     }
                     self.capture_selection();
@@ -1083,7 +1146,7 @@ impl Paint {
                 let seg_b = Self::rubber_bounds(px, py, cx, cy, m);
                 self.stroke_bounds = Some(match self.stroke_bounds {
                     Some(old) => Self::union_bounds(old, seg_b),
-                    None      => seg_b,
+                    None => seg_b,
                 });
                 self.draw_line(px, py, cx, cy, ctx);
             }
@@ -1092,7 +1155,7 @@ impl Paint {
                 let seg_b = Self::rubber_bounds(px, py, cx, cy, r);
                 self.stroke_bounds = Some(match self.stroke_bounds {
                     Some(old) => Self::union_bounds(old, seg_b),
-                    None      => seg_b,
+                    None => seg_b,
                 });
                 let steps = ((cx - px).abs()).max((cy - py).abs()).max(1);
                 for s in 0..=steps {
@@ -1119,7 +1182,10 @@ impl Paint {
                     Self::copy_region(&self.ghost, &mut self.pixels, old);
                 }
                 self.draw_line(ax, ay, cx, cy, ctx);
-                let dirty = match old_b { Some(o) => Self::union_bounds(o, new_b), None => new_b };
+                let dirty = match old_b {
+                    Some(o) => Self::union_bounds(o, new_b),
+                    None => new_b,
+                };
                 Self::invalidate_bounds(ctx, dirty);
                 self.rubber_rect = Some(new_b);
             }
@@ -1132,7 +1198,10 @@ impl Paint {
                     Self::copy_region(&self.ghost, &mut self.pixels, old);
                 }
                 self.draw_shape_tool(ax, ay, cx, cy, ctx);
-                let dirty = match old_b { Some(o) => Self::union_bounds(o, new_b), None => new_b };
+                let dirty = match old_b {
+                    Some(o) => Self::union_bounds(o, new_b),
+                    None => new_b,
+                };
                 Self::invalidate_bounds(ctx, dirty);
                 self.rubber_rect = Some(new_b);
             }
@@ -1145,7 +1214,9 @@ impl Paint {
                         // Clamp delta so the rect stays entirely on canvas.
                         let dx = (cx - px).clamp(-s.x0, CANVAS_W - 1 - s.x1);
                         let dy = (cy - py).clamp(-s.y0, CANVAS_H - 1 - s.y1);
-                        if dx == 0 && dy == 0 { return; }
+                        if dx == 0 && dy == 0 {
+                            return;
+                        }
 
                         // The two exposed background strips (C: EditMove logic).
                         // Horizontal strip: full rect height, |dx| wide.
@@ -1155,7 +1226,9 @@ impl Paint {
                         } else if dx < 0 {
                             // Moving left — strip exposed on the right.
                             Self::canvas_strip_rect(s.x1 + 1 + dx, s.y0, -dx, rh + 1)
-                        } else { None };
+                        } else {
+                            None
+                        };
 
                         // Vertical strip: full rect width, |dy| tall.
                         let vstrip = if dy > 0 {
@@ -1164,15 +1237,23 @@ impl Paint {
                         } else if dy < 0 {
                             // Moving up — strip exposed on the bottom.
                             Self::canvas_strip_rect(s.x0, s.y1 + 1 + dy, rw + 1, -dy)
-                        } else { None };
+                        } else {
+                            None
+                        };
 
                         // Move the rect.
-                        s.x0 += dx; s.x1 += dx;
-                        s.y0 += dy; s.y1 += dy;
+                        s.x0 += dx;
+                        s.x1 += dx;
+                        s.y0 += dy;
+                        s.y1 += dy;
 
                         // Invalidate exposed strips + new position.
-                        if let Some(r) = hstrip { ctx.invalidate(r); }
-                        if let Some(r) = vstrip { ctx.invalidate(r); }
+                        if let Some(r) = hstrip {
+                            ctx.invalidate(r);
+                        }
+                        if let Some(r) = vstrip {
+                            ctx.invalidate(r);
+                        }
                         // New position of the selection (for the composite draw).
                         if let Some(r) = Self::canvas_strip_rect(s.x0, s.y0, rw + 1, rh + 1) {
                             ctx.invalidate(r);
@@ -1182,8 +1263,10 @@ impl Paint {
                     // Rubber-band a new selection.
                     let (ax, ay) = self.pen_start;
                     self.selection = Some(Selection {
-                        x0: ax.min(cx), y0: ay.min(cy),
-                        x1: ax.max(cx), y1: ay.max(cy),
+                        x0: ax.min(cx),
+                        y0: ay.min(cy),
+                        x1: ax.max(cx),
+                        y1: ay.max(cy),
                         pixels: None,
                     });
                     ctx.invalidate(Self::canvas_rect());
@@ -1216,7 +1299,9 @@ impl Paint {
                 }
 
                 // Push ghost[final_b] as undo record (pre-draw clean state).
-                if let Some(pr) = PixelRect::capture(&self.ghost, final_b.0, final_b.1, final_b.2, final_b.3) {
+                if let Some(pr) =
+                    PixelRect::capture(&self.ghost, final_b.0, final_b.1, final_b.2, final_b.3)
+                {
                     self.push_undo_record(pr);
                 }
 
@@ -1265,9 +1350,9 @@ impl Paint {
     fn draw_shape_tool(&mut self, ax: i32, ay: i32, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
         let rect = corners_to_rect(ax, ay, cx, cy);
         let (diam_x, diam_y, solid) = match self.tool {
-            Tool::SolidRect  => (0,              0,              true),
-            Tool::Frame      => (0,              0,              false),
-            Tool::RoundRect  => (Self::ROUND_DIAM, Self::ROUND_DIAM, true),
+            Tool::SolidRect => (0, 0, true),
+            Tool::Frame => (0, 0, false),
+            Tool::RoundRect => (Self::ROUND_DIAM, Self::ROUND_DIAM, true),
             Tool::RoundFrame => (Self::ROUND_DIAM, Self::ROUND_DIAM, false),
             _ => return,
         };
@@ -1296,9 +1381,6 @@ impl Paint {
             Size::new((rx - lx + 1) as u32, (by - ty + 1) as u32),
         ));
     }
-
-
-
 
     // -----------------------------------------------------------------------
     // Event handler
@@ -1446,18 +1528,26 @@ impl Paint {
                 let sh = captured.len() / sw.max(1);
                 for dy in 0..sh {
                     let fy = sel.y0 + dy as i32;
-                    if fy < 0 || fy >= CANVAS_H { continue; }
-                    if fy + CANVAS_Y < d_y0 || fy + CANVAS_Y > d_y1 { continue; }
+                    if fy < 0 || fy >= CANVAS_H {
+                        continue;
+                    }
+                    if fy + CANVAS_Y < d_y0 || fy + CANVAS_Y > d_y1 {
+                        continue;
+                    }
                     for dx in 0..sw {
                         let fx = sel.x0 + dx as i32;
-                        if fx < 0 || fx >= CANVAS_W { continue; }
-                        if fx + CANVAS_X < d_x0 || fx + CANVAS_X > d_x1 { continue; }
+                        if fx < 0 || fx >= CANVAS_W {
+                            continue;
+                        }
+                        if fx + CANVAS_X < d_x0 || fx + CANVAS_X > d_x1 {
+                            continue;
+                        }
                         let v = captured[dy * sw + dx];
-                        if v == 255 { continue; }  // transparent
-                        let _ = Pixel(
-                            Point::new(CANVAS_X + fx, CANVAS_Y + fy),
-                            Gray8::new(v),
-                        ).draw(canvas);
+                        if v == 255 {
+                            continue;
+                        } // transparent
+                        let _ = Pixel(Point::new(CANVAS_X + fx, CANVAS_Y + fy), Gray8::new(v))
+                            .draw(canvas);
                     }
                 }
             }
@@ -1494,15 +1584,16 @@ impl Paint {
         /// The array is 8 unique bytes plus a 6-byte overlap so that slicing at
         /// any phase 0-6 still yields 8 valid rows.
         const ANT_PTN: [u8; 14] = [
-            0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E, 0x7C, 0xF8,
-            0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E,
+            0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E, 0x7C, 0xF8, 0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E,
         ];
 
         let x0 = sel.x0.max(0) as i32;
         let y0 = sel.y0.max(0) as i32;
         let x1 = sel.x1.min(CANVAS_W - 1) as i32;
         let y1 = sel.y1.min(CANVAS_H - 1) as i32;
-        if x1 < x0 || y1 < y0 { return; }
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
 
         // Return the ant pattern bit for canvas-local (x, y).
         let ant_bit = |cx: i32, cy: i32| -> bool {
@@ -1520,12 +1611,16 @@ impl Paint {
         // Top and bottom edges — process whole rows (8 pixels per pattern byte).
         for x in x0..=x1 {
             dot(x, y0);
-            if y1 > y0 { dot(x, y1); }
+            if y1 > y0 {
+                dot(x, y1);
+            }
         }
         // Left and right edges (skip corners already drawn above).
         for y in (y0 + 1)..y1 {
             dot(x0, y);
-            if x1 > x0 { dot(x1, y); }
+            if x1 > x0 {
+                dot(x1, y);
+            }
         }
     }
 
@@ -1541,25 +1636,33 @@ impl Paint {
         // --- Tool cells ---------------------------------------------------
         for (i, cell) in PALETTE_CELLS.iter().enumerate() {
             let r = Self::tool_cell_rect(i);
-            let is_undo  = i == 12 && cell.is_none();
+            let is_undo = i == 12 && cell.is_none();
             let is_clear = i == 15 && cell.is_none();
             let is_empty = cell.is_none() && !is_undo && !is_clear;
-            if is_empty { continue; }
+            if is_empty {
+                continue;
+            }
 
             let is_selected = cell.map_or(false, |t| t == self.tool);
             let is_pressed = self.touch == TouchTarget::ToolCell(i)
-                || (is_undo  && self.touch == TouchTarget::UndoBtn)
+                || (is_undo && self.touch == TouchTarget::UndoBtn)
                 || (is_clear && self.touch == TouchTarget::ClearBtn);
             let highlighted = is_selected || is_pressed;
 
             // Cell background: black when selected (MacPaint convention).
             let bg_value = if highlighted { 0u8 } else { 240u8 };
-            let _ = r.into_styled(PrimitiveStyle::with_fill(Gray8::new(bg_value))).draw(canvas);
+            let _ = r
+                .into_styled(PrimitiveStyle::with_fill(Gray8::new(bg_value)))
+                .draw(canvas);
 
             // Sprite sheet or fallback text.
-            let action_label: Option<&str> = if is_undo { Some("Undo") }
-                                        else if is_clear { Some("Clr") }
-                                        else { None };
+            let action_label: Option<&str> = if is_undo {
+                Some("Undo")
+            } else if is_clear {
+                Some("Clr")
+            } else {
+                None
+            };
             match &self.tool_sheet {
                 Some(sheet) => {
                     if let Some(label) = action_label {
@@ -1568,16 +1671,16 @@ impl Paint {
                         let style = MonoTextStyle::new(&FONT_5X8, text_color);
                         let tx = r.top_left.x + 2;
                         let ty = r.top_left.y + (TOOL_CELL_H - 8) / 2;
-                        let _ = Text::with_baseline(label, Point::new(tx, ty), style, Baseline::Top)
-                            .draw(canvas);
+                        let _ =
+                            Text::with_baseline(label, Point::new(tx, ty), style, Baseline::Top)
+                                .draw(canvas);
                     } else {
                         sheet.blit_cell(canvas, i, &r, highlighted);
                     }
                 }
                 None => {
-                    let label = action_label.unwrap_or_else(|| {
-                        cell.map_or("", |t| t.short_label())
-                    });
+                    let label =
+                        action_label.unwrap_or_else(|| cell.map_or("", |t| t.short_label()));
                     let text_color = if highlighted { WHITE } else { BLACK };
                     let style = MonoTextStyle::new(&FONT_5X8, text_color);
                     let tx = r.top_left.x + 2;
@@ -1588,7 +1691,9 @@ impl Paint {
             }
 
             // Border — thicker for selected.
-            let _ = r.into_styled(if is_selected { sel_border } else { border }).draw(canvas);
+            let _ = r
+                .into_styled(if is_selected { sel_border } else { border })
+                .draw(canvas);
         }
 
         // --- Line-width selector ------------------------------------------
@@ -1596,7 +1701,9 @@ impl Paint {
             let r = Self::lw_cell_rect(i);
             let is_sel = self.pen_width == i;
             let bg = if is_sel { 0u8 } else { 255u8 };
-            let _ = r.into_styled(PrimitiveStyle::with_fill(Gray8::new(bg))).draw(canvas);
+            let _ = r
+                .into_styled(PrimitiveStyle::with_fill(Gray8::new(bg)))
+                .draw(canvas);
             let _ = r.into_styled(border).draw(canvas);
 
             // A horizontal stroke of the corresponding thickness.
@@ -1627,7 +1734,11 @@ impl Paint {
                 }
             }
             // Selection highlight.
-            let bstyle = if self.pattern == i { sel_border } else { border };
+            let bstyle = if self.pattern == i {
+                sel_border
+            } else {
+                border
+            };
             let _ = r.into_styled(bstyle).draw(canvas);
         }
 
@@ -1678,8 +1789,8 @@ impl App for Paint {
 fn corners_to_rect(x0: i32, y0: i32, x1: i32, y1: i32) -> Rectangle {
     let lx = x0.min(x1);
     let ty = y0.min(y1);
-    let w  = (x0 - x1).unsigned_abs() + 1;
-    let h  = (y0 - y1).unsigned_abs() + 1;
+    let w = (x0 - x1).unsigned_abs() + 1;
+    let h = (y0 - y1).unsigned_abs() + 1;
     Rectangle::new(Point::new(lx, ty), Size::new(w, h))
 }
 
@@ -1748,7 +1859,9 @@ fn pgm_read_pair<R: std::io::BufRead>(r: &mut R) -> std::io::Result<(usize, usiz
         line.clear();
         r.read_line(&mut line)?;
         let t = line.trim();
-        if t.is_empty() || t.starts_with('#') { continue; }
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
         let mut it = t.split_whitespace();
         let a: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
         let b: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
@@ -1762,7 +1875,9 @@ fn pgm_read_value<R: std::io::BufRead>(r: &mut R) -> std::io::Result<usize> {
         line.clear();
         r.read_line(&mut line)?;
         let t = line.trim();
-        if t.is_empty() || t.starts_with('#') { continue; }
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
         return Ok(t.parse().unwrap_or(0));
     }
 }
@@ -1777,7 +1892,9 @@ fn load_db(path: &std::path::Path) -> (soul_db::Database, Vec<u8>) {
     let blank = vec![255u8; CANVAS_PIXELS];
     if let Ok(bytes) = std::fs::read(path) {
         if let Some(db) = soul_db::Database::decode(&bytes) {
-            let pixels = db.iter_category(CAT_CANVAS).next()
+            let pixels = db
+                .iter_category(CAT_CANVAS)
+                .next()
                 .filter(|rec| rec.data.len() == CANVAS_PIXELS)
                 .map(|rec| rec.data.clone());
             if let Some(p) = pixels {
