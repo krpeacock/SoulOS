@@ -129,3 +129,7 @@ Before merging, a change should satisfy:
 | `soul-runner`      | Desktop binary + built-in apps                   | yes  |
 
 The core four crates must remain `no_std`. That is non-negotiable.
+
+## Tooling preference
+
+Use the rust-analyzer LSP tool for type-checking and diagnostics instead of running `cargo build`. Only run `cargo build` or `cargo check` when you need to verify a full compilation (e.g., checking for linker errors or confirming a build succeeds end-to-end).
