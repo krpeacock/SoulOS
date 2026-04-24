@@ -42,7 +42,7 @@ const HOME_APP_ID: &str = Launcher::APP_ID;
 /// straight through with zero indirection or intermediate buffer.
 pub(crate) enum NativeKind {
     Launcher(Launcher),
-    Draw(Draw),
+    Draw(Box<Draw>),
     Builder(MobileBuilder),
     Paint(Paint),
 }
@@ -176,6 +176,20 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
     },
     AppDescriptor {
         kind: AppKind::Scripted {
+            script: "assets/scripts/egui_demo.rhai",
+            db: ".soulos/egui_demo.sdb",
+        },
+        handles: &[],
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
+            script: "assets/scripts/kitchen_sink.rhai",
+            db: ".soulos/kitchen_sink.sdb",
+        },
+        handles: &[],
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
             script: "assets/scripts/mail.rhai",
             db: ".soulos/mail.sdb",
         },
@@ -228,7 +242,7 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
 /// `APP_MANIFEST` in order.
 enum AppSlot {
     /// A Rhai scripted app. Identity is declared inside the script.
-    Scripted { app: ScriptedApp, db_path: PathBuf },
+    Scripted { app: Box<ScriptedApp>, db_path: PathBuf },
     /// Any native app — stored inline, dispatched statically, no heap overhead.
     Native(NativeKind),
 }
@@ -262,7 +276,7 @@ impl AppSlot {
                             app.declared_name().as_deref().unwrap_or(script_stem),
                             script_stem
                         );
-                        AppSlot::Scripted { app, db_path }
+                        AppSlot::Scripted { app: Box::new(app), db_path }
                     }
                     Err(e) => {
                         log::error!("Failed to compile {}: {}", script_stem, e);
@@ -276,13 +290,13 @@ impl AppSlot {
                         let err_app = ScriptedApp::new(script_stem, &err_script, err_db)
                             .expect("error fallback script is always valid");
                         AppSlot::Scripted {
-                            app: err_app,
+                            app: Box::new(err_app),
                             db_path: PathBuf::new(),
                         }
                     }
                 }
             }
-            AppKind::Draw { db } => AppSlot::Native(NativeKind::Draw(Draw::new(PathBuf::from(db)))),
+            AppKind::Draw { db } => AppSlot::Native(NativeKind::Draw(Box::new(Draw::new(PathBuf::from(db))))),
             AppKind::Paint { db } => AppSlot::Native(NativeKind::Paint(Paint::new(PathBuf::from(db)))),
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
         }

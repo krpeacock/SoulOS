@@ -871,12 +871,11 @@ impl Draw {
                 Mode::NameInput(_) => { self.handle_name_pen(true, false, x, y, ctx); None }
                 Mode::Gallery { .. } => { self.handle_gallery_pen(true, false, x, y, ctx); None }
                 Mode::Normal => {
-                    if self.builder_mode {
-                        if self.edit_overlay.pen_down(&self.ui_form, x, y) {
+                    if self.builder_mode
+                        && self.edit_overlay.pen_down(&self.ui_form, x, y) {
                             ctx.invalidate_all();
                             return None;
                         }
-                    }
                     if self.menu_open {
                         return self.handle_menu_pen(true, false, false, x, y, ctx);
                     }
@@ -1120,8 +1119,8 @@ impl App for Draw {
                     TITLE_BAR_H as i32 + (ICON_OY as i32) * SCALE,
                 ),
                 Size::new(
-                    (ICON_CELL as u32) * (SCALE as u32),
-                    (ICON_CELL as u32) * (SCALE as u32),
+                    ICON_CELL * (SCALE as u32),
+                    ICON_CELL * (SCALE as u32),
                 ),
             );
             let _ = ir
@@ -1238,9 +1237,9 @@ impl App for Draw {
                         .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
                         .draw(canvas);
                     let _ = label(canvas, Point::new(15, 38), "Menu");
-                    for i in 0..MENU_ITEMS.len() {
+                    for (i, &item) in MENU_ITEMS.iter().enumerate() {
                         let pressed = self.menu_touch == Some(i);
-                        let _ = button(canvas, Self::rect_menu_entry(i), MENU_ITEMS[i], pressed);
+                        let _ = button(canvas, Self::rect_menu_entry(i), item, pressed);
                     }
                 }
             }

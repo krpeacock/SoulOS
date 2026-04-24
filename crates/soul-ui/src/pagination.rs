@@ -38,7 +38,7 @@ impl Pagination {
         self.total_pages = if total_items == 0 {
             1
         } else {
-            (total_items + self.items_per_page - 1) / self.items_per_page
+            total_items.div_ceil(self.items_per_page)
         };
 
         // Ensure current page is valid

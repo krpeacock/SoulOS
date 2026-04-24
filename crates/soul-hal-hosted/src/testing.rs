@@ -90,7 +90,7 @@ impl TestingPlatform for crate::HostedPlatform {
         }
     }
 
-    fn screenshot(&self, filename: &str) -> Result<(), std::io::Error> {
+    fn screenshot(&self, _filename: &str) -> Result<(), std::io::Error> {
         Ok(())
     }
 

@@ -30,6 +30,12 @@ pub struct EditOverlay {
 
 const HANDLE_SIZE: u32 = 6;
 
+impl Default for EditOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EditOverlay {
     pub fn new() -> Self {
         Self {
