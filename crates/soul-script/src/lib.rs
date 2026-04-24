@@ -35,6 +35,7 @@ pub trait ObjectSafeDraw {
     /// Like `draw_pixels` but inverts each luma value (255 − p) before drawing.
     /// Used for press-highlight effects without allocating in the script.
     fn draw_pixels_inverted(&mut self, x: i32, y: i32, w: u32, pixels: &[u8]);
+    fn draw_scrollbar(&mut self, scroll_offset: i32, content_height: i32, viewport_height: i32);
 }
 
 impl<D> ObjectSafeDraw for D
@@ -48,14 +49,25 @@ where
     fn button(&mut self, x: i32, y: i32, w: u32, h: u32, label: &str, pressed: bool) {
         let rect = Rectangle::new(Point::new(x, y), Size::new(w, h));
         let _ = soul_ui::button(self, rect, label, pressed);
+        unsafe {
+            let content_bottom = (y + h as i32) as u32;
+            ACTIVE_CONTENT_HEIGHT = ACTIVE_CONTENT_HEIGHT.max(content_bottom);
+        }
     }
 
     fn label(&mut self, x: i32, y: i32, text: &str) {
         let _ = soul_ui::label(self, Point::new(x, y), text);
+        unsafe {
+            let content_bottom = (y + 10) as u32; // Assume ~10px text height
+            ACTIVE_CONTENT_HEIGHT = ACTIVE_CONTENT_HEIGHT.max(content_bottom);
+        }
     }
 
     fn clear(&mut self) {
         let _ = soul_ui::clear(self, SCREEN_WIDTH as u32, APP_HEIGHT as u32);
+        unsafe {
+            ACTIVE_CONTENT_HEIGHT = 0; // Reset content height on clear
+        }
     }
 
     fn draw_form(&mut self, form: &Form) {
@@ -74,9 +86,18 @@ where
         let _ = kb.draw(self);
     }
 
+
     fn rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: u8) {
         let rect = Rectangle::new(Point::new(x, y), Size::new(w, h));
         let _ = self.fill_solid(&rect, Gray8::new(color));
+        unsafe {
+            let content_bottom = (y + h as i32) as u32;
+            ACTIVE_CONTENT_HEIGHT = ACTIVE_CONTENT_HEIGHT.max(content_bottom);
+        }
+    }
+
+    fn draw_scrollbar(&mut self, _scroll_offset: i32, _content_height: i32, _viewport_height: i32) {
+        // Manual scrollbar drawing removed - now handled by EGUI ScrollArea
     }
 
     fn draw_pixels(&mut self, x: i32, y: i32, w: u32, pixels: &[u8]) {
@@ -200,6 +221,8 @@ pub fn app_list() -> &'static [AppEntry] {
 static mut ACTIVE_CANVAS: Option<*mut dyn ObjectSafeDraw> = None;
 static mut ACTIVE_DB: Option<*mut Database> = None;
 static mut ACTIVE_CTX: Option<*mut ()> = None;
+// Content height tracking for scroll detection
+static mut ACTIVE_CONTENT_HEIGHT: u32 = 0;
 
 /// Enhanced error information for debugging (no_std compatible)
 #[derive(Debug)]
@@ -292,6 +315,8 @@ pub struct ScriptedApp {
     script_name: String,
     script_source: String,
     last_error: Option<ScriptError>,
+    // Simple state tracking
+    last_content_height: u32,
 }
 
 impl ScriptedApp {
@@ -638,6 +663,19 @@ impl ScriptedApp {
                 let ctx = &mut *(ctx_ptr as *mut Ctx);
                 ctx.invalidate_all();
             }
+        });
+        
+        // Register scroll helper functions
+        engine.register_fn("get_content_height", || -> i32 {
+            unsafe { ACTIVE_CONTENT_HEIGHT as i32 }
+        });
+        
+        engine.register_fn("needs_scrolling", || -> bool {
+            unsafe { ACTIVE_CONTENT_HEIGHT > APP_HEIGHT as u32 }
+        });
+        
+        engine.register_fn("get_viewport_height", || -> i32 {
+            APP_HEIGHT as i32
         });
 
         // Register Global drawing functions
@@ -1511,6 +1549,7 @@ impl ScriptedApp {
             script_name: name.to_string(),
             script_source: script.to_string(),
             last_error: None,
+            last_content_height: 0,
         })
     }
 
@@ -1699,6 +1738,7 @@ impl App for ScriptedApp {
                 core::mem::transmute::<&mut dyn ObjectSafeDraw, *mut dyn ObjectSafeDraw>(bridge);
             ACTIVE_CANVAS = Some(erased);
             ACTIVE_DB = Some(&mut self.db as *mut Database);
+            ACTIVE_CONTENT_HEIGHT = 0;
 
             // Execute on_draw and capture any errors for std environments to log
             if let Err(e) = self
@@ -1711,6 +1751,9 @@ impl App for ScriptedApp {
                     &e,
                 ));
             }
+
+            // Update content height tracking
+            self.last_content_height = ACTIVE_CONTENT_HEIGHT;
 
             ACTIVE_CANVAS = None;
             ACTIVE_DB = None;

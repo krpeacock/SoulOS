@@ -2,6 +2,7 @@
 
 mod builder;
 mod draw;
+mod egui_demo;
 mod launcher;
 mod paint;
 
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
 use draw::Draw;
+use egui_demo::EguiDemo;
 use launcher::Launcher;
 use paint::Paint;
 
@@ -45,6 +47,7 @@ pub(crate) enum NativeKind {
     Draw(Box<Draw>),
     Builder(MobileBuilder),
     Paint(Paint),
+    EguiDemo(EguiDemo),
 }
 
 impl NativeKind {
@@ -54,6 +57,7 @@ impl NativeKind {
             NativeKind::Draw(_) => Draw::APP_ID,
             NativeKind::Builder(_) => MobileBuilder::APP_ID,
             NativeKind::Paint(_) => Paint::APP_ID,
+            NativeKind::EguiDemo(_) => EguiDemo::APP_ID,
         }
     }
 
@@ -63,6 +67,7 @@ impl NativeKind {
             NativeKind::Draw(_) => Draw::NAME,
             NativeKind::Builder(_) => MobileBuilder::NAME,
             NativeKind::Paint(_) => Paint::NAME,
+            NativeKind::EguiDemo(_) => EguiDemo::NAME,
         }
     }
 
@@ -74,6 +79,7 @@ impl NativeKind {
             NativeKind::Draw(_) => Some("draw"),
             NativeKind::Builder(_) => Some("builder"),
             NativeKind::Paint(_) => Some("paint"),
+            NativeKind::EguiDemo(_) => Some("egui_demo"),
         }
     }
 
@@ -83,6 +89,10 @@ impl NativeKind {
             NativeKind::Draw(d) => d.handle_event(event, ctx),
             NativeKind::Builder(b) => b.handle_event(event, ctx),
             NativeKind::Paint(p) => p.handle_event(event, ctx),
+            NativeKind::EguiDemo(e) => {
+                e.handle(event, ctx);
+                None
+            }
         }
     }
 
@@ -92,6 +102,7 @@ impl NativeKind {
             NativeKind::Draw(d) => d.draw(canvas, dirty),
             NativeKind::Builder(b) => b.draw(canvas, dirty),
             NativeKind::Paint(p) => p.draw(canvas, dirty),
+            NativeKind::EguiDemo(e) => e.draw(canvas, dirty),
         }
     }
 
@@ -101,6 +112,7 @@ impl NativeKind {
             NativeKind::Draw(d) => d.a11y_nodes(),
             NativeKind::Builder(b) => b.a11y_nodes(),
             NativeKind::Paint(p) => p.a11y_nodes(),
+            NativeKind::EguiDemo(e) => e.a11y_nodes(),
         }
     }
 
@@ -110,6 +122,7 @@ impl NativeKind {
             NativeKind::Draw(d) => d.persist(),
             NativeKind::Builder(b) => b.persist(),
             NativeKind::Paint(p) => p.persist(),
+            NativeKind::EguiDemo(e) => e.persist(),
         }
     }
 }
@@ -138,9 +151,14 @@ enum AppKind {
         script: &'static str,
         db: &'static str,
     },
-    Draw { db: &'static str },
-    Paint { db: &'static str },
+    Draw {
+        db: &'static str,
+    },
+    Paint {
+        db: &'static str,
+    },
     Builder,
+    EguiDemo,
 }
 
 /// The app manifest. Only the minimum needed to locate and load each app.
@@ -210,7 +228,9 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         handles: &[],
     },
     AppDescriptor {
-        kind: AppKind::Draw { db: ".soulos/draw.sdb" },
+        kind: AppKind::Draw {
+            db: ".soulos/draw.sdb",
+        },
         handles: &["open_bitmap"],
     },
     AppDescriptor {
@@ -221,7 +241,9 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         handles: &["export_bitmap", "export_text", "import"],
     },
     AppDescriptor {
-        kind: AppKind::Paint { db: ".soulos/paint.sdb" },
+        kind: AppKind::Paint {
+            db: ".soulos/paint.sdb",
+        },
         handles: &[],
     },
     AppDescriptor {
@@ -235,6 +257,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         },
         handles: &[],
     },
+    AppDescriptor {
+        kind: AppKind::EguiDemo,
+        handles: &[],
+    },
 ];
 
 /// A live app instance.
@@ -242,7 +268,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
 /// `APP_MANIFEST` in order.
 enum AppSlot {
     /// A Rhai scripted app. Identity is declared inside the script.
-    Scripted { app: Box<ScriptedApp>, db_path: PathBuf },
+    Scripted {
+        app: Box<ScriptedApp>,
+        db_path: PathBuf,
+    },
     /// Any native app — stored inline, dispatched statically, no heap overhead.
     Native(NativeKind),
 }
@@ -276,7 +305,10 @@ impl AppSlot {
                             app.declared_name().as_deref().unwrap_or(script_stem),
                             script_stem
                         );
-                        AppSlot::Scripted { app: Box::new(app), db_path }
+                        AppSlot::Scripted {
+                            app: Box::new(app),
+                            db_path,
+                        }
                     }
                     Err(e) => {
                         log::error!("Failed to compile {}: {}", script_stem, e);
@@ -296,9 +328,14 @@ impl AppSlot {
                     }
                 }
             }
-            AppKind::Draw { db } => AppSlot::Native(NativeKind::Draw(Box::new(Draw::new(PathBuf::from(db))))),
-            AppKind::Paint { db } => AppSlot::Native(NativeKind::Paint(Paint::new(PathBuf::from(db)))),
+            AppKind::Draw { db } => {
+                AppSlot::Native(NativeKind::Draw(Box::new(Draw::new(PathBuf::from(db)))))
+            }
+            AppKind::Paint { db } => {
+                AppSlot::Native(NativeKind::Paint(Paint::new(PathBuf::from(db))))
+            }
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
+            AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
         }
     }
 
@@ -672,7 +709,11 @@ impl Host {
             soul_script::SystemRequest::Launch(idx) => self.launch_app(idx, ctx),
             soul_script::SystemRequest::LaunchById(id) => self.launch_by_id(&id, ctx),
             soul_script::SystemRequest::Return => self.go_back(ctx),
-            soul_script::SystemRequest::Send { action, payload, target } => {
+            soul_script::SystemRequest::Send {
+                action,
+                payload,
+                target,
+            } => {
                 self.route_send(action, payload, target, ctx);
             }
             soul_script::SystemRequest::Request { action, payload } => {
@@ -681,7 +722,11 @@ impl Host {
             soul_script::SystemRequest::SendResult { action, payload } => {
                 self.route_send_result(action, payload, ctx);
             }
-            soul_script::SystemRequest::BackgroundSend { action, payload, target } => {
+            soul_script::SystemRequest::BackgroundSend {
+                action,
+                payload,
+                target,
+            } => {
                 self.route_background_send(action, payload, target, ctx);
             }
         }
@@ -705,7 +750,11 @@ impl Host {
         };
         if let Some(idx) = handler_idx {
             self.launch_app(idx, ctx);
-            let ev = Event::Exchange { action, payload, sender: sender_id };
+            let ev = Event::Exchange {
+                action,
+                payload,
+                sender: sender_id,
+            };
             self.apps[idx].handle(ev, ctx);
         } else {
             log::warn!("exchange: no handler for action '{action}'");
@@ -729,7 +778,8 @@ impl Host {
     ) {
         let requester = self.active_idx();
         let sender_id = self.apps[requester].app_id();
-        let handler_idx = self.capability_index
+        let handler_idx = self
+            .capability_index
             .get(&action)
             .and_then(|v| v.first().copied());
         let Some(idx) = handler_idx else {
@@ -744,7 +794,11 @@ impl Host {
             self.launch_app(idx, ctx);
         }
         // Deliver the action and payload to the handler.
-        let ev = Event::Exchange { action, payload, sender: sender_id };
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
         let result = self.apps[idx].handle(ev, ctx);
         // Process any immediate follow-up (e.g. Draw doing a BackgroundSend to
         // fetch the icon resource after receiving open_bitmap).
@@ -782,13 +836,21 @@ impl Host {
         };
 
         // Dispatch directly — no AppStart, no stack push, no draw.
-        let ev = Event::Exchange { action, payload, sender: sender_id };
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
         let result = self.apps[idx].handle(ev, ctx);
 
         // If the handler returned a result, deliver it back to the requester.
         // Process any follow-up request the requester emits (e.g. Builder
         // receiving return_resource and then issuing Request { open_bitmap }).
-        if let Some(soul_script::SystemRequest::SendResult { action: res_action, payload: res_payload }) = result {
+        if let Some(soul_script::SystemRequest::SendResult {
+            action: res_action,
+            payload: res_payload,
+        }) = result
+        {
             let sender = self.apps[idx].app_id();
             let result_ev = Event::Exchange {
                 action: res_action,
@@ -819,7 +881,9 @@ impl Host {
         ctx: &mut Ctx<'_>,
     ) {
         let sender_id = self.apps[self.active_idx()].app_id();
-        let Some(requester) = self.pending_request.take() else { return };
+        let Some(requester) = self.pending_request.take() else {
+            return;
+        };
 
         if self.stack.len() > 1 {
             // Normal case: handler was a non-home app — pop it.
@@ -830,7 +894,11 @@ impl Host {
             ctx.invalidate_all();
         }
 
-        let ev = Event::Exchange { action, payload, sender: sender_id };
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
         let follow_up = self.apps[requester].handle(ev, ctx);
         ctx.invalidate_all();
 

@@ -73,11 +73,15 @@
 extern crate alloc;
 
 pub mod builder;
+pub mod egui_layout;
+pub mod egui_scroll;
+pub mod egui_widgets;
 pub mod form;
 pub mod keyboard;
 pub mod pagination;
 pub mod palette;
 pub mod primitives;
+pub mod scrollbar;
 pub mod selecttext;
 pub mod textarea;
 pub mod textinput;
@@ -88,22 +92,30 @@ mod tests;
 /// Convenience re-exports for apps that prefer one glob import.
 pub mod prelude {
     pub use crate::builder::*;
+    pub use crate::egui_layout::*;
+    pub use crate::egui_scroll::*;
+    pub use crate::egui_widgets::*;
     pub use crate::form::*;
     pub use crate::keyboard::{Keyboard, KeyboardOutput, Layer, TypedKey};
     pub use crate::pagination::{Pagination, PaginationAction};
     pub use crate::palette::{BLACK, GRAY, WHITE};
     pub use crate::primitives::{button, clear, hit_test, label, title_bar, TITLE_BAR_H};
+    pub use crate::scrollbar::{Scrollbar, ScrollbarOutput, ScrollableView};
     pub use crate::selecttext::SelectableText;
     pub use crate::textarea::{TextArea, TextAreaOutput};
     pub use crate::textinput::{TextInput, TextInputOutput};
 }
 
 pub use builder::*;
+pub use egui_layout::*;
+pub use egui_scroll::*;
+pub use egui_widgets::*;
 pub use form::*;
 pub use keyboard::{Keyboard, KeyboardOutput, Layer, TypedKey, KEYBOARD_HEIGHT, KEYBOARD_WIDTH};
 pub use pagination::{Pagination, PaginationAction};
 pub use palette::{BLACK, GRAY, WHITE};
 pub use primitives::{button, clear, hit_test, label, title_bar, TITLE_BAR_H};
+pub use scrollbar::{Scrollbar, ScrollbarOutput, ScrollableView};
 pub use selecttext::SelectableText;
 pub use textarea::{TextArea, TextAreaOutput};
 pub use textinput::{TextInput, TextInputOutput};
