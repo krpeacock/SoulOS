@@ -14,6 +14,7 @@ use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOption
 // KeyRepeat::No is used in pump() to guarantee single-fire per keypress.
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 
+pub mod harness;
 pub mod testing;
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
