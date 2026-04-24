@@ -44,6 +44,9 @@ struct AppEntry {
 pub struct Launcher {
     apps: Vec<AppEntry>,
     touched: Option<usize>,
+    /// When true the Launcher was opened by another app via `Request { action: "pick_app" }`.
+    /// Tapping an app returns `SendResult` instead of launching it.
+    picker_mode: bool,
 }
 
 impl Launcher {
@@ -54,6 +57,7 @@ impl Launcher {
         Self {
             apps: vec![],
             touched: None,
+            picker_mode: false,
         }
     }
 
@@ -128,10 +132,133 @@ impl Launcher {
         name.chars().take(take).collect::<String>() + "…"
     }
 
-    fn launch_by_display_idx(&self, display_idx: usize) -> Option<SystemRequest> {
-        self.apps
-            .get(display_idx)
-            .map(|e| SystemRequest::LaunchById(e.app_id.clone()))
+    fn activate_display_idx(&mut self, display_idx: usize) -> Option<SystemRequest> {
+        let entry = self.apps.get(display_idx)?;
+        if self.picker_mode {
+            self.picker_mode = false;
+            Some(SystemRequest::SendResult {
+                action: "return_app".to_string(),
+                payload: soul_core::ExchangePayload::Text(entry.app_id.clone()),
+            })
+        } else {
+            Some(SystemRequest::LaunchById(entry.app_id.clone()))
+        }
+    }
+
+    // --- Background resource management ---------------------------------
+
+    fn handle_get_resource(&self, app_id: &str, kind: &str) -> Option<SystemRequest> {
+        match kind {
+            "icon" => {
+                let entry = self.apps.iter().find(|e| e.app_id == app_id)?;
+                let cell = ICON_CELL as u16;
+                Some(SystemRequest::SendResult {
+                    action: "return_resource".to_string(),
+                    payload: soul_core::ExchangePayload::Resource {
+                        app_id: app_id.to_string(),
+                        kind: "icon".to_string(),
+                        width: cell,
+                        height: cell,
+                        pixels: entry.icon.clone(),
+                        text: String::new(),
+                    },
+                })
+            }
+            "script" => {
+                // Load script source from the registered app list.
+                let src = soul_script::app_list()
+                    .iter()
+                    .find(|e| e.app_id == app_id)
+                    .and_then(|e| {
+                        // app_list icon_stem is the only path-adjacent field we have;
+                        // for now derive script path from the assets convention.
+                        // TODO: replace with resource DB lookup.
+                        let stem = e.icon_stem.as_str();
+                        let path = if stem.is_empty() {
+                            return None;
+                        } else {
+                            std::path::PathBuf::from("assets/scripts")
+                                .join(format!("{stem}.rhai"))
+                        };
+                        std::fs::read_to_string(&path).ok()
+                    })
+                    .unwrap_or_default();
+                Some(SystemRequest::SendResult {
+                    action: "return_resource".to_string(),
+                    payload: soul_core::ExchangePayload::Resource {
+                        app_id: app_id.to_string(),
+                        kind: "script".to_string(),
+                        width: 0,
+                        height: 0,
+                        pixels: vec![],
+                        text: src,
+                    },
+                })
+            }
+            _ => {
+                log::warn!("launcher: unknown resource kind '{kind}' requested for '{app_id}'");
+                None
+            }
+        }
+    }
+
+    fn handle_set_resource(
+        &mut self,
+        app_id: &str,
+        kind: &str,
+        width: u16,
+        height: u16,
+        pixels: Vec<u8>,
+        _text: String,
+    ) {
+        match kind {
+            "icon" => {
+                if let Some(entry) = self.apps.iter_mut().find(|e| e.app_id == app_id) {
+                    entry.icon = pixels.clone();
+                }
+                // Persist the updated icon back to the PGM file so it survives restart.
+                let stem = soul_script::app_list()
+                    .iter()
+                    .find(|e| e.app_id == app_id)
+                    .map(|e| e.icon_stem.clone())
+                    .unwrap_or_default();
+                if !stem.is_empty() && width > 0 && height > 0 {
+                    let path = std::path::PathBuf::from("assets/sprites")
+                        .join(format!("{stem}_icon.pgm"));
+                    if let Err(e) = save_pgm(&path, width as usize, height as usize, &pixels) {
+                        log::warn!("launcher: could not save icon for '{app_id}': {e}");
+                    } else {
+                        log::info!("launcher: saved icon for '{app_id}' → {}", path.display());
+                    }
+                }
+            }
+            "script" => {
+                // Write the script source back to the .rhai file on disk.
+                let path = soul_script::app_list()
+                    .iter()
+                    .find(|e| e.app_id == app_id)
+                    .and_then(|e| {
+                        let stem = e.icon_stem.as_str();
+                        if stem.is_empty() { None }
+                        else {
+                            Some(std::path::PathBuf::from("assets/scripts")
+                                .join(format!("{stem}.rhai")))
+                        }
+                    });
+                if let Some(p) = path {
+                    if let Err(e) = std::fs::write(&p, _text.as_bytes()) {
+                        log::warn!("launcher: could not save script for '{app_id}': {e}");
+                    } else {
+                        log::info!("launcher: saved script for '{app_id}' → {}", p.display());
+                    }
+                } else {
+                    log::warn!("launcher: set_resource: no script path found for '{app_id}'");
+                }
+            }
+            _ => {
+                log::warn!("launcher: set_resource: unknown kind '{kind}' for '{app_id}'");
+            }
+        }
     }
 
     // --- App interface --------------------------------------------------
@@ -139,6 +266,7 @@ impl Launcher {
     pub fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         match event {
             Event::AppStart => {
+                self.picker_mode = false;
                 self.refresh_app_list();
                 ctx.invalidate_all();
                 None
@@ -153,21 +281,55 @@ impl Launcher {
                 let was = self.touched;
                 self.set_touched(None, ctx);
                 if hit.is_some() && hit == was {
-                    hit.and_then(|i| self.launch_by_display_idx(i))
+                    hit.and_then(|i| self.activate_display_idx(i))
                 } else {
                     None
                 }
             }
-            Event::ButtonDown(HardButton::AppA) => self.launch_by_display_idx(0),
-            Event::ButtonDown(HardButton::AppB) => self.launch_by_display_idx(1),
-            Event::ButtonDown(HardButton::AppC) => self.launch_by_display_idx(2),
-            Event::ButtonDown(HardButton::AppD) => self.launch_by_display_idx(3),
+            Event::ButtonDown(HardButton::AppA) => self.activate_display_idx(0),
+            Event::ButtonDown(HardButton::AppB) => self.activate_display_idx(1),
+            Event::ButtonDown(HardButton::AppC) => self.activate_display_idx(2),
+            Event::ButtonDown(HardButton::AppD) => self.activate_display_idx(3),
+            Event::Exchange { action, payload, .. } => match action.as_str() {
+                "pick_app" => {
+                    self.picker_mode = true;
+                    if self.apps.is_empty() {
+                        self.refresh_app_list();
+                    }
+                    ctx.invalidate_all();
+                    None
+                }
+                "get_resource" => {
+                    if let soul_core::ExchangePayload::Resource { app_id, kind, .. } = payload {
+                        // Ensure the app list is populated before serving requests.
+                        if self.apps.is_empty() {
+                            self.refresh_app_list();
+                        }
+                        return self.handle_get_resource(&app_id, &kind);
+                    }
+                    None
+                }
+                "set_resource" => {
+                    if let soul_core::ExchangePayload::Resource {
+                        app_id, kind, width, height, pixels, text,
+                    } = payload
+                    {
+                        if self.apps.is_empty() {
+                            self.refresh_app_list();
+                        }
+                        self.handle_set_resource(&app_id, &kind, width, height, pixels, text);
+                    }
+                    None
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
 
-    pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
-        let _ = title_bar(canvas, SCREEN_WIDTH as u32, Self::NAME);
+    pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, _dirty: Rectangle) {
+        let title = if self.picker_mode { "Pick App" } else { Self::NAME };
+        let _ = title_bar(canvas, SCREEN_WIDTH as u32, title);
         let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);
 
         for (display_idx, entry) in self.apps.iter().enumerate() {
@@ -204,15 +366,32 @@ impl Launcher {
 
 // --- PGM icon loader ----------------------------------------------------
 
+fn save_pgm(path: &std::path::Path, w: usize, h: usize, pixels: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "P5")?;
+    writeln!(f, "{w} {h}")?;
+    writeln!(f, "255")?;
+    f.write_all(pixels)
+}
+
 fn load_icon(stem: &str, cell: usize) -> Vec<u8> {
-    if stem.is_empty() {
-        return vec![];
+    let try_load = |s: &str| {
+        let path = std::path::PathBuf::from("assets/sprites").join(format!("{s}_icon.pgm"));
+        match load_pgm(&path) {
+            Ok((w, h, pix)) if w == cell && h == cell => Some(pix),
+            _ => None,
+        }
+    };
+    if !stem.is_empty() {
+        if let Some(pix) = try_load(stem) {
+            return pix;
+        }
     }
-    let path = std::path::PathBuf::from("assets/sprites").join(format!("{stem}_icon.pgm"));
-    match load_pgm(&path) {
-        Ok((w, h, pix)) if w == cell && h == cell => pix,
-        _ => vec![],
-    }
+    try_load("default").unwrap_or_default()
 }
 
 fn load_pgm(path: &std::path::Path) -> std::io::Result<(usize, usize, Vec<u8>)> {

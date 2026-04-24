@@ -1,18 +1,11 @@
-//! Pixel editor for the hosted simulator: fat-pixel canvas, stylus
-//! painting, and PGM ([`P5`]) assets under a configurable directory.
+//! Pixel editor — database-centric, no filesystem access.
 //!
-//! Eight fixed gray levels; **Pen**, **Fill**, and **Erase** tools; brush
-//! size; **Undo** (stack of prior `fg` + `written`); optional background
-//! reference; and a written-pixel mask so white ink and clears work.
+//! Canvases are stored as records in the Draw app's own [`soul_db::Database`].
+//! Category 0 holds canvas images (each record = name + pixel data).
+//! Category 1 holds the MobileBuilder UI form JSON (single record).
 //!
-//! Default directory: `assets/draw/` (override with `SOUL_DRAW_DIR`).
-//! Use **Menu** (system strip or **F6**) for file and background actions.
-//!
-//! Launcher icons live in the `launcher_icons` database, persisted under
-//! `.soulos/launcher_icons.sdb` (see `launcher_store`). The DB is seeded
-//! lazily from `assets/sprites/` the first time the icon picker is opened.
-//! Use **Menu → Open icon…** to edit the launcher-sized icon; **Save** writes
-//! back and persists the cache.
+//! App icons are imported/exported through the Exchange layer (background calls
+//! to the Launcher), keeping Draw decoupled from other apps' storage.
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -21,13 +14,11 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
 };
 use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
+use soul_script::SystemRequest;
 use soul_ui::{button, hit_test, label, title_bar, TextInput, TextInputOutput, BLACK, TITLE_BAR_H};
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::launcher_store::LauncherIconStore;
 use crate::ICON_CELL;
 
 const LOG_W: usize = 48;
@@ -37,7 +28,7 @@ const ICON_OY: usize = (LOG_H - ICON_CELL as usize) / 2;
 const SCALE: i32 = 5;
 const CANVAS_PX: i32 = (LOG_W as i32) * SCALE;
 
-/// Eight evenly spaced levels from black to white (3-bit display feel).
+/// Eight evenly spaced levels from black to white.
 pub const GRAY_LEVELS: [u8; 8] = [0, 36, 73, 109, 146, 182, 218, 255];
 
 const ROW1_Y: i32 = TITLE_BAR_H as i32 + CANVAS_PX;
@@ -46,16 +37,21 @@ const ROW2_Y: i32 = ROW1_Y + 26;
 const BRUSH_RADIUS_MIN: i32 = 0;
 const BRUSH_RADIUS_MAX: i32 = 3;
 
+/// Category 0: canvas image records.
+const CAT_CANVAS: u8 = 0;
+/// Category 1: UI form JSON (single record).
+const CAT_FORM: u8 = 1;
+
 const MENU_ITEMS: &[&str] = &[
     "New",
     "Save",
-    "Save as...",
-    "Open...",
-    "Open icon...",
-    "Load bg...",
+    "Name...",
+    "Gallery",
+    "Done",      // returns edited bitmap to Builder; no-op when not in exchange mode
+    "Load bg",
     "Clear bg",
     "Edit Layout",
-    "Delete Element",
+    "Delete Elem",
     "Reset Layout",
     "Close menu",
 ];
@@ -86,37 +82,35 @@ enum PaintTarget {
     ClearBtn,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OpenPurpose {
-    Document,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GalleryPurpose {
+    Open,
     Background,
-    LauncherIcon,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EditTarget {
-    Document,
-    Icon(usize),
 }
 
 enum Mode {
     Normal,
-    SaveAs(TextInput),
-    OpenList {
-        files: Vec<String>,
+    NameInput(TextInput),
+    Gallery {
+        records: Vec<(u32, String)>,
         scroll: usize,
-        purpose: OpenPurpose,
+        purpose: GalleryPurpose,
     },
 }
 
 pub struct Draw {
-    launcher_icons: LauncherIconStore,
-    edit: EditTarget,
+    db: soul_db::Database,
+    db_path: PathBuf,
+    current_record: Option<u32>,
+    current_name: String,
+    /// True when the canvas holds an icon-sized image for editing.
+    icon_mode: bool,
+    /// When set, "Done" in the menu returns a SendResult with this action name
+    /// (e.g. "return_bitmap") back to the app that opened Draw via exchange.
+    return_action: Option<String>,
     fg: Vec<u8>,
     written: Vec<bool>,
     bg: Option<Vec<u8>>,
-    draw_dir: PathBuf,
-    doc_name: String,
     brush: u8,
     brush_radius: i32,
     tool: Tool,
@@ -126,71 +120,29 @@ pub struct Draw {
     menu_touch: Option<usize>,
     mode: Mode,
     undo_stack: Vec<(Vec<u8>, Vec<bool>)>,
-
-    // MobileBuilder integration
     ui_form: soul_ui::Form,
     edit_overlay: soul_ui::EditOverlay,
     builder_mode: bool,
-    ui_db_path: PathBuf,
 }
 
 impl Draw {
     pub const APP_ID: &'static str = "com.soulos.draw";
     pub const NAME: &'static str = "Draw";
 
-    fn validate_background(&mut self) {
-        if let Some(ref bg) = self.bg {
-            if bg.len() != LOG_W * LOG_H {
-                // Background size doesn't match current canvas - clear it
-                self.bg = None;
-            }
-        }
-    }
-
-    pub fn new() -> Self {
-        let launcher_icons = LauncherIconStore::load_or_empty();
-        let draw_dir = std::env::var("SOUL_DRAW_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("assets/draw"));
-        let doc_name = String::from("canvas");
-        let path = path_for(&draw_dir, &doc_name);
-        let (fg, written) = match load_pgm(&path) {
-            Ok((w, h, data)) if w == LOG_W && h == LOG_H => {
-                let written = data.iter().map(|&p| p != 255).collect();
-                (data, written)
-            }
-            Ok((w, h, _)) => {
-                eprintln!(
-                    "draw: {} is {}×{}, expected {}×{} — starting blank",
-                    path.display(),
-                    w,
-                    h,
-                    LOG_W,
-                    LOG_H
-                );
-                (vec![255; LOG_W * LOG_H], vec![false; LOG_W * LOG_H])
-            }
-            Err(e) => {
-                eprintln!(
-                    "draw: could not load {} ({e}) — blank canvas",
-                    path.display()
-                );
-                (vec![255; LOG_W * LOG_H], vec![false; LOG_W * LOG_H])
-            }
-        };
-
-        let ui_db_path = std::env::var("SOUL_DRAW_UI_CACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(".soulos/draw_ui.sdb"));
-
-        let mut instance = Self {
-            launcher_icons,
-            edit: EditTarget::Document,
+    pub fn new(db_path: PathBuf) -> Self {
+        let (db, current_record) = load_db(&db_path);
+        let (fg, written, current_name) = load_first_canvas(&db);
+        let ui_form = load_form(&db);
+        Self {
+            db,
+            db_path,
+            current_record,
+            current_name,
+            icon_mode: false,
+            return_action: None,
             fg,
             written,
             bg: None,
-            draw_dir,
-            doc_name,
             brush: GRAY_LEVELS[0],
             brush_radius: BRUSH_RADIUS_MIN,
             tool: Tool::Brush,
@@ -200,220 +152,126 @@ impl Draw {
             menu_touch: None,
             mode: Mode::Normal,
             undo_stack: Vec::new(),
-
-            ui_form: Self::load_ui(&ui_db_path),
+            ui_form,
             edit_overlay: soul_ui::EditOverlay::new(),
             builder_mode: false,
-            ui_db_path,
-        };
-        instance.validate_background();
-        instance
+        }
     }
 
-    fn load_ui(path: &Path) -> soul_ui::Form {
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Some(db) = soul_db::Database::decode(&bytes) {
-                if let Some(rec) = db.iter().next() {
-                    if let Ok(json) = std::str::from_utf8(&rec.data) {
-                        if let Some(form) = soul_ui::Form::from_json(json) {
-                            return form;
-                        }
-                    }
-                }
+    /// Persist the database to disk (called on `AppStop`).
+    pub fn persist(&mut self) {
+        // Autosave current canvas if it's modified.
+        self.save_canvas();
+        save_db(&self.db, &self.db_path);
+    }
+
+    // --- Canvas DB helpers -----------------------------------------------
+
+    fn save_canvas(&mut self) {
+        let flat = self.flatten_for_save();
+        let data = encode_canvas(&self.current_name, &flat);
+        match self.current_record {
+            Some(id) => {
+                self.db.update(id, data);
+            }
+            None => {
+                let id = self.db.insert(CAT_CANVAS, data);
+                self.current_record = Some(id);
             }
         }
-        Self::default_draw_ui()
     }
 
-    fn persist_ui(&self) {
-        if let Some(parent) = self.ui_db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    fn list_gallery(&self) -> Vec<(u32, String)> {
+        self.db
+            .iter_category(CAT_CANVAS)
+            .map(|r| (r.id, decode_canvas_name(&r.data)))
+            .collect()
+    }
+
+    fn load_canvas_record(&mut self, id: u32, purpose: GalleryPurpose, ctx: &mut Ctx<'_>) {
+        let Some(rec) = self.db.get(id) else { return };
+        let Some(pixels) = decode_canvas_pixels(&rec.data) else { return };
+        match purpose {
+            GalleryPurpose::Open => {
+                self.undo_stack.clear();
+                self.fg = pixels;
+                self.written = vec![true; LOG_W * LOG_H];
+                self.bg = None;
+                self.current_record = Some(id);
+                self.current_name = decode_canvas_name(&rec.data.clone());
+                self.icon_mode = false;
+                ctx.invalidate(Self::canvas_screen_rect());
+            }
+            GalleryPurpose::Background => {
+                self.bg = Some(pixels);
+                ctx.invalidate(Self::canvas_screen_rect());
+            }
         }
-        let mut db = soul_db::Database::new("draw_ui");
-        db.insert(0, self.ui_form.to_json().into_bytes());
-        let _ = std::fs::write(&self.ui_db_path, db.encode());
     }
 
-    fn default_draw_ui() -> soul_ui::Form {
-        use soul_ui::{A11yHints, Component, ComponentType, Form, Rect};
-        use std::collections::BTreeMap;
-        let mut form = Form::new("draw_ui");
-
-        let row1_y = 15 + 240;
-        let row2_y = row1_y + 26;
-
-        form.components.push(Component {
-            id: "tool_brush".into(),
-            class: "tool".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 4,
-                y: row1_y + 2,
-                w: 32,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "Pen".into())]),
-            a11y: A11yHints {
-                label: "Pen tool".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-        form.components.push(Component {
-            id: "tool_fill".into(),
-            class: "tool".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 40,
-                y: row1_y + 2,
-                w: 32,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "Fill".into())]),
-            a11y: A11yHints {
-                label: "Fill tool".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-        form.components.push(Component {
-            id: "tool_eraser".into(),
-            class: "tool".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 60,
-                y: row1_y + 2,
-                w: 38,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "Erase".into())]),
-            a11y: A11yHints {
-                label: "Eraser tool".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-
-        form.components.push(Component {
-            id: "brush_minus".into(),
-            class: "brush-ctrl".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 102,
-                y: row1_y + 2,
-                w: 20,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "-".into())]),
-            a11y: A11yHints {
-                label: "Decrease brush size".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-        form.components.push(Component {
-            id: "brush_plus".into(),
-            class: "brush-ctrl".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 126,
-                y: row1_y + 2,
-                w: 20,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "+".into())]),
-            a11y: A11yHints {
-                label: "Increase brush size".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-        form.components.push(Component {
-            id: "undo".into(),
-            class: "action".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 154,
-                y: row1_y + 2,
-                w: 36,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "Undo".into())]),
-            a11y: A11yHints {
-                label: "Undo last stroke".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-        form.components.push(Component {
-            id: "clear".into(),
-            class: "action".into(),
-            type_: ComponentType::Button,
-            bounds: Rect {
-                x: 196,
-                y: row1_y + 2,
-                w: 40,
-                h: 18,
-            },
-            properties: BTreeMap::from([("label".into(), "Clear".into())]),
-            a11y: A11yHints {
-                label: "Clear canvas".into(),
-                role: "button".into(),
-            },
-            interactions: Vec::new(),
-            binding: None,
-        });
-
-        for (i, g) in GRAY_LEVELS.iter().enumerate() {
-            let x = 4 + (i as i32) * 28;
-            form.components.push(Component {
-                id: format!("ink_{}", i),
-                class: "ink".into(),
-                type_: ComponentType::Button,
-                bounds: Rect {
-                    x,
-                    y: row2_y + 2,
-                    w: 24,
-                    h: 16,
-                },
-                properties: BTreeMap::from([("color".into(), (*g as i64).into())]),
-                a11y: A11yHints {
-                    label: format!("Gray level {}", i),
-                    role: "button".into(),
-                },
-                interactions: Vec::new(),
-                binding: None,
-            });
-        }
-
-        form
-    }
-
-    fn push_undo(&mut self) {
-        if self.undo_stack.len() >= UNDO_DEPTH {
-            self.undo_stack.remove(0);
-        }
-        self.undo_stack
-            .push((self.fg.clone(), self.written.clone()));
-    }
-
-    fn pop_undo(&mut self, ctx: &mut Ctx<'_>) {
-        if let Some((prev_fg, prev_written)) = self.undo_stack.pop() {
-            self.fg = prev_fg;
-            self.written = prev_written;
+    fn delete_canvas_record(&mut self, id: u32, ctx: &mut Ctx<'_>) {
+        self.db.delete(id);
+        if self.current_record == Some(id) {
+            self.current_record = None;
+            self.current_name = "untitled".to_string();
+            self.fg.fill(255);
+            self.written.fill(false);
+            self.icon_mode = false;
             ctx.invalidate(Self::canvas_screen_rect());
         }
     }
 
-    fn path_for_doc(&self) -> PathBuf {
-        path_for(&self.draw_dir, &self.doc_name)
+    // --- Exchange helpers -------------------------------------------------
+
+    fn handle_exchange(&mut self, action: &str, payload: soul_core::ExchangePayload, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        match action {
+            // Builder opened Draw for icon editing and supplied the pixels directly.
+            "open_bitmap" => {
+                if let soul_core::ExchangePayload::Bitmap { width, height, ref pixels } = payload {
+                    let w = width as usize;
+                    let h = height as usize;
+                    if !pixels.is_empty() && w > 0 && h > 0 {
+                        self.load_icon_pixels(pixels, w, h, ctx);
+                    }
+                }
+                // Mark that "Done" should return the result to the caller.
+                self.return_action = Some("return_bitmap".to_string());
+                None
+            }
+            _ => None,
+        }
     }
+
+    fn load_icon_pixels(&mut self, pixels: &[u8], w: usize, h: usize, ctx: &mut Ctx<'_>) {
+        self.undo_stack.clear();
+        self.fg.fill(255);
+        self.written.fill(false);
+        self.bg = None;
+        let cell = ICON_CELL as usize;
+        // Center the icon in the canvas; scale if needed.
+        let data = if w == cell && h == cell {
+            pixels.to_vec()
+        } else {
+            scale_image_to_canvas(pixels, w, h, cell, cell)
+        };
+        for y in 0..cell {
+            for x in 0..cell {
+                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
+                let p = data[y * cell + x];
+                self.fg[i] = p;
+                self.written[i] = p != 255;
+            }
+        }
+        self.icon_mode = true;
+        self.current_record = None;
+        self.current_name = "icon".to_string();
+        // Auto-save immediately — Palm principle: data is never lost on switch.
+        self.save_canvas();
+        save_db(&self.db, &self.db_path);
+        ctx.invalidate(Self::canvas_screen_rect());
+    }
+
+    // --- Geometry --------------------------------------------------------
 
     fn canvas_screen_rect() -> Rectangle {
         Rectangle::new(
@@ -432,7 +290,7 @@ impl Draw {
         if lx >= LOG_W || ly >= LOG_H {
             return None;
         }
-        if matches!(self.edit, EditTarget::Icon(_)) {
+        if self.icon_mode {
             let cell = ICON_CELL as usize;
             if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell {
                 return None;
@@ -450,26 +308,26 @@ impl Draw {
         )
     }
 
-    fn rect_save_as_input() -> Rectangle {
+    fn rect_name_input() -> Rectangle {
         Rectangle::new(Point::new(16, 98), Size::new(208, 20))
     }
 
-    fn rect_save_as_ok() -> Rectangle {
+    fn rect_name_ok() -> Rectangle {
         Rectangle::new(Point::new(24, 130), Size::new(80, 28))
     }
 
-    fn rect_save_as_cancel() -> Rectangle {
+    fn rect_name_cancel() -> Rectangle {
         Rectangle::new(Point::new(120, 130), Size::new(96, 28))
     }
 
-    fn rect_open_row(i: usize) -> Rectangle {
+    fn rect_gallery_row(i: usize) -> Rectangle {
         Rectangle::new(
             Point::new(16, 52 + i as i32 * OPEN_ROW_H),
             Size::new(208, (OPEN_ROW_H - 2) as u32),
         )
     }
 
-    fn rect_open_cancel() -> Rectangle {
+    fn rect_gallery_cancel() -> Rectangle {
         Rectangle::new(Point::new(70, 226), Size::new(100, 28))
     }
 
@@ -480,6 +338,8 @@ impl Draw {
             Size::new(SCREEN_WIDTH as u32, h),
         )
     }
+
+    // --- Painting --------------------------------------------------------
 
     fn display_value(&self, i: usize) -> u8 {
         if self.written[i] {
@@ -511,6 +371,22 @@ impl Draw {
         ctx.invalidate(r);
     }
 
+    fn push_undo(&mut self) {
+        if self.undo_stack.len() >= UNDO_DEPTH {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack
+            .push((self.fg.clone(), self.written.clone()));
+    }
+
+    fn pop_undo(&mut self, ctx: &mut Ctx<'_>) {
+        if let Some((prev_fg, prev_written)) = self.undo_stack.pop() {
+            self.fg = prev_fg;
+            self.written = prev_written;
+            ctx.invalidate(Self::canvas_screen_rect());
+        }
+    }
+
     fn stamp(&mut self, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
         let r = self.brush_radius;
         let r2 = r * r;
@@ -529,16 +405,12 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
-
-                // In icon editing mode, only paint within icon bounds
-                if matches!(self.edit, EditTarget::Icon(_)) {
+                if self.icon_mode {
                     let cell = ICON_CELL as usize;
-                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell
-                    {
+                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell {
                         continue;
                     }
                 }
-
                 let i = ly * LOG_W + lx;
                 if self.written[i] && self.fg[i] == self.brush {
                     continue;
@@ -568,16 +440,12 @@ impl Draw {
                 if lx >= LOG_W || ly >= LOG_H {
                     continue;
                 }
-
-                // In icon editing mode, only erase within icon bounds
-                if matches!(self.edit, EditTarget::Icon(_)) {
+                if self.icon_mode {
                     let cell = ICON_CELL as usize;
-                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell
-                    {
+                    if lx < ICON_OX || lx >= ICON_OX + cell || ly < ICON_OY || ly >= ICON_OY + cell {
                         continue;
                     }
                 }
-
                 let i = ly * LOG_W + lx;
                 if !self.written[i] {
                     continue;
@@ -592,19 +460,15 @@ impl Draw {
         match self.tool {
             Tool::Brush => self.stamp(x, y, ctx),
             Tool::Eraser => self.erase_stamp(x, y, ctx),
-            Tool::Fill => {
-                // Fill tool only works on pen down, not during moves
-            }
+            Tool::Fill => {}
         }
     }
 
     fn flood_fill(&mut self, sx: usize, sy: usize, ctx: &mut Ctx<'_>) {
         let target = self.display_value(sy * LOG_W + sx);
-        // Don't fill if target color is same as brush color
         if target == self.brush {
             return;
         }
-
         self.push_undo();
         let mut seen = vec![false; LOG_W * LOG_H];
         let mut q = VecDeque::new();
@@ -622,31 +486,27 @@ impl Draw {
             self.fg[i] = self.brush;
             Self::invalidate_cell(ctx, x, y);
             if x > 0 {
-                let nx = x - 1;
-                let ni = y * LOG_W + nx;
+                let ni = y * LOG_W + (x - 1);
                 if !seen[ni] && self.display_value(ni) == target {
-                    q.push_back((nx, y));
+                    q.push_back((x - 1, y));
                 }
             }
             if x + 1 < LOG_W {
-                let nx = x + 1;
-                let ni = y * LOG_W + nx;
+                let ni = y * LOG_W + (x + 1);
                 if !seen[ni] && self.display_value(ni) == target {
-                    q.push_back((nx, y));
+                    q.push_back((x + 1, y));
                 }
             }
             if y > 0 {
-                let ny = y - 1;
-                let ni = ny * LOG_W + x;
+                let ni = (y - 1) * LOG_W + x;
                 if !seen[ni] && self.display_value(ni) == target {
-                    q.push_back((x, ny));
+                    q.push_back((x, y - 1));
                 }
             }
             if y + 1 < LOG_H {
-                let ny = y + 1;
-                let ni = ny * LOG_W + x;
+                let ni = (y + 1) * LOG_W + x;
                 if !seen[ni] && self.display_value(ni) == target {
-                    q.push_back((x, ny));
+                    q.push_back((x, y + 1));
                 }
             }
         }
@@ -692,76 +552,121 @@ impl Draw {
         ctx.invalidate(Self::canvas_screen_rect());
     }
 
-    fn try_save_to_path(&self, path: &Path) -> bool {
-        let flat = self.flatten_for_save();
-        match save_pgm(path, LOG_W, LOG_H, &flat) {
-            Ok(()) => {
-                eprintln!("draw: saved {}", path.display());
-                true
-            }
-            Err(e) => {
-                eprintln!("draw: save {} failed: {e}", path.display());
-                false
-            }
+    // --- Persist UI form -------------------------------------------------
+
+    fn persist_form(&mut self) {
+        let json = self.ui_form.to_json().into_bytes();
+        let existing_id = self.db.iter_category(CAT_FORM).next().map(|r| r.id);
+        if let Some(id) = existing_id {
+            self.db.update(id, json);
+        } else {
+            self.db.insert(CAT_FORM, json);
         }
     }
 
-    fn try_load_doc_path(&mut self, path: &Path, ctx: &mut Ctx<'_>) -> bool {
-        match load_pgm(path) {
-            Ok((w, h, data)) if w == LOG_W && h == LOG_H => {
-                self.undo_stack.clear();
-                self.fg = data;
-                self.written = vec![true; LOG_W * LOG_H];
+    // --- Menu / modal helpers --------------------------------------------
+
+    fn menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        self.menu_open = false;
+        match idx {
+            0 => {
+                // New
+                self.clear_canvas(ctx);
+                self.current_record = None;
+                self.current_name = "untitled".to_string();
                 self.bg = None;
-                self.edit = EditTarget::Document;
-                self.validate_background();
-                ctx.invalidate(Self::canvas_screen_rect());
-                eprintln!("draw: loaded {}", path.display());
-                true
+                self.icon_mode = false;
+                self.return_action = None;
+                ctx.invalidate_all();
+                None
             }
-            Ok((w, h, _)) => {
-                eprintln!(
-                    "draw: {} is {}×{}, need {}×{}",
-                    path.display(),
-                    w,
-                    h,
-                    LOG_W,
-                    LOG_H
-                );
-                false
+            1 => {
+                // Save
+                self.save_canvas();
+                save_db(&self.db, &self.db_path);
+                ctx.invalidate_all();
+                None
             }
-            Err(e) => {
-                eprintln!("draw: load {} failed: {e}", path.display());
-                false
+            2 => {
+                // Name...
+                let mut input = TextInput::with_placeholder(Self::rect_name_input(), "name");
+                let _ = input.set_text(self.current_name.clone());
+                self.mode = Mode::NameInput(input);
+                ctx.invalidate_all();
+                None
             }
-        }
-    }
-
-    fn try_load_background_path(&mut self, path: &Path, ctx: &mut Ctx<'_>) -> bool {
-        match load_pgm(path) {
-            Ok((w, h, data)) if w == LOG_W && h == LOG_H => {
-                self.bg = Some(data);
-                ctx.invalidate(Self::canvas_screen_rect());
-                eprintln!("draw: background {}", path.display());
-                true
+            3 => {
+                // Gallery
+                let records = self.list_gallery();
+                self.mode = Mode::Gallery {
+                    records,
+                    scroll: 0,
+                    purpose: GalleryPurpose::Open,
+                };
+                ctx.invalidate_all();
+                None
             }
-            Ok((w, h, data)) => {
-                let scaled_data = scale_image_to_canvas(&data, w, h, LOG_W, LOG_H);
-                self.bg = Some(scaled_data);
-                ctx.invalidate(Self::canvas_screen_rect());
-                eprintln!(
-                    "draw: background {} scaled from {}×{} to {}×{}",
-                    path.display(),
-                    w,
-                    h,
-                    LOG_W,
-                    LOG_H
-                );
-                true
+            4 => {
+                // Done — return edited bitmap to the app that opened Draw via exchange.
+                if let Some(action) = self.return_action.take() {
+                    // Extract just the icon cell from the canvas (fg is the full
+                    // LOG_W×LOG_H buffer; the icon lives at [ICON_OY..][ICON_OX..]).
+                    let cell = ICON_CELL as usize;
+                    let mut buf = Vec::with_capacity(cell * cell);
+                    for y in 0..cell {
+                        for x in 0..cell {
+                            let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
+                            buf.push(self.display_value(i));
+                        }
+                    }
+                    return Some(soul_script::SystemRequest::SendResult {
+                        action,
+                        payload: soul_core::ExchangePayload::Bitmap {
+                            width: ICON_CELL as u16,
+                            height: ICON_CELL as u16,
+                            pixels: buf,
+                        },
+                    });
+                }
+                ctx.invalidate_all();
+                None
             }
-            Err(e) => {
-                eprintln!("draw: load bg failed: {e}");
-                false
+            5 => {
+                // Load bg — open gallery as background picker
+                let records = self.list_gallery();
+                self.mode = Mode::Gallery {
+                    records,
+                    scroll: 0,
+                    purpose: GalleryPurpose::Background,
+                };
+                ctx.invalidate_all();
+                None
+            }
+            6 => {
+                self.clear_background(ctx);
+                ctx.invalidate_all();
+                None
+            }
+            7 => {
+                self.builder_mode = !self.builder_mode;
+                ctx.invalidate_all();
+                None
+            }
+            8 => {
+                self.edit_overlay.delete_selected(&mut self.ui_form);
+                self.persist_form();
+                ctx.invalidate_all();
+                None
+            }
+            9 => {
+                self.ui_form = Self::default_draw_ui();
+                self.persist_form();
+                ctx.invalidate_all();
+                None
+            }
+            _ => {
+                ctx.invalidate_all();
+                None
             }
         }
     }
@@ -771,21 +676,17 @@ impl Draw {
             ctx.invalidate(r);
         }
         if out.submitted {
-            self.commit_save_as(ctx);
+            self.commit_name(ctx);
         }
     }
 
-    fn commit_save_as(&mut self, ctx: &mut Ctx<'_>) {
-        let Mode::SaveAs(input) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+    fn commit_name(&mut self, ctx: &mut Ctx<'_>) {
+        let Mode::NameInput(input) = std::mem::replace(&mut self.mode, Mode::Normal) else {
             return;
         };
         let raw = input.text().to_string();
         if let Some(name) = sanitize_name(&raw) {
-            self.doc_name = name;
-            self.edit = EditTarget::Document;
-            let _ = self.try_save_to_path(&self.path_for_doc());
-        } else {
-            eprintln!("draw: invalid name (use letters, digits, _ -)");
+            self.current_name = name;
         }
         ctx.invalidate_all();
     }
@@ -796,220 +697,10 @@ impl Draw {
         ctx.invalidate_all();
     }
 
-    fn refresh_open_list(&mut self, purpose: OpenPurpose) {
-        self.mode = Mode::OpenList {
-            files: list_pgm_stems(&self.draw_dir).unwrap_or_else(|e| {
-                eprintln!("draw: list {} failed: {e}", self.draw_dir.display());
-                Vec::new()
-            }),
-            scroll: 0,
-            purpose,
-        };
-    }
-
-    fn ensure_icons_seeded(&mut self) {
-        let list = soul_script::app_list();
-        if self.launcher_icons.is_valid_for(list.len()) {
-            return;
-        }
-        let cell = ICON_CELL as usize;
-        for (i, entry) in list.iter().enumerate() {
-            let data = if !entry.icon_stem.is_empty() {
-                let path = std::path::PathBuf::from("assets/sprites")
-                    .join(format!("{}_icon.pgm", entry.icon_stem));
-                match load_pgm(&path) {
-                    Ok((w, h, pix)) if w == cell && h == cell => pix,
-                    _ => vec![255u8; cell * cell],
-                }
-            } else {
-                vec![255u8; cell * cell]
-            };
-            self.launcher_icons.db.insert(i as u8, data);
-        }
-        if let Err(e) = self.launcher_icons.persist() {
-            eprintln!("draw: could not persist seeded icons: {e}");
-        }
-    }
-
-    fn refresh_open_icon_list(&mut self) {
-        self.ensure_icons_seeded();
-        self.mode = Mode::OpenList {
-            files: soul_script::app_list()
-                .iter()
-                .map(|e| e.name.clone())
-                .collect(),
-            scroll: 0,
-            purpose: OpenPurpose::LauncherIcon,
-        };
-    }
-
-    /// Persist the launcher-icon cache to disk (called on `AppStop`).
-    pub fn persist(&self) {
-        if let Err(e) = self.launcher_icons.persist() {
-            eprintln!("draw: could not persist icon cache: {e}");
-        }
-    }
-
-    fn load_icon_from_db(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> bool {
-        self.ensure_icons_seeded();
-        let cell = ICON_CELL as usize;
-        let area = cell * cell;
-        let data = {
-            let Some(rec) = self.launcher_icons.db.iter_category(idx as u8).next() else {
-                return false;
-            };
-            if rec.data.len() != area {
-                return false;
-            }
-            rec.data.clone()
-        };
-        self.undo_stack.clear();
-        self.fg.fill(255);
-        self.written.fill(false);
-        self.bg = None;
-        for y in 0..cell {
-            for x in 0..cell {
-                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
-                let p = data[y * cell + x];
-                self.fg[i] = p;
-                self.written[i] = p != 255;
-            }
-        }
-        self.edit = EditTarget::Icon(idx);
-        self.doc_name = format!(
-            "icon:{}",
-            soul_script::app_list()
-                .get(idx)
-                .map(|e| e.name.as_str())
-                .unwrap_or("?")
-        );
-        ctx.invalidate(Self::canvas_screen_rect());
-        true
-    }
-
-    fn save_icon_to_db(&mut self, idx: usize) -> bool {
-        let cell = ICON_CELL as usize;
-        let mut buf = Vec::with_capacity(cell * cell);
-        for y in 0..cell {
-            for x in 0..cell {
-                let i = (ICON_OY + y) * LOG_W + (ICON_OX + x);
-                buf.push(self.display_value(i));
-            }
-        }
-        let Some(rec) = self.launcher_icons.db.iter_category(idx as u8).next() else {
-            return false;
-        };
-        let id = rec.id;
-        let ok = self.launcher_icons.db.update(id, buf);
-        if ok {
-            if let Err(e) = self.launcher_icons.persist() {
-                eprintln!("draw: could not persist launcher icon cache: {e}");
-            }
-        }
-        ok
-    }
-
-    fn menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) {
-        self.menu_open = false;
-        match idx {
-            0 => {
-                self.clear_canvas(ctx);
-                self.doc_name = String::from("untitled");
-                self.bg = None;
-                self.edit = EditTarget::Document;
-                ctx.invalidate_all();
-            }
-            1 => {
-                match self.edit {
-                    EditTarget::Icon(i) => {
-                        if self.save_icon_to_db(i) {
-                            eprintln!(
-                                "draw: saved launcher icon {}",
-                                soul_script::app_list()
-                                    .get(i)
-                                    .map(|e| e.name.as_str())
-                                    .unwrap_or("?")
-                            );
-                        }
-                    }
-                    EditTarget::Document => {
-                        let _ = self.try_save_to_path(&self.path_for_doc());
-                    }
-                }
-                ctx.invalidate_all();
-            }
-            2 => {
-                let mut input = TextInput::with_placeholder(Self::rect_save_as_input(), "name");
-                let _ = input.set_text(self.doc_name.clone());
-                self.mode = Mode::SaveAs(input);
-                ctx.invalidate_all();
-            }
-            3 => {
-                self.refresh_open_list(OpenPurpose::Document);
-                ctx.invalidate_all();
-            }
-            4 => {
-                self.refresh_open_icon_list();
-                ctx.invalidate_all();
-            }
-            5 => {
-                self.refresh_open_list(OpenPurpose::Background);
-                ctx.invalidate_all();
-            }
-            6 => {
-                self.clear_background(ctx);
-                ctx.invalidate_all();
-            }
-            7 => {
-                self.builder_mode = !self.builder_mode;
-                ctx.invalidate_all();
-            }
-            8 => {
-                self.edit_overlay.delete_selected(&mut self.ui_form);
-                self.persist_ui();
-                ctx.invalidate_all();
-            }
-            9 => {
-                self.ui_form = Self::default_draw_ui();
-                self.persist_ui();
-                ctx.invalidate_all();
-            }
-            _ => {
-                ctx.invalidate_all();
-            }
-        }
-    }
-
-    fn open_pick(&mut self, stem: &str, ctx: &mut Ctx<'_>) {
-        let purpose = match &self.mode {
-            Mode::OpenList { purpose, .. } => *purpose,
-            _ => OpenPurpose::Document,
-        };
-        match purpose {
-            OpenPurpose::Document => {
-                let path = path_for(&self.draw_dir, stem);
-                self.doc_name = stem.to_string();
-                let _ = self.try_load_doc_path(&path, ctx);
-            }
-            OpenPurpose::Background => {
-                let path = path_for(&self.draw_dir, stem);
-                let _ = self.try_load_background_path(&path, ctx);
-            }
-            OpenPurpose::LauncherIcon => {
-                if let Some(idx) = soul_script::app_list().iter().position(|e| e.name == stem) {
-                    let _ = self.load_icon_from_db(idx, ctx);
-                }
-            }
-        }
-        self.mode = Mode::Normal;
-        ctx.invalidate_all();
-    }
-
     fn paint_zone_at(&self, x: i16, y: i16) -> PaintTarget {
         if self.screen_to_cell(x, y).is_some() {
             return PaintTarget::Canvas;
         }
-
         if let Some(comp) = self.ui_form.hit_test(x, y) {
             match comp.id.as_str() {
                 "tool_brush" => return PaintTarget::ToolBrush,
@@ -1027,44 +718,42 @@ impl Draw {
                 _ => {}
             }
         }
-
         PaintTarget::None
     }
 
-    fn handle_menu_pen(
-        &mut self,
-        down: bool,
-        move_: bool,
-        up: bool,
-        x: i16,
-        y: i16,
-        ctx: &mut Ctx<'_>,
-    ) {
+    fn handle_menu_pen(&mut self, down: bool, move_: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         if down {
             self.menu_touch =
                 (0..MENU_ITEMS.len()).find(|&i| hit_test(&Self::rect_menu_entry(i), x, y));
             if self.menu_touch.is_some() {
                 ctx.invalidate(Rectangle::new(Point::new(16, 48), Size::new(208, 240)));
             }
+            None
         } else if move_ {
+            None
         } else if up {
             let end = (0..MENU_ITEMS.len()).find(|&i| hit_test(&Self::rect_menu_entry(i), x, y));
-            if self.menu_touch.is_some() && end == self.menu_touch {
+            let req = if self.menu_touch.is_some() && end == self.menu_touch {
                 if let Some(i) = end {
-                    self.menu_action(i, ctx);
+                    self.menu_action(i, ctx)
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
             self.menu_touch = None;
+            req
+        } else {
+            None
         }
     }
 
-    fn handle_save_as_pen(&mut self, down: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) {
-        let Mode::SaveAs(ref mut input) = &mut self.mode else {
-            return;
-        };
+    fn handle_name_pen(&mut self, down: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) {
+        let Mode::NameInput(ref mut input) = &mut self.mode else { return };
         if down {
-            if hit_test(&Self::rect_save_as_ok(), x, y)
-                || hit_test(&Self::rect_save_as_cancel(), x, y)
+            if hit_test(&Self::rect_name_ok(), x, y)
+                || hit_test(&Self::rect_name_cancel(), x, y)
             {
                 return;
             }
@@ -1073,115 +762,122 @@ impl Draw {
                 ctx.invalidate(input.area());
             }
         } else if up {
-            if hit_test(&Self::rect_save_as_ok(), x, y) {
-                self.commit_save_as(ctx);
-            } else if hit_test(&Self::rect_save_as_cancel(), x, y) {
+            if hit_test(&Self::rect_name_ok(), x, y) {
+                self.commit_name(ctx);
+            } else if hit_test(&Self::rect_name_cancel(), x, y) {
                 self.mode = Mode::Normal;
                 ctx.invalidate_all();
             }
         }
     }
 
-    fn handle_open_pen(&mut self, down: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) {
-        if !matches!(self.mode, Mode::OpenList { .. }) {
+    fn handle_gallery_pen(&mut self, down: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) {
+        if !matches!(self.mode, Mode::Gallery { .. }) {
             return;
         }
-        if down {
+        if down || !up {
             return;
         }
-        if !up {
-            return;
-        }
-        if hit_test(&Self::rect_open_cancel(), x, y) {
+        if hit_test(&Self::rect_gallery_cancel(), x, y) {
             self.mode = Mode::Normal;
             ctx.invalidate_all();
             return;
         }
-        let Mode::OpenList { files, scroll, .. } = &mut self.mode else {
-            return;
-        };
-        let visible = OPEN_VISIBLE.min(files.len().saturating_sub(*scroll));
+        let Mode::Gallery { records, scroll, purpose } = &mut self.mode else { return };
+        let visible = OPEN_VISIBLE.min(records.len().saturating_sub(*scroll));
         for i in 0..visible {
-            if hit_test(&Self::rect_open_row(i), x, y) {
+            if hit_test(&Self::rect_gallery_row(i), x, y) {
                 let idx = *scroll + i;
-                if let Some(stem) = files.get(idx).cloned() {
-                    self.open_pick(&stem, ctx);
+                if let Some(&(id, _)) = records.get(idx) {
+                    let purpose = *purpose;
+                    self.load_canvas_record(id, purpose, ctx);
+                    self.mode = Mode::Normal;
+                    ctx.invalidate_all();
                 }
                 return;
             }
         }
     }
-}
 
-impl App for Draw {
-    fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+    /// The main event handler — returns any system request to emit.
+    pub fn handle_event(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         match event {
-            Event::Menu => match &self.mode {
-                Mode::SaveAs(_) | Mode::OpenList { .. } => {
-                    self.cancel_modal(ctx);
+            Event::Exchange { action, payload, .. } => {
+                self.handle_exchange(&action, payload, ctx)
+            }
+            Event::Menu => {
+                match &self.mode {
+                    Mode::NameInput(_) | Mode::Gallery { .. } => self.cancel_modal(ctx),
+                    Mode::Normal => {
+                        self.menu_open = !self.menu_open;
+                        ctx.invalidate_all();
+                    }
                 }
-                Mode::Normal => {
-                    self.menu_open = !self.menu_open;
-                    ctx.invalidate_all();
-                }
-            },
+                None
+            }
             Event::Key(KeyCode::Char(c)) => {
-                if let Mode::SaveAs(ref mut input) = self.mode {
+                if let Mode::NameInput(ref mut input) = self.mode {
                     let out = input.insert_char(c);
                     self.apply_text_out(out, ctx);
                 }
+                None
             }
             Event::Key(KeyCode::Backspace) => {
-                if let Mode::SaveAs(ref mut input) = self.mode {
+                if let Mode::NameInput(ref mut input) = self.mode {
                     let out = input.backspace();
                     self.apply_text_out(out, ctx);
                 }
+                None
             }
             Event::Key(KeyCode::Enter) => {
-                if let Mode::SaveAs(ref mut input) = self.mode {
+                if let Mode::NameInput(ref mut input) = self.mode {
                     let out = input.enter();
                     self.apply_text_out(out, ctx);
                 }
+                None
             }
             Event::Key(KeyCode::ArrowLeft) => {
-                if let Mode::SaveAs(ref mut input) = self.mode {
+                if let Mode::NameInput(ref mut input) = self.mode {
                     if let Some(r) = input.cursor_left() {
                         ctx.invalidate(r);
                     }
                 }
+                None
             }
             Event::Key(KeyCode::ArrowRight) => {
-                if let Mode::SaveAs(ref mut input) = self.mode {
+                if let Mode::NameInput(ref mut input) = self.mode {
                     if let Some(r) = input.cursor_right() {
                         ctx.invalidate(r);
                     }
                 }
+                None
             }
             Event::ButtonDown(HardButton::PageUp) => {
-                if let Mode::OpenList { scroll, .. } = &mut self.mode {
+                if let Mode::Gallery { scroll, .. } = &mut self.mode {
                     *scroll = scroll.saturating_sub(1);
                     ctx.invalidate(Rectangle::new(Point::new(8, 44), Size::new(224, 200)));
                 }
+                None
             }
             Event::ButtonDown(HardButton::PageDown) => {
-                if let Mode::OpenList { scroll, files, .. } = &mut self.mode {
-                    let max_scroll = files.len().saturating_sub(OPEN_VISIBLE);
+                if let Mode::Gallery { scroll, records, .. } = &mut self.mode {
+                    let max_scroll = records.len().saturating_sub(OPEN_VISIBLE);
                     *scroll = (*scroll + 1).min(max_scroll);
                     ctx.invalidate(Rectangle::new(Point::new(8, 44), Size::new(224, 200)));
                 }
+                None
             }
             Event::PenDown { x, y } => match &mut self.mode {
-                Mode::SaveAs(_) => self.handle_save_as_pen(true, false, x, y, ctx),
-                Mode::OpenList { .. } => self.handle_open_pen(true, false, x, y, ctx),
+                Mode::NameInput(_) => { self.handle_name_pen(true, false, x, y, ctx); None }
+                Mode::Gallery { .. } => { self.handle_gallery_pen(true, false, x, y, ctx); None }
                 Mode::Normal => {
                     if self.builder_mode
                         && self.edit_overlay.pen_down(&self.ui_form, x, y) {
                             ctx.invalidate_all();
-                            return;
+                            return None;
                         }
                     if self.menu_open {
-                        self.handle_menu_pen(true, false, false, x, y, ctx);
-                        return;
+                        return self.handle_menu_pen(true, false, false, x, y, ctx);
                     }
                     let z = self.paint_zone_at(x, y);
                     self.paint_touch = z;
@@ -1212,28 +908,20 @@ impl App for Draw {
                                 Size::new(SCREEN_WIDTH as u32, 24),
                             ));
                         }
-                        PaintTarget::BrushMinus
-                        | PaintTarget::BrushPlus
-                        | PaintTarget::ClearBtn
-                        | PaintTarget::UndoBtn
-                        | PaintTarget::ToolBrush
-                        | PaintTarget::ToolFill
-                        | PaintTarget::ToolEraser => {}
-                        PaintTarget::None => {}
+                        _ => {}
                     }
+                    None
                 }
             },
             Event::PenMove { x, y } => {
-                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open
-                    && self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
+                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open {
+                    if self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
                         ctx.invalidate_all();
-                        return;
+                        return None;
                     }
-                if matches!(self.mode, Mode::Normal) && self.menu_open {
-                    return;
                 }
-                if !matches!(self.mode, Mode::Normal) {
-                    return;
+                if !matches!(self.mode, Mode::Normal) || self.menu_open {
+                    return None;
                 }
                 if self.paint_touch == PaintTarget::Canvas
                     && matches!(self.tool, Tool::Brush | Tool::Eraser)
@@ -1249,18 +937,19 @@ impl App for Draw {
                         self.last_cell = Some((lx, ly));
                     }
                 }
+                None
             }
             Event::PenUp { x, y } => match &mut self.mode {
-                Mode::SaveAs(_) => self.handle_save_as_pen(false, true, x, y, ctx),
-                Mode::OpenList { .. } => self.handle_open_pen(false, true, x, y, ctx),
+                Mode::NameInput(_) => { self.handle_name_pen(false, true, x, y, ctx); None }
+                Mode::Gallery { .. } => { self.handle_gallery_pen(false, true, x, y, ctx); None }
                 Mode::Normal => {
                     if self.builder_mode {
                         self.edit_overlay.pen_up();
-                        self.persist_ui();
+                        self.persist_form();
                         ctx.invalidate_all();
                     }
-                    if self.menu_open {
-                        self.handle_menu_pen(false, false, true, x, y, ctx);
+                    let req = if self.menu_open {
+                        self.handle_menu_pen(false, false, true, x, y, ctx)
                     } else {
                         let end = self.paint_zone_at(x, y);
                         if self.paint_touch == end {
@@ -1286,9 +975,7 @@ impl App for Draw {
                                         Size::new(120, 24),
                                     ));
                                 }
-                                PaintTarget::UndoBtn => {
-                                    self.pop_undo(ctx);
-                                }
+                                PaintTarget::UndoBtn => self.pop_undo(ctx),
                                 PaintTarget::BrushMinus => {
                                     self.brush_radius =
                                         (self.brush_radius - 1).max(BRUSH_RADIUS_MIN);
@@ -1309,20 +996,100 @@ impl App for Draw {
                                 _ => {}
                             }
                         }
-                    }
+                        None
+                    };
                     self.paint_touch = PaintTarget::None;
                     self.last_cell = None;
+                    req
                 }
             },
-            _ => {}
+            _ => None,
         }
     }
 
-    fn draw<D>(&mut self, canvas: &mut D)
+    // --- Default UI form -------------------------------------------------
+
+    fn default_draw_ui() -> soul_ui::Form {
+        use soul_ui::{A11yHints, Component, ComponentType, Form, Rect};
+        use std::collections::BTreeMap;
+        let mut form = Form::new("draw_ui");
+
+        let row1_y = 15 + 240;
+        let row2_y = row1_y + 26;
+
+        for (id, label, x, w) in &[
+            ("tool_brush", "Pen", 4i32, 32i32),
+            ("tool_fill", "Fill", 40, 32),
+            ("tool_eraser", "Erase", 76, 38),
+        ] {
+            form.components.push(Component {
+                id: id.to_string(),
+                class: "tool".into(),
+                type_: ComponentType::Button,
+                bounds: Rect { x: *x, y: row1_y + 2, w: *w as u32, h: 18 },
+                properties: BTreeMap::from([("label".into(), (*label).into())]),
+                a11y: A11yHints {
+                    label: format!("{label} tool"),
+                    role: "button".into(),
+                },
+                interactions: Vec::new(),
+                binding: None,
+            });
+        }
+
+        for (id, lbl, x, w) in &[
+            ("brush_minus", "-", 118i32, 20i32),
+            ("brush_plus", "+", 142, 20),
+            ("undo", "Undo", 166, 36),
+            ("clear", "Clear", 206, 34),
+        ] {
+            form.components.push(Component {
+                id: id.to_string(),
+                class: "action".into(),
+                type_: ComponentType::Button,
+                bounds: Rect { x: *x, y: row1_y + 2, w: *w as u32, h: 18 },
+                properties: BTreeMap::from([("label".into(), (*lbl).into())]),
+                a11y: A11yHints {
+                    label: lbl.to_string(),
+                    role: "button".into(),
+                },
+                interactions: Vec::new(),
+                binding: None,
+            });
+        }
+
+        for (i, g) in GRAY_LEVELS.iter().enumerate() {
+            let x = 4 + (i as i32) * 28;
+            form.components.push(Component {
+                id: format!("ink_{}", i),
+                class: "ink".into(),
+                type_: ComponentType::Button,
+                bounds: Rect { x, y: row2_y + 2, w: 24, h: 16 },
+                properties: BTreeMap::from([("color".into(), (*g as i64).into())]),
+                a11y: A11yHints {
+                    label: format!("Gray level {}", i),
+                    role: "button".into(),
+                },
+                interactions: Vec::new(),
+                binding: None,
+            });
+        }
+
+        form
+    }
+}
+
+impl App for Draw {
+    fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+        // Delegates to handle_event; System requests are routed via NativeKind.
+        self.handle_event(event, ctx);
+    }
+
+    fn draw<D>(&mut self, canvas: &mut D, _dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {
-        let title = format!("Draw · {}", truncate_name(&self.doc_name, 22));
+        let title = format!("Draw · {}", truncate_name(&self.current_name, 22));
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, &title);
 
         let r = Self::canvas_screen_rect();
@@ -1345,7 +1112,7 @@ impl App for Draw {
             }
         }
 
-        if matches!(self.edit, EditTarget::Icon(_)) {
+        if self.icon_mode {
             let ir = Rectangle::new(
                 Point::new(
                     (ICON_OX as i32) * SCALE,
@@ -1366,7 +1133,6 @@ impl App for Draw {
                 .draw(canvas);
         }
 
-        // Draw the dynamic UI form
         let pressed_id = match self.paint_touch {
             PaintTarget::ToolBrush => Some("tool_brush"),
             PaintTarget::ToolFill => Some("tool_fill"),
@@ -1387,7 +1153,6 @@ impl App for Draw {
         };
         let _ = self.ui_form.draw(canvas, pressed_id);
 
-        // Draw selection highlight for current gray level
         for (i, g) in GRAY_LEVELS.iter().enumerate() {
             if self.brush == *g {
                 if let Some(comp) = self
@@ -1401,19 +1166,14 @@ impl App for Draw {
                         .into_styled(PrimitiveStyle::with_stroke(BLACK, 2))
                         .draw(canvas);
                 }
+                break;
             }
         }
 
-        // Overlay brush radius label
-        if let Some(comp) = self
-            .ui_form
-            .components
-            .iter()
-            .find(|c| c.id == "brush_minus")
-        {
+        if let Some(comp) = self.ui_form.components.iter().find(|c| c.id == "brush_minus") {
             let _ = label(
                 canvas,
-                Point::new(comp.bounds.x + comp.bounds.w as i32 + 6, comp.bounds.y + 4),
+                Point::new(comp.bounds.x + comp.bounds.w as i32 + 4, comp.bounds.y + 4),
                 &format!("{}", self.brush_radius),
             );
         }
@@ -1423,46 +1183,41 @@ impl App for Draw {
         }
 
         match &self.mode {
-            Mode::SaveAs(input) => {
+            Mode::NameInput(input) => {
                 let _ = Self::app_content_rect()
                     .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                     .draw(canvas);
-                let _ = label(canvas, Point::new(12, 76), "Save as (stem only):");
+                let _ = label(canvas, Point::new(12, 76), "Canvas name:");
                 let _ = input.draw(canvas);
-                let _ = button(canvas, Self::rect_save_as_ok(), "OK", false);
-                let _ = button(canvas, Self::rect_save_as_cancel(), "Cancel", false);
+                let _ = button(canvas, Self::rect_name_ok(), "OK", false);
+                let _ = button(canvas, Self::rect_name_cancel(), "Cancel", false);
             }
-            Mode::OpenList {
-                files,
-                scroll,
-                purpose,
-            } => {
+            Mode::Gallery { records, scroll, purpose } => {
                 let _ = Self::app_content_rect()
                     .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                     .draw(canvas);
                 let hdr = match purpose {
-                    OpenPurpose::Document => "Open",
-                    OpenPurpose::Background => "Background (PGM)",
-                    OpenPurpose::LauncherIcon => "Launcher icon",
+                    GalleryPurpose::Open => "Open canvas",
+                    GalleryPurpose::Background => "Load background",
                 };
                 let _ = label(canvas, Point::new(12, 28), hdr);
-                if files.is_empty() {
-                    let _ = label(canvas, Point::new(16, 56), "No .pgm files in folder.");
+                if records.is_empty() {
+                    let _ = label(canvas, Point::new(16, 56), "No saved canvases.");
                 } else {
                     let pg = format!(
                         "{}-{} / {}",
                         *scroll + 1,
-                        (*scroll + OPEN_VISIBLE).min(files.len()),
-                        files.len()
+                        (*scroll + OPEN_VISIBLE).min(records.len()),
+                        records.len()
                     );
                     let _ = label(canvas, Point::new(120, 28), &pg);
-                    let visible = OPEN_VISIBLE.min(files.len().saturating_sub(*scroll));
+                    let visible = OPEN_VISIBLE.min(records.len().saturating_sub(*scroll));
                     for i in 0..visible {
                         let idx = *scroll + i;
-                        if let Some(name) = files.get(idx) {
+                        if let Some((_, name)) = records.get(idx) {
                             let _ = button(
                                 canvas,
-                                Self::rect_open_row(i),
+                                Self::rect_gallery_row(i),
                                 &truncate_name(name, 28),
                                 false,
                             );
@@ -1470,7 +1225,7 @@ impl App for Draw {
                     }
                 }
                 let _ = label(canvas, Point::new(12, 200), "PgUp / PgDn scroll");
-                let _ = button(canvas, Self::rect_open_cancel(), "Cancel", false);
+                let _ = button(canvas, Self::rect_gallery_cancel(), "Cancel", false);
             }
             Mode::Normal => {
                 if self.menu_open {
@@ -1505,22 +1260,22 @@ impl App for Draw {
                     }
                 }
             }
-            Mode::SaveAs(_) => {
+            Mode::NameInput(_) => {
                 nodes.push(soul_core::a11y::A11yNode {
-                    bounds: Self::rect_save_as_input(),
-                    label: "Filename input".into(),
+                    bounds: Self::rect_name_input(),
+                    label: "Canvas name input".into(),
                     role: "textinput".into(),
                 });
             }
-            Mode::OpenList { files, scroll, .. } => {
-                let visible = OPEN_VISIBLE.min(files.len().saturating_sub(*scroll));
+            Mode::Gallery { records, scroll, .. } => {
+                let visible = OPEN_VISIBLE.min(records.len().saturating_sub(*scroll));
                 for i in 0..visible {
                     let idx = *scroll + i;
-                    if let Some(name) = files.get(idx) {
+                    if let Some((_, name)) = records.get(idx) {
                         nodes.push(soul_core::a11y::A11yNode {
-                            bounds: Self::rect_open_row(i),
+                            bounds: Self::rect_gallery_row(i),
                             label: name.clone(),
-                            role: "file".into(),
+                            role: "listitem".into(),
                         });
                     }
                 }
@@ -1530,45 +1285,110 @@ impl App for Draw {
     }
 }
 
-fn scale_image_to_canvas(
-    data: &[u8],
-    src_w: usize,
-    src_h: usize,
-    dst_w: usize,
-    dst_h: usize,
-) -> Vec<u8> {
-    let mut result = vec![255u8; dst_w * dst_h];
+// --- DB persistence helpers ---------------------------------------------
 
-    // Calculate scale factor to fit image within canvas while maintaining aspect ratio
+fn load_db(path: &std::path::Path) -> (soul_db::Database, Option<u32>) {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(db) = soul_db::Database::decode(&bytes) {
+            let first_id = db.iter_category(CAT_CANVAS).next().map(|r| r.id);
+            return (db, first_id);
+        }
+    }
+    (soul_db::Database::new("draw"), None)
+}
+
+fn load_first_canvas(db: &soul_db::Database) -> (Vec<u8>, Vec<bool>, String) {
+    if let Some(rec) = db.iter_category(CAT_CANVAS).next() {
+        let name = decode_canvas_name(&rec.data);
+        if let Some(pixels) = decode_canvas_pixels(&rec.data) {
+            let written = pixels.iter().map(|&p| p != 255).collect();
+            return (pixels, written, name);
+        }
+    }
+    (
+        vec![255; LOG_W * LOG_H],
+        vec![false; LOG_W * LOG_H],
+        "untitled".to_string(),
+    )
+}
+
+fn load_form(db: &soul_db::Database) -> soul_ui::Form {
+    if let Some(rec) = db.iter_category(CAT_FORM).next() {
+        if let Ok(json) = std::str::from_utf8(&rec.data) {
+            if let Some(form) = soul_ui::Form::from_json(json) {
+                return form;
+            }
+        }
+    }
+    Draw::default_draw_ui()
+}
+
+fn save_db(db: &soul_db::Database, path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, db.encode());
+}
+
+// --- Canvas record encoding/decoding ------------------------------------
+
+fn encode_canvas(name: &str, pixels: &[u8]) -> Vec<u8> {
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(255) as u8;
+    let mut v = Vec::with_capacity(1 + name_len as usize + pixels.len());
+    v.push(name_len);
+    v.extend_from_slice(&name_bytes[..name_len as usize]);
+    v.extend_from_slice(pixels);
+    v
+}
+
+fn decode_canvas_name(data: &[u8]) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+    let nl = data[0] as usize;
+    if data.len() < 1 + nl {
+        return String::new();
+    }
+    String::from_utf8_lossy(&data[1..1 + nl]).into_owned()
+}
+
+fn decode_canvas_pixels(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() {
+        return None;
+    }
+    let nl = data[0] as usize;
+    let px_start = 1 + nl;
+    if data.len() != px_start + LOG_W * LOG_H {
+        return None;
+    }
+    Some(data[px_start..].to_vec())
+}
+
+// --- Utilities ----------------------------------------------------------
+
+fn scale_image_to_canvas(data: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+    let mut result = vec![255u8; dst_w * dst_h];
     let scale_x = dst_w as f32 / src_w as f32;
     let scale_y = dst_h as f32 / src_h as f32;
-    let scale = scale_x.min(scale_y); // Use the smaller scale to ensure it fits
-
+    let scale = scale_x.min(scale_y);
     let scaled_w = (src_w as f32 * scale) as usize;
     let scaled_h = (src_h as f32 * scale) as usize;
-
-    // Center the scaled image in the canvas
     let offset_x = (dst_w - scaled_w) / 2;
     let offset_y = (dst_h - scaled_h) / 2;
-
     for dy in 0..scaled_h {
         for dx in 0..scaled_w {
             let src_x = (dx as f32 / scale) as usize;
             let src_y = (dy as f32 / scale) as usize;
-
             if src_x < src_w && src_y < src_h {
-                let src_idx = src_y * src_w + src_x;
                 let dst_x = offset_x + dx;
                 let dst_y = offset_y + dy;
-
                 if dst_x < dst_w && dst_y < dst_h {
-                    let dst_idx = dst_y * dst_w + dst_x;
-                    result[dst_idx] = data[src_idx];
+                    result[dst_y * dst_w + dst_x] = data[src_y * src_w + src_x];
                 }
             }
         }
     }
-
     result
 }
 
@@ -1577,19 +1397,12 @@ fn faint_background(b: u8) -> u8 {
     ((x * 85 + 255 * 170) / 255) as u8
 }
 
-fn path_for(dir: &Path, stem: &str) -> PathBuf {
-    dir.join(format!("{stem}.pgm"))
-}
-
 fn sanitize_name(raw: &str) -> Option<String> {
     let t = raw.trim();
     if t.is_empty() || t.len() > 64 {
         return None;
     }
-    if !t
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return None;
     }
     Some(t.to_string())
@@ -1602,104 +1415,6 @@ fn truncate_name(s: &str, max_chars: usize) -> String {
         s.chars()
             .take(max_chars.saturating_sub(1))
             .collect::<String>()
-            + "..."
+            + "…"
     }
-}
-
-fn list_pgm_stems(dir: &Path) -> io::Result<Vec<String>> {
-    let mut v = Vec::new();
-    if !dir.exists() {
-        return Ok(v);
-    }
-    for ent in fs::read_dir(dir)? {
-        let ent = ent?;
-        let p = ent.path();
-        if p.extension().and_then(|e| e.to_str()) == Some("pgm") {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                v.push(stem.to_string());
-            }
-        }
-    }
-    v.sort();
-    Ok(v)
-}
-
-fn load_pgm(path: &Path) -> io::Result<(usize, usize, Vec<u8>)> {
-    let f = File::open(path)?;
-    let mut r = BufReader::new(f);
-    let mut line = String::new();
-    r.read_line(&mut line)?;
-    if line.trim() != "P5" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "expected P5 PGM",
-        ));
-    }
-    let (w, h) = read_pgm_whitespace_line(&mut r)?;
-    let maxv = read_pgm_whitespace_line_value(&mut r)?;
-    if maxv != 255 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "only maxval 255 is supported",
-        ));
-    }
-    let mut pixels = vec![0u8; w * h];
-    r.read_exact(&mut pixels)?;
-    Ok((w, h, pixels))
-}
-
-fn read_pgm_whitespace_line<R: BufRead>(r: &mut R) -> io::Result<(usize, usize)> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if r.read_line(&mut line)? == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pgm header"));
-        }
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        let mut it = t.split_whitespace();
-        let w: usize = it
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "width"))?
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let h: usize = it
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "height"))?
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        return Ok((w, h));
-    }
-}
-
-fn read_pgm_whitespace_line_value<R: BufRead>(r: &mut R) -> io::Result<u32> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if r.read_line(&mut line)? == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pgm maxval"));
-        }
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        let v: u32 = t
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        return Ok(v);
-    }
-}
-
-fn save_pgm(path: &Path, w: usize, h: usize, pixels: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = File::create(path)?;
-    writeln!(f, "P5")?;
-    writeln!(f, "{w} {h}")?;
-    writeln!(f, "255")?;
-    f.write_all(pixels)?;
-    Ok(())
 }

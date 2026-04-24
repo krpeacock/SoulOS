@@ -4,7 +4,7 @@ mod builder;
 mod draw;
 mod egui_demo;
 mod launcher;
-mod launcher_store;
+mod paint;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -21,16 +21,21 @@ use soul_core::{
 use soul_hal_hosted::HostedPlatform;
 use soul_script::ScriptedApp;
 use soul_ui::{hit_test, BLACK, WHITE};
-use rhai::Position;
 use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
 use draw::Draw;
 use egui_demo::EguiDemo;
 use launcher::Launcher;
+use paint::Paint;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
+
+/// The app ID treated as the home / launcher screen.
+/// `Host` locates this app by ID after loading all apps, so the launcher
+/// can be any app — native or scripted — as long as it declares this ID.
+const HOME_APP_ID: &str = Launcher::APP_ID;
 
 // --- Native apps --------------------------------------------------------
 
@@ -41,6 +46,7 @@ pub(crate) enum NativeKind {
     Launcher(Launcher),
     Draw(Box<Draw>),
     Builder(MobileBuilder),
+    Paint(Paint),
     EguiDemo(EguiDemo),
 }
 
@@ -50,6 +56,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::APP_ID,
             NativeKind::Draw(_) => Draw::APP_ID,
             NativeKind::Builder(_) => MobileBuilder::APP_ID,
+            NativeKind::Paint(_) => Paint::APP_ID,
             NativeKind::EguiDemo(_) => EguiDemo::APP_ID,
         }
     }
@@ -59,6 +66,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => Launcher::NAME,
             NativeKind::Draw(_) => Draw::NAME,
             NativeKind::Builder(_) => MobileBuilder::NAME,
+            NativeKind::Paint(_) => Paint::NAME,
             NativeKind::EguiDemo(_) => EguiDemo::NAME,
         }
     }
@@ -70,6 +78,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => None,
             NativeKind::Draw(_) => Some("draw"),
             NativeKind::Builder(_) => Some("builder"),
+            NativeKind::Paint(_) => Some("paint"),
             NativeKind::EguiDemo(_) => Some("egui_demo"),
         }
     }
@@ -77,14 +86,9 @@ impl NativeKind {
     fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<soul_script::SystemRequest> {
         match self {
             NativeKind::Launcher(l) => l.handle(event, ctx),
-            NativeKind::Draw(d) => {
-                d.handle(event, ctx);
-                None
-            }
-            NativeKind::Builder(b) => {
-                b.handle(event, ctx);
-                None
-            }
+            NativeKind::Draw(d) => d.handle_event(event, ctx),
+            NativeKind::Builder(b) => b.handle_event(event, ctx),
+            NativeKind::Paint(p) => p.handle_event(event, ctx),
             NativeKind::EguiDemo(e) => {
                 e.handle(event, ctx);
                 None
@@ -92,12 +96,13 @@ impl NativeKind {
         }
     }
 
-    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
+    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         match self {
-            NativeKind::Launcher(l) => l.draw(canvas),
-            NativeKind::Draw(d) => d.draw(canvas),
-            NativeKind::Builder(b) => b.draw(canvas),
-            NativeKind::EguiDemo(e) => e.draw(canvas),
+            NativeKind::Launcher(l) => l.draw(canvas, dirty),
+            NativeKind::Draw(d) => d.draw(canvas, dirty),
+            NativeKind::Builder(b) => b.draw(canvas, dirty),
+            NativeKind::Paint(p) => p.draw(canvas, dirty),
+            NativeKind::EguiDemo(e) => e.draw(canvas, dirty),
         }
     }
 
@@ -106,6 +111,7 @@ impl NativeKind {
             NativeKind::Launcher(l) => l.a11y_nodes(),
             NativeKind::Draw(d) => d.a11y_nodes(),
             NativeKind::Builder(b) => b.a11y_nodes(),
+            NativeKind::Paint(p) => p.a11y_nodes(),
             NativeKind::EguiDemo(e) => e.a11y_nodes(),
         }
     }
@@ -115,6 +121,7 @@ impl NativeKind {
             NativeKind::Launcher(_) => {}
             NativeKind::Draw(d) => d.persist(),
             NativeKind::Builder(b) => b.persist(),
+            NativeKind::Paint(p) => p.persist(),
             NativeKind::EguiDemo(e) => e.persist(),
         }
     }
@@ -130,6 +137,11 @@ impl NativeKind {
 /// only needs to know where to find the script and where to persist its DB.
 pub(crate) struct AppDescriptor {
     kind: AppKind,
+    /// Exchange actions this app can handle (e.g. "open_bitmap", "pick_contact").
+    /// For scripted apps these are also declared in the script via `app_handles`;
+    /// the manifest entries are used before the script is loaded (e.g. to build
+    /// the capability index at startup).
+    handles: &'static [&'static str],
 }
 
 enum AppKind {
@@ -139,7 +151,12 @@ enum AppKind {
         script: &'static str,
         db: &'static str,
     },
-    Draw,
+    Draw {
+        db: &'static str,
+    },
+    Paint {
+        db: &'static str,
+    },
     Builder,
     EguiDemo,
 }
@@ -152,69 +169,97 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
             script: "assets/scripts/notes.rhai",
             db: ".soulos/notes_v2.sdb",
         },
+        handles: &["open_script"],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/address.rhai",
             db: ".soulos/address_v2.sdb",
         },
+        handles: &["pick_contact"],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/date.rhai",
             db: ".soulos/date.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/todo.rhai",
             db: ".soulos/todo_v2.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/egui_demo.rhai",
             db: ".soulos/egui_demo.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/kitchen_sink.rhai",
             db: ".soulos/kitchen_sink.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/mail.rhai",
             db: ".soulos/mail.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/calc.rhai",
             db: ".soulos/calc.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/prefs.rhai",
             db: ".soulos/prefs.sdb",
         },
+        handles: &[],
     },
     AppDescriptor {
-        kind: AppKind::Draw,
+        kind: AppKind::Draw {
+            db: ".soulos/draw.sdb",
+        },
+        handles: &["open_bitmap"],
     },
     AppDescriptor {
         kind: AppKind::Scripted {
             script: "assets/scripts/sync.rhai",
             db: ".soulos/sync.sdb",
         },
+        handles: &["export_bitmap", "export_text", "import"],
+    },
+    AppDescriptor {
+        kind: AppKind::Paint {
+            db: ".soulos/paint.sdb",
+        },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::Builder,
+        handles: &["open_form"],
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
+            script: "assets/scripts/launcher2.rhai",
+            db: "",
+        },
+        handles: &[],
     },
     AppDescriptor {
         kind: AppKind::EguiDemo,
+        handles: &[],
     },
 ];
 
@@ -223,7 +268,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
 /// `APP_MANIFEST` in order.
 enum AppSlot {
     /// A Rhai scripted app. Identity is declared inside the script.
-    Scripted { app: Box<ScriptedApp>, db_path: PathBuf },
+    Scripted {
+        app: Box<ScriptedApp>,
+        db_path: PathBuf,
+    },
     /// Any native app — stored inline, dispatched statically, no heap overhead.
     Native(NativeKind),
 }
@@ -257,60 +305,13 @@ impl AppSlot {
                             app.declared_name().as_deref().unwrap_or(script_stem),
                             script_stem
                         );
-                        AppSlot::Scripted { app: Box::new(app), db_path }
+                        AppSlot::Scripted {
+                            app: Box::new(app),
+                            db_path,
+                        }
                     }
                     Err(e) => {
-                        // Enhanced error reporting with detailed position information
-                        let error_details = match e.position() {
-                            Position::NONE => {
-                                format!("Failed to compile {}: {}", script_stem, e)
-                            }
-                            pos => {
-                                let line = pos.line().unwrap_or(0);
-                                let col = pos.position().unwrap_or(0);
-                                format!(
-                                    "Failed to compile {} at line {}, column {}: {}",
-                                    script_stem, line, col, e
-                                )
-                            }
-                        };
-                        
-                        log::error!("{}", error_details);
-                        
-                        // Try to show context around the error
-                        if let Some(line_num) = e.position().line() {
-                            let script_lines: Vec<&str> = script.lines().collect();
-                            let line_idx = line_num - 1;
-                            
-                            if line_idx < script_lines.len() {
-                                log::error!("Context around error:");
-                                
-                                // Show 2 lines before
-                                if line_idx >= 2 {
-                                    log::error!("  {} | {}", line_num - 2, script_lines[line_idx - 2]);
-                                }
-                                if line_idx >= 1 {
-                                    log::error!("  {} | {}", line_num - 1, script_lines[line_idx - 1]);
-                                }
-                                
-                                // Show the error line with pointer
-                                log::error!("▶ {} | {}", line_num, script_lines[line_idx]);
-                                
-                                if let Some(col) = e.position().position() {
-                                    let pointer = " ".repeat((col - 1) + format!("▶ {} | ", line_num).len()) + "^";
-                                    log::error!("{}", pointer);
-                                }
-                                
-                                // Show 2 lines after
-                                if line_idx + 1 < script_lines.len() {
-                                    log::error!("  {} | {}", line_num + 1, script_lines[line_idx + 1]);
-                                }
-                                if line_idx + 2 < script_lines.len() {
-                                    log::error!("  {} | {}", line_num + 2, script_lines[line_idx + 2]);
-                                }
-                            }
-                        }
-                        
+                        log::error!("Failed to compile {}: {}", script_stem, e);
                         let err_script = format!(
                             "let app_id = \"error.{script_stem}\";\
                              let app_name = \"{script_stem}\";\
@@ -327,7 +328,12 @@ impl AppSlot {
                     }
                 }
             }
-            AppKind::Draw => AppSlot::Native(NativeKind::Draw(Box::new(Draw::new()))),
+            AppKind::Draw { db } => {
+                AppSlot::Native(NativeKind::Draw(Box::new(Draw::new(PathBuf::from(db)))))
+            }
+            AppKind::Paint { db } => {
+                AppSlot::Native(NativeKind::Paint(Paint::new(PathBuf::from(db))))
+            }
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
             AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
         }
@@ -378,13 +384,13 @@ impl AppSlot {
         }
     }
 
-    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D) {
+    fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         match self {
             AppSlot::Scripted { app, .. } => {
-                app.draw(canvas);
+                app.draw(canvas, dirty);
                 Self::drain_script_errors(app);
             }
-            AppSlot::Native(n) => n.draw(canvas),
+            AppSlot::Native(n) => n.draw(canvas, dirty),
         }
     }
 
@@ -489,16 +495,28 @@ where
 // --- Host ---------------------------------------------------------------
 
 struct Host {
-    /// All app instances. Index 0 is always the Launcher.
-    /// The rest correspond to APP_MANIFEST entries in order.
+    /// All app instances. `home_idx` points to the launcher / home screen.
     apps: Vec<AppSlot>,
 
+    /// Index of the home (launcher) app within `apps`.
+    /// Resolved by `HOME_APP_ID` after all apps are loaded.
+    home_idx: usize,
+
     /// Navigation stack of indices into `apps`.
-    /// The bottom entry is always 0 (Launcher). Launching pushes; returning pops.
+    /// The bottom entry is always `home_idx`. Launching pushes; returning pops.
     stack: Vec<usize>,
 
     /// Heap-stable app registry for Rhai's `system_list_apps()`.
-    _app_meta: Vec<soul_script::AppEntry>,
+    _app_meta: Box<Vec<soul_script::AppEntry>>,
+
+    /// Maps exchange action names → list of capable app slot indices.
+    /// Built once at startup from `APP_MANIFEST` `handles` fields.
+    /// Used to route `SystemRequest::Send` / `Request` to the right app.
+    capability_index: std::collections::HashMap<String, Vec<usize>>,
+
+    /// When an app issued `SystemRequest::Request`, this records the
+    /// requesting app's slot index so the result can be delivered back.
+    pending_request: Option<usize>,
 
     strip_pressed: bool,
     a11y_enabled: bool,
@@ -519,28 +537,67 @@ impl Host {
             apps.push(AppSlot::from_descriptor(desc));
         }
 
+        // Locate the home app by ID so the rest of the system doesn't hard-code index 0.
+        let home_idx = apps
+            .iter()
+            .position(|s| s.app_id() == HOME_APP_ID)
+            .unwrap_or(0);
+
         // Build and register the app metadata for Rhai's `system_list_apps()`.
-        // Excludes Launcher (index 0). `icon_stem` lets the Launcher load PGM icons.
-        let app_meta: Vec<soul_script::AppEntry> = apps.iter()
-            .enumerate()
-            .skip(1)
-            .map(|(slot_idx, slot)| soul_script::AppEntry {
-                app_id: slot.app_id(),
-                name: slot.name(),
-                slot_idx,
-                icon_stem: slot.icon_stem().unwrap_or_default(),
-            })
-            .collect();
-        // SAFETY: app_meta is heap-stable and lives as long as Host.
+        // Excludes the home app (identified by ID). `icon_stem` lets launchers load PGM icons.
+        let app_meta: Box<Vec<soul_script::AppEntry>> = Box::new(
+            apps.iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.app_id() != HOME_APP_ID)
+                .map(|(slot_idx, slot)| soul_script::AppEntry {
+                    app_id: slot.app_id(),
+                    name: slot.name(),
+                    slot_idx,
+                    icon_stem: slot.icon_stem().unwrap_or_default(),
+                })
+                .collect(),
+        );
+        // SAFETY: app_meta is boxed (heap-stable) and lives as long as Host.
         unsafe {
             soul_script::set_app_list(app_meta.as_ref() as *const _);
         }
 
-        log::info!("🎉 All apps loaded ({} + launcher).", APP_MANIFEST.len());
+        // Build capability index: action → [slot indices].
+        // Scripted apps can also declare additional handles in their script via
+        // `app_handles`; those are merged in after loading.
+        let mut capability_index: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        // Offset by 1 because apps[0] = Launcher, apps[1..] = APP_MANIFEST entries.
+        for (manifest_idx, desc) in APP_MANIFEST.iter().enumerate() {
+            let slot_idx = manifest_idx + 1; // +1 for the Launcher at 0
+            for &action in desc.handles {
+                capability_index
+                    .entry(action.to_string())
+                    .or_default()
+                    .push(slot_idx);
+            }
+        }
+        // The Launcher handles kernel resource requests (background) and app picking (foreground).
+        for action in &["get_resource", "set_resource", "pick_app"] {
+            capability_index
+                .entry(action.to_string())
+                .or_default()
+                .insert(0, home_idx); // highest priority — always goes to Launcher
+        }
+
+        log::info!(
+            "🎉 All apps loaded ({} + home '{HOME_APP_ID}' at slot {home_idx}). \
+             {} exchange action(s) registered.",
+            APP_MANIFEST.len(),
+            capability_index.len(),
+        );
         Self {
             apps,
-            stack: vec![0], // start at Launcher
+            home_idx,
+            stack: vec![home_idx],
             _app_meta: app_meta,
+            capability_index,
+            pending_request: None,
             strip_pressed: false,
             a11y_enabled: false,
             a11y_focus: None,
@@ -551,13 +608,14 @@ impl Host {
     }
 
     fn active_idx(&self) -> usize {
-        *self.stack.last().unwrap_or(&0)
+        *self.stack.last().unwrap_or(&self.home_idx)
     }
 
-    /// Push an app onto the navigation stack. Index 0 (Launcher) cannot be pushed.
+    /// Push an app onto the navigation stack. The home app cannot be pushed.
     fn launch_app(&mut self, idx: usize, ctx: &mut Ctx<'_>) {
-        if idx > 0 && idx < self.apps.len() {
+        if idx != self.home_idx && idx < self.apps.len() {
             self.stack.push(idx);
+            self.apps[idx].handle(Event::AppStart, ctx);
             ctx.invalidate_all();
         }
     }
@@ -577,11 +635,12 @@ impl Host {
         }
     }
 
-    /// Clear the stack back to the Launcher (apps[0]).
+    /// Clear the stack back to the home app.
     fn go_home(&mut self, ctx: &mut Ctx<'_>) {
-        if self.stack != [0] {
+        let home = self.home_idx;
+        if self.stack != [home] {
             self.stack.clear();
-            self.stack.push(0);
+            self.stack.push(home);
             ctx.invalidate_all();
         }
     }
@@ -638,13 +697,215 @@ impl Host {
     fn dispatch_event(&mut self, event: Event, ctx: &mut Ctx<'_>) {
         let active = self.active_idx();
         let request = self.apps[active].handle(event, ctx);
-
         if let Some(req) = request {
-            match req {
-                soul_script::SystemRequest::Launch(idx) => self.launch_app(idx, ctx),
-                soul_script::SystemRequest::LaunchById(id) => self.launch_by_id(&id, ctx),
-                soul_script::SystemRequest::Return => self.go_back(ctx),
+            self.process_request(req, ctx);
+        }
+    }
+
+    /// Central request dispatcher — called from dispatch_event and any routing
+    /// method that needs to recursively handle a follow-up request.
+    fn process_request(&mut self, req: soul_script::SystemRequest, ctx: &mut Ctx<'_>) {
+        match req {
+            soul_script::SystemRequest::Launch(idx) => self.launch_app(idx, ctx),
+            soul_script::SystemRequest::LaunchById(id) => self.launch_by_id(&id, ctx),
+            soul_script::SystemRequest::Return => self.go_back(ctx),
+            soul_script::SystemRequest::Send {
+                action,
+                payload,
+                target,
+            } => {
+                self.route_send(action, payload, target, ctx);
             }
+            soul_script::SystemRequest::Request { action, payload } => {
+                self.route_request(action, payload, ctx);
+            }
+            soul_script::SystemRequest::SendResult { action, payload } => {
+                self.route_send_result(action, payload, ctx);
+            }
+            soul_script::SystemRequest::BackgroundSend {
+                action,
+                payload,
+                target,
+            } => {
+                self.route_background_send(action, payload, target, ctx);
+            }
+        }
+    }
+
+    /// Deliver a payload to a target app, or to the first registered handler.
+    fn route_send(
+        &mut self,
+        action: String,
+        payload: soul_core::ExchangePayload,
+        target: Option<String>,
+        ctx: &mut Ctx<'_>,
+    ) {
+        let sender_id = self.apps[self.active_idx()].app_id();
+        let handler_idx = if let Some(ref id) = target {
+            self.apps.iter().position(|s| s.app_id() == *id)
+        } else {
+            self.capability_index
+                .get(&action)
+                .and_then(|v| v.first().copied())
+        };
+        if let Some(idx) = handler_idx {
+            self.launch_app(idx, ctx);
+            let ev = Event::Exchange {
+                action,
+                payload,
+                sender: sender_id,
+            };
+            self.apps[idx].handle(ev, ctx);
+        } else {
+            log::warn!("exchange: no handler for action '{action}'");
+        }
+    }
+
+    /// Mark the current app as awaiting a result and launch the handler.
+    ///
+    /// When the handler is the home app (Launcher), navigate back to it rather
+    /// than trying to push it — it is always at the base of the stack. The
+    /// Launcher receives an `Exchange { action, payload }` event so it can enter
+    /// the appropriate mode (e.g. picker for "pick_app") or receive data to work
+    /// with (e.g. Bitmap pixels when opening Draw for icon editing).
+    /// Any follow-up request the handler emits immediately on receiving the
+    /// Exchange is processed (e.g. a BackgroundSend to fetch the icon).
+    fn route_request(
+        &mut self,
+        action: String,
+        payload: soul_core::ExchangePayload,
+        ctx: &mut Ctx<'_>,
+    ) {
+        let requester = self.active_idx();
+        let sender_id = self.apps[requester].app_id();
+        let handler_idx = self
+            .capability_index
+            .get(&action)
+            .and_then(|v| v.first().copied());
+        let Some(idx) = handler_idx else {
+            log::warn!("exchange: no handler for requested action '{action}'");
+            return;
+        };
+        self.pending_request = Some(requester);
+        if idx == self.home_idx {
+            // Home app is always at stack[0]; navigate back to make it active.
+            self.go_home(ctx);
+        } else {
+            self.launch_app(idx, ctx);
+        }
+        // Deliver the action and payload to the handler.
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
+        let result = self.apps[idx].handle(ev, ctx);
+        // Process any immediate follow-up (e.g. Draw doing a BackgroundSend to
+        // fetch the icon resource after receiving open_bitmap).
+        if let Some(req) = result {
+            self.process_request(req, ctx);
+        }
+    }
+
+    /// Dispatch a payload to a target app in the background — no stack push, no draw.
+    ///
+    /// If the target app synchronously emits a `SendResult`, that result is
+    /// delivered back to the original caller as an `Exchange` event in the same
+    /// dispatch cycle. The screen is never modified.
+    fn route_background_send(
+        &mut self,
+        action: String,
+        payload: soul_core::ExchangePayload,
+        target: String,
+        ctx: &mut Ctx<'_>,
+    ) {
+        let requester = self.active_idx();
+        let sender_id = self.apps[requester].app_id();
+
+        let handler_idx = if !target.is_empty() {
+            self.apps.iter().position(|s| s.app_id() == target)
+        } else {
+            self.capability_index
+                .get(&action)
+                .and_then(|v| v.first().copied())
+        };
+
+        let Some(idx) = handler_idx else {
+            log::warn!("exchange (bg): no handler for action '{action}'");
+            return;
+        };
+
+        // Dispatch directly — no AppStart, no stack push, no draw.
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
+        let result = self.apps[idx].handle(ev, ctx);
+
+        // If the handler returned a result, deliver it back to the requester.
+        // Process any follow-up request the requester emits (e.g. Builder
+        // receiving return_resource and then issuing Request { open_bitmap }).
+        if let Some(soul_script::SystemRequest::SendResult {
+            action: res_action,
+            payload: res_payload,
+        }) = result
+        {
+            let sender = self.apps[idx].app_id();
+            let result_ev = Event::Exchange {
+                action: res_action,
+                payload: res_payload,
+                sender,
+            };
+            let follow_up = self.apps[requester].handle(result_ev, ctx);
+            if let Some(req) = follow_up {
+                self.process_request(req, ctx);
+            }
+        }
+
+        // Redraw after background exchange so any visual state change (e.g.
+        // menu closing before the call) is rendered.
+        ctx.invalidate_all();
+    }
+
+    /// The handler finished; deliver its result to the requester and restore it.
+    ///
+    /// When the handler was the home app (Launcher used as a picker), `go_back`
+    /// is a no-op because home is always at stack[0]. In that case we re-push
+    /// the requester so it becomes active again. Any follow-up request the
+    /// requester emits on receiving the result is processed immediately.
+    fn route_send_result(
+        &mut self,
+        action: String,
+        payload: soul_core::ExchangePayload,
+        ctx: &mut Ctx<'_>,
+    ) {
+        let sender_id = self.apps[self.active_idx()].app_id();
+        let Some(requester) = self.pending_request.take() else {
+            return;
+        };
+
+        if self.stack.len() > 1 {
+            // Normal case: handler was a non-home app — pop it.
+            self.go_back(ctx);
+        } else if requester != self.home_idx {
+            // Home-as-picker case: re-push the requester to restore it.
+            self.stack.push(requester);
+            ctx.invalidate_all();
+        }
+
+        let ev = Event::Exchange {
+            action,
+            payload,
+            sender: sender_id,
+        };
+        let follow_up = self.apps[requester].handle(ev, ctx);
+        ctx.invalidate_all();
+
+        // Process any follow-up request the requester emits (e.g. BackgroundSend
+        // to fetch the icon after receiving the picked app_id).
+        if let Some(req) = follow_up {
+            self.process_request(req, ctx);
         }
     }
 
@@ -767,12 +1028,12 @@ impl App for Host {
         self.dispatch_event(event, ctx);
     }
 
-    fn draw<D>(&mut self, canvas: &mut D)
+    fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {
         let active = self.active_idx();
-        self.apps[active].draw(canvas);
+        self.apps[active].draw(canvas, dirty);
         let label = self.active_label().to_string();
         draw_system_strip(canvas, &label);
 
@@ -855,7 +1116,8 @@ fn run_headless_test(name: &str) {
 
         host.handle(core_event, &mut ctx);
         let mut display = platform.get_display_buffer().clone();
-        host.draw(&mut display);
+        let display_size = display.size();
+        host.draw(&mut display, Rectangle::new(Point::zero(), display_size));
         std::thread::sleep(std::time::Duration::from_millis(event.delay_ms));
     }
     println!("Headless test finished.");

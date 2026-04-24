@@ -65,7 +65,7 @@ extern crate alloc;
 
 use embedded_graphics::{
     draw_target::{DrawTarget, DrawTargetExt},
-    pixelcolor::{Gray8, GrayColor},
+    pixelcolor::Gray8,
     prelude::*,
     primitives::{PrimitiveStyle, Rectangle},
 };
@@ -97,13 +97,47 @@ pub const SYSTEM_STRIP_H: u16 = 16;
 /// bottom for the system strip.
 pub const APP_HEIGHT: u16 = SCREEN_HEIGHT - SYSTEM_STRIP_H;
 
+/// Data carried by an [`Event::Exchange`] delivery.
+///
+/// The kernel routes exchange payloads between apps without either
+/// side knowing the other's internal structure. New payload kinds
+/// can be added here without changing the exchange protocol.
+#[derive(Debug, Clone)]
+pub enum ExchangePayload {
+    /// Raw grayscale bitmap. `pixels.len() == width as usize * height as usize`.
+    Bitmap {
+        width: u16,
+        height: u16,
+        pixels: alloc::vec::Vec<u8>,
+    },
+    /// Plain text — a script, a note, a template.
+    Text(alloc::string::String),
+    /// A named resource belonging to a specific app — used for kernel-mediated
+    /// resource get/set without launching the owning app's UI.
+    ///
+    /// `app_id` identifies the owning app. `kind` names the resource type
+    /// ("icon", "script", "form", …). For get requests `pixels` and `text`
+    /// are empty; for set/return they carry the resource data.
+    Resource {
+        app_id: alloc::string::String,
+        kind: alloc::string::String,
+        width: u16,
+        height: u16,
+        pixels: alloc::vec::Vec<u8>,
+        text: alloc::string::String,
+    },
+}
+
 /// An event delivered to [`App::handle`].
 ///
 /// Events are strictly in-order and delivered one at a time; the
 /// runtime never concurrently invokes `handle`. Handlers should
 /// update internal state and, if rendering changed, call
 /// [`Ctx::invalidate`] with the affected screen rectangle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Event` is `Clone` but not `Copy` because [`Event::Exchange`]
+/// carries heap-allocated payload data.
+#[derive(Debug, Clone)]
 pub enum Event {
     /// Fired once, before the first `draw`, when the runtime begins
     /// running this app.
@@ -134,6 +168,18 @@ pub enum Event {
     /// hard [`HardButton::Menu`] key). Delivered once per activation,
     /// not paired with a release.
     Menu,
+    /// The kernel is delivering an exchange payload to this app.
+    ///
+    /// Fired when another app (or the system) called `system_send` or
+    /// when this app's `system_request` was fulfilled. `action` names
+    /// what kind of data is arriving; `sender` is the originating
+    /// app's ID. The app should inspect `action` and handle `payload`
+    /// accordingly, then call `system_return` when done.
+    Exchange {
+        action: alloc::string::String,
+        payload: ExchangePayload,
+        sender: alloc::string::String,
+    },
 }
 
 /// Dirty-region accumulator used by the runtime.
@@ -254,12 +300,14 @@ pub trait App {
 
     /// Paint the current app state into `canvas`.
     ///
-    /// The runtime only calls this when there's a non-empty dirty
-    /// region, and `canvas` is a clipped view of the real display:
-    /// draws outside the dirty region are discarded. You can and
-    /// should draw the entire scene unconditionally — the clipper
-    /// makes this cheap.
-    fn draw<D>(&mut self, canvas: &mut D)
+    /// Only called when there is a non-empty dirty region.  `canvas`
+    /// is already clipped to `dirty` — writes outside it are
+    /// discarded by the hardware/simulator.
+    ///
+    /// **Do not draw unconditionally.**  Use `dirty` to restrict your
+    /// iteration to only the changed region.  On SoulOS every wasted
+    /// pixel write costs real cycles on slow hardware.
+    fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>;
 
@@ -291,11 +339,11 @@ fn translate(input: InputEvent) -> Option<Event> {
 /// 2. Drain all pending input events through [`App::handle`].
 /// 3. Deliver a [`Event::Tick`] with the current monotonic time.
 /// 4. If any handler called [`Ctx::invalidate`], clip the display
-///    to the dirty region, fill it with [`Gray8::WHITE`], and call
-///    [`App::draw`].
-/// 5. Flush the platform (present frame, pump events) and sleep
-///    for ~16 ms.
-/// 6. On quit, deliver [`Event::AppStop`] and return.
+///    to the dirty region and call [`App::draw`] with that rect.
+///    The app owns its own background — no blanket white fill.
+/// 5. Flush the platform (present frame, pump new events).
+/// 6. Sleep for the remainder of a 16 ms budget (adaptive).
+/// 7. On quit, deliver [`Event::AppStop`] and return.
 ///
 /// Apps never call `run` themselves — the `soul-runner` binary
 /// does. This function is public so alternative platforms (tests,
@@ -313,6 +361,8 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
         app.handle(Event::AppStart, &mut ctx);
     }
     loop {
+        let frame_start = platform.now_ms();
+
         while let Some(ev) = platform.poll_event() {
             if matches!(ev, InputEvent::Quit) {
                 let now = platform.now_ms();
@@ -345,10 +395,12 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
         }
         if let Some(rect) = dirty.take() {
             let mut clip = platform.display().clipped(&rect);
+            // Clear only the dirty region to white before drawing.
+            // This is bounded to the invalidated rect, not the full screen.
             let _ = rect
                 .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                 .draw(&mut clip);
-            app.draw(&mut clip);
+            app.draw(&mut clip, rect);
         }
 
         // Drain accessibility speech
@@ -356,7 +408,14 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
             platform.speak(&text);
         }
 
+        // Flush (present frame + pump new events into the HAL queue).
         platform.flush();
-        platform.sleep_ms(16);
+
+        // Adaptive sleep: hold ~16 ms per frame, accounting for work done.
+        let elapsed = platform.now_ms().saturating_sub(frame_start);
+        let budget: u64 = 16;
+        if elapsed < budget {
+            platform.sleep_ms((budget - elapsed) as u32);
+        }
     }
 }

@@ -387,7 +387,7 @@ impl App for EguiDemo {
         }
     }
     
-    fn draw<D>(&mut self, canvas: &mut D)
+    fn draw<D>(&mut self, canvas: &mut D, _dirty: Rectangle)
     where
         D: DrawTarget<Color = Gray8>,
     {

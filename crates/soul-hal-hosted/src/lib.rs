@@ -1,94 +1,190 @@
-//! Hosted desktop HAL backed by embedded-graphics-simulator (SDL2).
-//! Lets the same app code that runs on bare metal also run in a window.
+//! Hosted desktop HAL backed by minifb (pure-Rust, no SDL2 required).
+//! Provides a window, a Gray8 framebuffer, and keyboard/mouse input.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use embedded_graphics::{pixelcolor::Gray8, prelude::*};
-use embedded_graphics_simulator::{
-    sdl2::{Keycode, Mod, MouseButton},
-    OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent, Window,
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{OriginDimensions, Size},
+    pixelcolor::Gray8,
+    prelude::*,
 };
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
+// KeyRepeat::No is used in pump() to guarantee single-fire per keypress.
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 
 pub mod testing;
 
+// ── Framebuffer ──────────────────────────────────────────────────────────────
+
+/// A `DrawTarget<Color = Gray8>` backed by a `Vec<u32>` pixel buffer.
+/// Pixels are stored as `0x00RRGGBB` where R == G == B == luma.
+#[derive(Clone)]
+pub struct MiniFbDisplay {
+    pub width: u32,
+    pub height: u32,
+    /// Raw pixel buffer handed directly to minifb's `update_with_buffer`.
+    pub buffer: Vec<u32>,
+}
+
+impl MiniFbDisplay {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            buffer: vec![0x00FF_FFFFu32; (width * height) as usize],
+        }
+    }
+}
+
+impl OriginDimensions for MiniFbDisplay {
+    fn size(&self) -> Size {
+        Size::new(self.width, self.height)
+    }
+}
+
+impl DrawTarget for MiniFbDisplay {
+    type Color = Gray8;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(Point { x, y }, color) in pixels {
+            if x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height {
+                let idx = (y as u32 * self.width + x as u32) as usize;
+                let l = color.luma() as u32;
+                self.buffer[idx] = (l << 16) | (l << 8) | l;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── Platform ─────────────────────────────────────────────────────────────────
+
 pub struct HostedPlatform {
-    pub display: SimulatorDisplay<Gray8>,
+    pub display: MiniFbDisplay,
     window: Window,
     start: Instant,
-    stylus_down: bool,
     pub pending: VecDeque<InputEvent>,
+    /// Tracks whether left mouse button was down on the previous pump.
+    prev_mouse_down: bool,
+    /// Previous logical mouse position (buffer coords, not window coords).
+    prev_mouse_pos: Option<(f32, f32)>,
+    /// Keys held on the previous pump — used to generate ButtonDown/Up events.
+    prev_keys: Vec<Key>,
 }
 
 impl HostedPlatform {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
-        let display = SimulatorDisplay::<Gray8>::new(Size::new(width, height));
-        let output = OutputSettingsBuilder::new().scale(2).build();
-        let window = Window::new(title, &output);
+        let display = MiniFbDisplay::new(width, height);
+        let window = Window::new(
+            title,
+            width as usize,
+            height as usize,
+            WindowOptions {
+                scale: Scale::X2,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to create minifb window");
+
         Self {
             display,
             window,
             start: Instant::now(),
-            stylus_down: false,
             pending: VecDeque::new(),
+            prev_mouse_down: false,
+            prev_mouse_pos: None,
+            prev_keys: Vec::new(),
         }
     }
 
+    /// Collect mouse and keyboard events into `self.pending`.
+    /// Called after `window.update_with_buffer()` so minifb's internal state
+    /// (key-press lists, mouse position) reflects the latest frame.
     fn pump(&mut self) {
-        for ev in self.window.events() {
-            match ev {
-                SimulatorEvent::Quit => self.pending.push_back(InputEvent::Quit),
-                SimulatorEvent::MouseButtonDown {
-                    mouse_btn: MouseButton::Left,
-                    point,
-                } => {
-                    self.stylus_down = true;
-                    self.pending.push_back(InputEvent::StylusDown {
-                        x: point.x as i16,
-                        y: point.y as i16,
-                    });
+        // ── Window close ─────────────────────────────────────────────────────
+        if !self.window.is_open() {
+            self.pending.push_back(InputEvent::Quit);
+            return;
+        }
+
+        // ── Mouse ─────────────────────────────────────────────────────────────
+        // minifb returns coordinates already in buffer space (divided by scale).
+        let mouse_down = self.window.get_mouse_down(MouseButton::Left);
+        let mouse_pos  = self.window.get_mouse_pos(MouseMode::Discard);
+
+        match (mouse_pos, mouse_down, self.prev_mouse_down) {
+            (Some((mx, my)), true, false) => {
+                self.pending.push_back(InputEvent::StylusDown { x: mx as i16, y: my as i16 });
+            }
+            (Some((mx, my)), false, true) => {
+                self.pending.push_back(InputEvent::StylusUp { x: mx as i16, y: my as i16 });
+            }
+            (Some((mx, my)), true, true) if self.prev_mouse_pos != Some((mx, my)) => {
+                self.pending.push_back(InputEvent::StylusMove { x: mx as i16, y: my as i16 });
+            }
+            (None, false, true) => {
+                // Cursor left the window while held — synthesise a release.
+                if let Some((px, py)) = self.prev_mouse_pos {
+                    self.pending.push_back(InputEvent::StylusUp { x: px as i16, y: py as i16 });
                 }
-                SimulatorEvent::MouseButtonUp {
-                    mouse_btn: MouseButton::Left,
-                    point,
-                } => {
-                    self.stylus_down = false;
-                    self.pending.push_back(InputEvent::StylusUp {
-                        x: point.x as i16,
-                        y: point.y as i16,
-                    });
-                }
-                SimulatorEvent::MouseMove { point } => {
-                    if self.stylus_down {
-                        self.pending.push_back(InputEvent::StylusMove {
-                            x: point.x as i16,
-                            y: point.y as i16,
-                        });
-                    }
-                }
-                SimulatorEvent::KeyDown {
-                    keycode, keymod, ..
-                } => {
-                    if let Some(b) = map_hard_button(keycode) {
-                        self.pending.push_back(InputEvent::ButtonDown(b));
-                    } else if let Some(kc) = map_keycode(keycode, keymod) {
-                        self.pending.push_back(InputEvent::Key(kc));
-                    }
-                }
-                SimulatorEvent::KeyUp { keycode, .. } => {
-                    if let Some(b) = map_hard_button(keycode) {
-                        self.pending.push_back(InputEvent::ButtonUp(b));
-                    }
-                }
-                _ => {}
+            }
+            _ => {}
+        }
+        self.prev_mouse_down = mouse_down;
+        self.prev_mouse_pos  = mouse_pos;
+
+        // ── Keyboard ──────────────────────────────────────────────────────────
+        // minifb provides two views after each update_with_buffer():
+        //   get_keys_pressed(No)  → keys whose *first* press occurred this frame
+        //   get_keys_pressed(Yes) → keys that have an event this frame (first press
+        //                           OR OS key-repeat fire)
+        //
+        // Split: initial presses from No, repeat-only from Yes − No.
+        // This guarantees the initial press fires exactly once even when Yes also
+        // includes it (which it does on the same frame).
+        let current_keys  = self.window.get_keys();
+        let pressed_new   = self.window.get_keys_pressed(KeyRepeat::No);
+        let pressed_all   = self.window.get_keys_pressed(KeyRepeat::Yes);
+
+        // Initial key-down (fires exactly once per physical press).
+        for key in &pressed_new {
+            if let Some(b) = map_hard_button(*key) {
+                self.pending.push_back(InputEvent::ButtonDown(b));
+            } else if let Some(kc) = map_keycode(*key, &current_keys) {
+                self.pending.push_back(InputEvent::Key(kc));
             }
         }
+
+        // Key repeat: in Yes but not in No (pure repeats, no initial press).
+        for key in &pressed_all {
+            if !pressed_new.contains(key) && map_hard_button(*key).is_none() {
+                if let Some(kc) = map_keycode(*key, &current_keys) {
+                    self.pending.push_back(InputEvent::Key(kc));
+                }
+            }
+        }
+
+        // Key-up: only needed for hardware buttons (apps care about ButtonUp).
+        for &key in &self.prev_keys {
+            if !current_keys.contains(&key) {
+                if let Some(b) = map_hard_button(key) {
+                    self.pending.push_back(InputEvent::ButtonUp(b));
+                }
+            }
+        }
+
+        self.prev_keys = current_keys;
     }
 }
 
 impl Platform for HostedPlatform {
-    type Display = SimulatorDisplay<Gray8>;
+    type Display = MiniFbDisplay;
 
     fn display(&mut self) -> &mut Self::Display {
         &mut self.display
@@ -103,7 +199,9 @@ impl Platform for HostedPlatform {
     }
 
     fn flush(&mut self) {
-        self.window.update(&self.display);
+        let w = self.display.width as usize;
+        let h = self.display.height as usize;
+        let _ = self.window.update_with_buffer(&self.display.buffer, w, h);
         self.pump();
     }
 
@@ -123,37 +221,37 @@ impl Platform for HostedPlatform {
     }
 }
 
-// Hard buttons live on F-keys so letter/digit keys are free for text input.
-fn map_hard_button(k: Keycode) -> Option<HardButton> {
+// ── Key mapping ───────────────────────────────────────────────────────────────
+
+/// Map F-keys and special keys to hardware buttons.
+fn map_hard_button(k: Key) -> Option<HardButton> {
     Some(match k {
-        Keycode::Escape => HardButton::Power,
-        Keycode::F1 => HardButton::AppA,
-        Keycode::F2 => HardButton::AppB,
-        Keycode::F3 => HardButton::AppC,
-        Keycode::F4 => HardButton::AppD,
-        Keycode::F5 | Keycode::Home => HardButton::Home,
-        Keycode::F6 => HardButton::Menu,
-        Keycode::PageUp => HardButton::PageUp,
-        Keycode::PageDown => HardButton::PageDown,
+        Key::Escape => HardButton::Power,
+        Key::F1 => HardButton::AppA,
+        Key::F2 => HardButton::AppB,
+        Key::F3 => HardButton::AppC,
+        Key::F4 => HardButton::AppD,
+        Key::F5 | Key::Home => HardButton::Home,
+        Key::F6 => HardButton::Menu,
+        Key::PageUp => HardButton::PageUp,
+        Key::PageDown => HardButton::PageDown,
         _ => return None,
     })
 }
 
-fn map_keycode(k: Keycode, m: Mod) -> Option<KeyCode> {
-    use Keycode as K;
-    let shift = m.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-    let caps = m.contains(Mod::CAPSMOD);
+fn map_keycode(k: Key, held: &[Key]) -> Option<KeyCode> {
+    let shift = held.contains(&Key::LeftShift) || held.contains(&Key::RightShift);
+    let caps  = held.contains(&Key::CapsLock);
+
     match k {
-        K::Backspace => Some(KeyCode::Backspace),
-        K::Return | K::KpEnter => Some(KeyCode::Enter),
-        K::Tab => Some(KeyCode::Tab),
-        K::Left => Some(KeyCode::ArrowLeft),
-        K::Right => Some(KeyCode::ArrowRight),
-        K::Up => Some(KeyCode::ArrowUp),
-        K::Down => Some(KeyCode::ArrowDown),
-        _ => keycode_to_char(k, shift).map(|c| {
-            // Letters honor shift XOR capslock; non-letters already
-            // use `shift` to switch between the unshifted and shifted form.
+        Key::Backspace => Some(KeyCode::Backspace),
+        Key::Enter | Key::NumPadEnter => Some(KeyCode::Enter),
+        Key::Tab => Some(KeyCode::Tab),
+        Key::Left  => Some(KeyCode::ArrowLeft),
+        Key::Right => Some(KeyCode::ArrowRight),
+        Key::Up    => Some(KeyCode::ArrowUp),
+        Key::Down  => Some(KeyCode::ArrowDown),
+        _ => key_to_char(k, shift).map(|c| {
             if c.is_ascii_alphabetic() && (shift ^ caps) {
                 KeyCode::Char(c.to_ascii_uppercase())
             } else {
@@ -163,78 +261,37 @@ fn map_keycode(k: Keycode, m: Mod) -> Option<KeyCode> {
     }
 }
 
-fn keycode_to_char(kc: Keycode, shift: bool) -> Option<char> {
-    use Keycode as K;
-    Some(match kc {
-        K::A => 'a',
-        K::B => 'b',
-        K::C => 'c',
-        K::D => 'd',
-        K::E => 'e',
-        K::F => 'f',
-        K::G => 'g',
-        K::H => 'h',
-        K::I => 'i',
-        K::J => 'j',
-        K::K => 'k',
-        K::L => 'l',
-        K::M => 'm',
-        K::N => 'n',
-        K::O => 'o',
-        K::P => 'p',
-        K::Q => 'q',
-        K::R => 'r',
-        K::S => 's',
-        K::T => 't',
-        K::U => 'u',
-        K::V => 'v',
-        K::W => 'w',
-        K::X => 'x',
-        K::Y => 'y',
-        K::Z => 'z',
-        K::Num0 if shift => ')',
-        K::Num0 => '0',
-        K::Num1 if shift => '!',
-        K::Num1 => '1',
-        K::Num2 if shift => '@',
-        K::Num2 => '2',
-        K::Num3 if shift => '#',
-        K::Num3 => '3',
-        K::Num4 if shift => '$',
-        K::Num4 => '4',
-        K::Num5 if shift => '%',
-        K::Num5 => '5',
-        K::Num6 if shift => '^',
-        K::Num6 => '6',
-        K::Num7 if shift => '&',
-        K::Num7 => '7',
-        K::Num8 if shift => '*',
-        K::Num8 => '8',
-        K::Num9 if shift => '(',
-        K::Num9 => '9',
-        K::Space => ' ',
-        K::Period if shift => '>',
-        K::Period => '.',
-        K::Comma if shift => '<',
-        K::Comma => ',',
-        K::Minus if shift => '_',
-        K::Minus => '-',
-        K::Equals if shift => '+',
-        K::Equals => '=',
-        K::Slash if shift => '?',
-        K::Slash => '/',
-        K::Backslash if shift => '|',
-        K::Backslash => '\\',
-        K::Semicolon if shift => ':',
-        K::Semicolon => ';',
-        K::Quote if shift => '"',
-        K::Quote => '\'',
-        K::Backquote if shift => '~',
-        K::Backquote => '`',
-        K::LeftBracket if shift => '{',
-        K::LeftBracket => '[',
-        K::RightBracket if shift => '}',
-        K::RightBracket => ']',
+fn key_to_char(k: Key, shift: bool) -> Option<char> {
+    Some(match k {
+        Key::A => 'a', Key::B => 'b', Key::C => 'c', Key::D => 'd',
+        Key::E => 'e', Key::F => 'f', Key::G => 'g', Key::H => 'h',
+        Key::I => 'i', Key::J => 'j', Key::K => 'k', Key::L => 'l',
+        Key::M => 'm', Key::N => 'n', Key::O => 'o', Key::P => 'p',
+        Key::Q => 'q', Key::R => 'r', Key::S => 's', Key::T => 't',
+        Key::U => 'u', Key::V => 'v', Key::W => 'w', Key::X => 'x',
+        Key::Y => 'y', Key::Z => 'z',
+        Key::Key0 => if shift { ')' } else { '0' },
+        Key::Key1 => if shift { '!' } else { '1' },
+        Key::Key2 => if shift { '@' } else { '2' },
+        Key::Key3 => if shift { '#' } else { '3' },
+        Key::Key4 => if shift { '$' } else { '4' },
+        Key::Key5 => if shift { '%' } else { '5' },
+        Key::Key6 => if shift { '^' } else { '6' },
+        Key::Key7 => if shift { '&' } else { '7' },
+        Key::Key8 => if shift { '*' } else { '8' },
+        Key::Key9 => if shift { '(' } else { '9' },
+        Key::Space => ' ',
+        Key::Period    => if shift { '>' } else { '.' },
+        Key::Comma     => if shift { '<' } else { ',' },
+        Key::Minus     => if shift { '_' } else { '-' },
+        Key::Equal     => if shift { '+' } else { '=' },
+        Key::Slash     => if shift { '?' } else { '/' },
+        Key::Backslash => if shift { '|' } else { '\\' },
+        Key::Semicolon => if shift { ':' } else { ';' },
+        Key::Apostrophe => if shift { '"' } else { '\'' },
+        Key::Backquote => if shift { '~' } else { '`' },
+        Key::LeftBracket  => if shift { '{' } else { '[' },
+        Key::RightBracket => if shift { '}' } else { ']' },
         _ => return None,
     })
 }
