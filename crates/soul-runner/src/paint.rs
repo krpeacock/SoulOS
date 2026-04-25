@@ -1003,15 +1003,109 @@ impl Paint {
         }
     }
 
-    /// Erase a circle of radius `line_width` centred at `(cx, cy)`.
-    pub fn erase_circle(&mut self, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
-        let r = self.pen_width as i32;
+    /// Erase a circle of radius `r` centred at `(cx, cy)`.
+    pub fn erase_circle(&mut self, cx: i32, cy: i32, r: i32, ctx: &mut Ctx<'_>) {
         let r2 = r * r;
         for dy in -r..=r {
             for dx in -r..=r {
                 if dx * dx + dy * dy <= r2 {
                     self.put_pixel(cx + dx, cy + dy, 255);
                     invalidate_pixel(ctx, cx + dx, cy + dy);
+                }
+            }
+        }
+    }
+
+    /// Erase a square of half-width `r` centred at `(cx, cy)`.
+    pub fn erase_square(&mut self, cx: i32, cy: i32, r: i32, ctx: &mut Ctx<'_>) {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                self.put_pixel(cx + dx, cy + dy, 255);
+                invalidate_pixel(ctx, cx + dx, cy + dy);
+            }
+        }
+    }
+
+    /// Port of the original C Bresenham variant.
+    ///
+    /// Rather than stamping at every pixel, it accumulates runs of non-diagonal
+    /// steps and emits a (x1,y1)→(x,y) rectangle segment each time a diagonal
+    /// step is taken (and once more for the final run).  Segments are collected
+    /// first to satisfy the borrow-checker, then painted.
+    fn bresenham_segments(xstart: i32, ystart: i32, xend: i32, yend: i32) -> Vec<(i32, i32, i32, i32)> {
+        let mut segs: Vec<(i32, i32, i32, i32)> = Vec::new();
+        let mut x = xstart;
+        let mut y = ystart;
+        let mut a = xend - xstart;
+        let mut b = yend - ystart;
+
+        let dx_diag = if a < 0 { a = -a; -1 } else { 1 };
+        let dy_diag = if b < 0 { b = -b; -1 } else { 1 };
+
+        let (dx_nondiag, dy_nondiag) = if a < b {
+            let t = a; a = b; b = t;
+            (0, dy_diag)
+        } else {
+            (dx_diag, 0)
+        };
+
+        let mut d = b + b - a;
+        let nondiag_inc = b + b;
+        let diag_inc    = 2 * (b - a);
+
+        let (mut x1, mut y1) = (x, y);
+
+        let mut steps = a;
+        while steps > 0 {
+            steps -= 1;
+            if d < 0 {
+                x += dx_nondiag;
+                y += dy_nondiag;
+                d += nondiag_inc;
+            } else {
+                segs.push((x1, y1, x, y));
+                x += dx_diag;
+                y += dy_diag;
+                x1 = x;
+                y1 = y;
+                d += diag_inc;
+            }
+        }
+        segs.push((x1, y1, x, y));
+        segs
+    }
+
+    /// Draw a 1-px solid pen line using the original C Bresenham variant.
+    /// Each emitted segment is painted as a filled rectangle of solid `color`.
+    pub fn draw_line_pen(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, ctx: &mut Ctx<'_>) {
+        let segs = Self::bresenham_segments(x0, y0, x1, y1);
+        for (ax, ay, bx, by) in segs {
+            let lx = ax.min(bx);
+            let ly = ay.min(by);
+            let rx = ax.max(bx);
+            let ry = ay.max(by);
+            for py in ly..=ry {
+                for px in lx..=rx {
+                    self.put_pixel(px, py, 0);
+                    invalidate_pixel(ctx, px, py);
+                }
+            }
+        }
+    }
+
+    /// Erase along the original C Bresenham variant, painting each segment
+    /// as a white rectangle expanded by `half` pixels on all sides.
+    pub fn erase_line_square(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, half: i32, ctx: &mut Ctx<'_>) {
+        let segs = Self::bresenham_segments(x0, y0, x1, y1);
+        for (ax, ay, bx, by) in segs {
+            let lx = ax.min(bx) - half;
+            let ly = ay.min(by) - half;
+            let rx = ax.max(bx) + half;
+            let ry = ay.max(by) + half;
+            for py in ly..=ry {
+                for px in lx..=rx {
+                    self.put_pixel(px, py, 255);
+                    invalidate_pixel(ctx, px, py);
                 }
             }
         }
@@ -1026,14 +1120,13 @@ impl Paint {
             Tool::Pen => {
                 // Track from the very first pixel — no capture.
                 self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, 0));
-                let v = pattern_value(self.pattern, cx, cy);
-                self.put_pixel(cx, cy, v);
+                self.put_pixel(cx, cy, 0);
                 invalidate_pixel(ctx, cx, cy);
             }
             Tool::Eraser => {
-                let r = self.pen_width as i32;
-                self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, r));
-                self.erase_circle(cx, cy, ctx);
+                const ER: i32 = 8;
+                self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, ER));
+                self.erase_square(cx, cy, ER, ctx);
             }
             Tool::Lines | Tool::Frame | Tool::SolidRect | Tool::RoundRect | Tool::RoundFrame => {
                 // Nothing to capture — ghost already holds the clean state.
@@ -1064,8 +1157,7 @@ impl Paint {
             Tool::Brush => {
                 let r = self.pen_width as i32 + 1;
                 self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, r));
-                // TODO: port brush-shape stamp from C
-                self.stamp_circle(cx, cy, r, ctx);
+                self.draw_line(cx, cy, cx, cy, ctx);
             }
             Tool::Spray => {
                 self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, 3));
@@ -1077,7 +1169,16 @@ impl Paint {
 
     fn on_pen_move(&mut self, cx: i32, cy: i32, px: i32, py: i32, ctx: &mut Ctx<'_>) {
         match self.tool {
-            Tool::Pen | Tool::Brush => {
+            Tool::Pen => {
+                // 1-px solid line via original C Bresenham variant.
+                let seg_b = Self::rubber_bounds(px, py, cx, cy, 0);
+                self.stroke_bounds = Some(match self.stroke_bounds {
+                    Some(old) => Self::union_bounds(old, seg_b),
+                    None      => seg_b,
+                });
+                self.draw_line_pen(px, py, cx, cy, ctx);
+            }
+            Tool::Brush => {
                 // No capture — just draw and grow the dirty bounds.
                 let m = self.pen_width as i32 + 1;
                 let seg_b = Self::rubber_bounds(px, py, cx, cy, m);
@@ -1088,26 +1189,13 @@ impl Paint {
                 self.draw_line(px, py, cx, cy, ctx);
             }
             Tool::Eraser => {
-                let r = self.pen_width as i32;
-                let seg_b = Self::rubber_bounds(px, py, cx, cy, r);
+                const ER: i32 = 8;
+                let seg_b = Self::rubber_bounds(px, py, cx, cy, ER);
                 self.stroke_bounds = Some(match self.stroke_bounds {
                     Some(old) => Self::union_bounds(old, seg_b),
                     None      => seg_b,
                 });
-                let steps = ((cx - px).abs()).max((cy - py).abs()).max(1);
-                for s in 0..=steps {
-                    let ix = px + (cx - px) * s / steps;
-                    let iy = py + (cy - py) * s / steps;
-                    let r2 = r * r;
-                    for dy in -r..=r {
-                        for dx in -r..=r {
-                            if dx * dx + dy * dy <= r2 {
-                                self.put_pixel(ix + dx, iy + dy, 255);
-                                invalidate_pixel(ctx, ix + dx, iy + dy);
-                            }
-                        }
-                    }
-                }
+                self.erase_line_square(px, py, cx, cy, ER, ctx);
             }
             Tool::Lines => {
                 let (ax, ay) = self.anchor.unwrap_or(self.pen_start);
