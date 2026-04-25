@@ -12,3 +12,4 @@ minifb = "0.28"
 
 [dev-dependencies]
 png = "0.17"
+soul-runner = { path = "../soul-runner" }

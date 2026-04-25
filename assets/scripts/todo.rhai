@@ -76,7 +76,7 @@ fn on_draw() {
     
     // 1. Header with filters
     egui_toolbar(320, 30, |ui| {
-        egui_horizontal_layout(ui, |ui| {
+        egui_horizontal_layout((), |ui| {
             if egui_selectable_label(ui, task_filter == "all", "All") {
                 task_filter = "all";
             }
@@ -98,7 +98,7 @@ fn on_draw() {
         } else {
             for i in 0..tasks.len() {
                 let task = tasks[i];
-                egui_horizontal_layout(ui, |ui| {
+                egui_horizontal_layout((), |ui| {
                     let text = task.text.sub_string(4);
                     if egui_selectable_label(ui, task.completed, text) {
                         toggle_task(task.id);
@@ -112,11 +112,11 @@ fn on_draw() {
         }
     });
     
-    egui_space(ui, 5);
+    egui_space((), 5);
     
     // 3. Add task area
-    egui_group(ui, "Add Task", |ui| {
-        egui_horizontal_layout(ui, |ui| {
+    egui_group((), "Add Task", |ui| {
+        egui_horizontal_layout((), |ui| {
             if egui_button(ui, if new_task_text == "" { "Tap to type..." } else { new_task_text }) {
                 // In a future update, this would trigger the keyboard
             }
@@ -131,7 +131,7 @@ fn on_draw() {
     // 4. Stats
     let all_tasks = db_get_ids_in_category(0);
     if all_tasks.len() > 0 {
-        egui_horizontal_layout(ui, |ui| {
+        egui_horizontal_layout((), |ui| {
             egui_label(ui, all_tasks.len() + " tasks");
             if egui_button(ui, "Clear Done") {
                 clear_completed();

@@ -146,7 +146,16 @@ where
                     
                     let pos = text_shape.pos;
                     let text = text_shape.galley.text();
-                    let _ = soul_ui::label(self, Point::new(pos.x as i32, pos.y as i32), &text);
+                    
+                    // Skip very short text fragments that might be causing overlap
+                    if text.len() < 2 && text.chars().all(|c| c.is_whitespace()) {
+                        continue;
+                    }
+                    
+                    // Simple approach: render the text only once per galley
+                    if !text.trim().is_empty() {
+                        let _ = soul_ui::label(self, Point::new(pos.x as i32, pos.y as i32), &text);
+                    }
                 }
                 _ => {}
             }
@@ -765,6 +774,11 @@ impl ScriptedApp {
         engine.register_fn("egui_separator", |_ui: Dynamic| unsafe {
             if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
                 (*ui_ptr).separator();
+            }
+        });
+        engine.register_fn("egui_title_bar", |_ui: Dynamic, title: String| unsafe {
+            if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                (*ui_ptr).add(soul_ui::SoulOSTitleBar::new(title, soul_core::SCREEN_WIDTH as f32));
             }
         });
         engine.register_fn("egui_space", |_ui: Dynamic, amount: i32| unsafe {
