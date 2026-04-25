@@ -1,20 +1,12 @@
 // assets/scripts/todo.rhai
-// A modern Todo app with working scroll functionality
+// Modern Todo app using proper EGUI scrolling and layout.
 
 let app_id   = "com.soulos.todo";
 let app_name = "Todo";
 let app_icon = "todo";
 
-// UI state
 let new_task_text = "";
-let task_filter = "all"; // "all", "active", "completed"  
-let input_focused = false;
-let keyboard_visible = false;
-let keyboard = new_keyboard();
-
-// Simple scroll state (temporary until EGUI integration is complete)
-let scroll_y = 0;
-let content_height = 0;
+let task_filter = "all"; // "all", "active", "completed"
 
 fn add_task(text) {
     if text.trim() != "" {
@@ -74,254 +66,78 @@ fn on_event(event) {
     if event.type == "AppStart" {
         invalidate_all();
     }
-    
-    if event.type == "Key" && input_focused {
-        if event.key == "Backspace" && new_task_text.len() > 0 {
-            new_task_text = new_task_text.sub_string(0, new_task_text.len() - 1);
-            invalidate_all();
-        } else if event.key == "Enter" {
-            if add_task(new_task_text) {
-                new_task_text = "";
-                input_focused = false;
-                keyboard_visible = false;
-                invalidate_all();
-            }
-        } else if event.key == "Escape" {
-            // ESC key closes keyboard
-            input_focused = false;
-            keyboard_visible = false;
-            invalidate_all();
-        } else if event.key != "Other" && event.key != "Backspace" && event.key != "Enter" {
-            new_task_text += event.key;
-            invalidate_all();
-        }
-    }
-    
-    if event.type == "PenMove" {
-        let x = event.x;
-        let y = event.y;
-        
-        // Handle keyboard hover if visible (no key output, just visual feedback)
-        if keyboard_visible && y >= 220 {
-            handle_pen(keyboard, x, y, true);
-            invalidate_all();
-        }
-        // Manual scroll handling removed - EGUI ScrollArea handles this automatically
-    }
-    
-    if event.type == "PenUp" {
-        let x = event.x;
-        let y = event.y;
-        
-        // Handle keyboard input if visible - this is where keys are actually typed
-        if keyboard_visible && y >= 220 {
-            let key = handle_pen(keyboard, x, y, false);
-            if key != "" {
-                if key == "Backspace" {
-                    if new_task_text.len() > 0 {
-                        new_task_text = new_task_text.sub_string(0, new_task_text.len() - 1);
-                        invalidate_all();
-                    }
-                } else if key == "Enter" {
-                    if add_task(new_task_text) {
-                        new_task_text = "";
-                        input_focused = false;
-                        keyboard_visible = false;
-                        invalidate_all();
-                    }
-                } else {
-                    new_task_text += key;
-                    invalidate_all();
-                }
-            }
-            return; // Don't process other pen events if keyboard handled it
-        }
-    }
-    
-    if event.type == "PenDown" {
-        let x = event.x;
-        let y = event.y;
-        
-        // Handle keyboard press down if visible (start of key press)
-        if keyboard_visible && y >= 220 {
-            handle_pen(keyboard, x, y, true);
-            invalidate_all();
-            return; // Don't process other UI elements when keyboard is being used
-        }
-        
-        // Filter buttons
-        if y >= 30 && y < 50 {
-            if x >= 10 && x < 70 {
-                task_filter = "all";
-                invalidate_all();
-            } else if x >= 80 && x < 140 {
-                task_filter = "active"; 
-                invalidate_all();
-            } else if x >= 150 && x < 230 {
-                task_filter = "completed";
-                invalidate_all();
-            }
-        }
-        
-        // Add button - adjust for keyboard mode
-        let input_y = if keyboard_visible { 170 } else { 200 };
-        if y >= input_y && y < input_y + 24 && x >= 180 && x < 230 {
-            if add_task(new_task_text) {
-                new_task_text = "";
-                invalidate_all();
-            }
-        }
-        
-        // Input area (focus for typing) - adjust for keyboard mode
-        if y >= input_y && y < input_y + 24 && x >= 10 && x < 170 {
-            if !input_focused {
-                input_focused = true;
-                keyboard_visible = true;
-                invalidate_all();
-            }
-        } else if y < 220 && !keyboard_visible {
-            // Only unfocus if clicking in content area when keyboard not visible
-            if input_focused {
-                input_focused = false;
-                keyboard_visible = false;
-                invalidate_all();
-            }
-        }
-        
-        // Clear completed button - only show when keyboard hidden
-        if !keyboard_visible && y >= 250 && y < 270 && x >= 10 && x < 110 {
-            clear_completed();
-        }
-        
-        // Task list interactions - simple coordinate-based
-        let tasks = get_filtered_tasks(task_filter);
-        let list_start_y = 60;
-        
-        for i in 0..tasks.len() {
-            let task = tasks[i];
-            let y_pos = list_start_y + i * 25;
-            
-            // Delete button
-            if y >= y_pos && y < y_pos + 20 && x >= 210 && x < 230 {
-                delete_task(task.id);
-                break;
-            }
-            
-            // Task toggle
-            if y >= y_pos && y < y_pos + 20 && x >= 10 && x < 200 {
-                toggle_task(task.id);
-                break;
-            }
-        }
-        
-        // Manual dragging removed - EGUI handles scroll interaction
-    }
 }
 
 fn on_draw() {
     clear();
     title_bar("Todo");
     
-    // Track content height and enable scrolling
-    content_height = 0;
-    ui_begin();
+    egui_begin();
     
-    // Filter buttons at top - these should be in a fixed header
-    button(10, 30, 60, 20, "All", task_filter == "all");
-    button(80, 30, 60, 20, "Active", task_filter == "active");
-    button(150, 30, 80, 20, "Complete", task_filter == "completed");
+    // 1. Header with filters
+    egui_toolbar(320, 30, |ui| {
+        egui_horizontal_layout(ui, |ui| {
+            if egui_selectable_label(ui, task_filter == "all", "All") {
+                task_filter = "all";
+            }
+            if egui_selectable_label(ui, task_filter == "active", "Active") {
+                task_filter = "active";
+            }
+            if egui_selectable_label(ui, task_filter == "completed", "Done") {
+                task_filter = "completed";
+            }
+        });
+    });
     
-    // TODO: This entire content area should be wrapped in EGUI ScrollArea
-    // For now, we'll render without manual scroll offsets and let the 
-    // EGUI integration layer handle scrolling when it's implemented
-    
-    // Task list area - coordinates without scroll offset
-    let tasks = get_filtered_tasks(task_filter);
-    let list_start_y = 60;
-    
-    // Draw all tasks
-    if tasks.len() == 0 {
-        label(10, list_start_y, "No tasks to show");
-    } else {
-        for i in 0..tasks.len() {
-            let task = tasks[i];
-            let y_pos = list_start_y + i * 25;
-            
-            // ASCII checkbox display
-            let display_text = task.text.sub_string(4); // Remove "[ ] " or "[x] "
-            let prefix = if task.completed { "[X]" } else { "[ ]" };
-            let full_text = prefix + " " + display_text;
-            
-            // Task button (toggles completion)
-            button(10, y_pos, 190, 20, full_text, task.completed);
-            
-            // Delete button
-            button(210, y_pos, 20, 20, "x", false);
-        }
-    }
-    
-    // Input area - fixed position when keyboard visible
-    let input_y = if keyboard_visible { 170 } else { 200 };
-    label(10, input_y - 15, "Add new task:");
-    
-    // Text input area with focus styling
-    let input_display = if new_task_text == "" { 
-        if input_focused { "Type here... |" } else { "Type here..." }
-    } else { 
-        if input_focused { new_task_text + " |" } else { new_task_text }
-    };
-    
-    button(10, input_y, 160, 24, input_display, input_focused);
-    
-    // Add button
-    button(180, input_y, 50, 24, "Add", false);
-    
-    // Stats area - only show if space available
-    if !keyboard_visible {
-        let all_tasks = db_get_ids_in_category(0);
-        let completed_count = 0;
-        for id in all_tasks {
-            let text = to_string(db_get_data(id));
-            if text.index_of("[x] ") == 0 {
-                completed_count += 1;
+    // 2. Scrollable task list
+    egui_scroll_area("todo_list", 160, |ui| {
+        let tasks = get_filtered_tasks(task_filter);
+        
+        if tasks.len() == 0 {
+            egui_label(ui, "No tasks found.");
+        } else {
+            for i in 0..tasks.len() {
+                let task = tasks[i];
+                egui_horizontal_layout(ui, |ui| {
+                    let text = task.text.sub_string(4);
+                    if egui_selectable_label(ui, task.completed, text) {
+                        toggle_task(task.id);
+                    }
+                    if egui_small_button(ui, "x") {
+                        delete_task(task.id);
+                    }
+                });
+                egui_separator(ui);
             }
         }
-        
-        let stats_text = all_tasks.len() + " total, " + completed_count + " done";
-        label(10, 235, stats_text);
-        
-        if completed_count > 0 {
-            button(10, 250, 100, 20, "Clear Done", false);
-        }
-        
-        // Add extra content to demonstrate that scrolling is needed
-        for i in 0..15 {
-            label(10, 280 + i * 20, "Scroll test line " + i + " - This content exceeds screen height!");
-        }
-        
-        // Add even more content to make overflow obvious
-        for i in 0..10 {
-            button(10, 580 + i * 30, 200, 25, "Button " + i + " (needs scrolling)", false);
-        }
+    });
+    
+    egui_space(ui, 5);
+    
+    // 3. Add task area
+    egui_group(ui, "Add Task", |ui| {
+        egui_horizontal_layout(ui, |ui| {
+            if egui_button(ui, if new_task_text == "" { "Tap to type..." } else { new_task_text }) {
+                // In a future update, this would trigger the keyboard
+            }
+            if egui_button(ui, "Add") {
+                if add_task(new_task_text) {
+                    new_task_text = "";
+                }
+            }
+        });
+    });
+    
+    // 4. Stats
+    let all_tasks = db_get_ids_in_category(0);
+    if all_tasks.len() > 0 {
+        egui_horizontal_layout(ui, |ui| {
+            egui_label(ui, all_tasks.len() + " tasks");
+            if egui_button(ui, "Clear Done") {
+                clear_completed();
+            }
+        });
     }
     
-    // Show scroll status and debugging info
-    let current_content_height = get_content_height();
-    let viewport_height = get_viewport_height();
-    let scroll_needed = needs_scrolling();
-    
-    if !keyboard_visible {
-        label(10, 480, "Content: " + current_content_height + "px");
-        label(10, 500, "Viewport: " + viewport_height + "px");
-        label(10, 520, "Scroll needed: " + scroll_needed);
-        
-        if scroll_needed {
-            label(10, 540, "*** SCROLLING SHOULD BE ENABLED ***");
-        }
-    }
-    
-    // Show actual keyboard widget if input is focused - fixed at bottom
-    if keyboard_visible {
-        draw_keyboard(keyboard);
-    }
+    egui_end();
 }

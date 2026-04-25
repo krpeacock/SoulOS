@@ -10,7 +10,7 @@ use embedded_graphics::image::{Image, ImageRaw};
 use embedded_graphics::pixelcolor::Gray8;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
-use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope, AST};
+use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope, AST, FnPtr};
 use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
 use soul_db::Database;
 use soul_ui::Form;
@@ -36,6 +36,8 @@ pub trait ObjectSafeDraw {
     /// Used for press-highlight effects without allocating in the script.
     fn draw_pixels_inverted(&mut self, x: i32, y: i32, w: u32, pixels: &[u8]);
     fn draw_scrollbar(&mut self, scroll_offset: i32, content_height: i32, viewport_height: i32);
+    /// Render the output of an EGUI frame onto the canvas.
+    fn render_egui_frame(&mut self, egui_output: egui::FullOutput);
 }
 
 impl<D> ObjectSafeDraw for D
@@ -112,6 +114,50 @@ where
         let raw = ImageRaw::<Gray8>::new(&inv, w);
         let _ = Image::new(&raw, Point::new(x, y)).draw(self);
     }
+
+    fn render_egui_frame(&mut self, egui_output: egui::FullOutput) {
+        for clipped_shape in egui_output.shapes {
+            match clipped_shape.shape {
+                egui::Shape::Rect(rect_shape) => {
+                    // Skip fully transparent shapes
+                    if rect_shape.fill.a() == 0 {
+                        continue;
+                    }
+                    
+                    let rect = rect_shape.rect;
+                    let color = color_to_gray8(rect_shape.fill);
+                    let eg_rect = Rectangle::new(
+                        Point::new(rect.min.x as i32, rect.min.y as i32),
+                        Size::new(rect.width() as u32, rect.height() as u32),
+                    );
+                    let _ = self.fill_solid(&eg_rect, color);
+                    
+                    // Draw stroke if present
+                    if rect_shape.stroke.width > 0.0 && rect_shape.stroke.color.a() > 0 {
+                        let _stroke_color = color_to_gray8(rect_shape.stroke.color);
+                        // Simplified stroke as a border rect for now
+                        // Proper stroke would need primitives::Styled
+                    }
+                }
+                egui::Shape::Text(text_shape) => {
+                    if text_shape.fallback_color.a() == 0 && text_shape.galley.job.sections.iter().all(|s| s.format.color.a() == 0) {
+                        continue;
+                    }
+                    
+                    let pos = text_shape.pos;
+                    let text = text_shape.galley.text();
+                    let _ = soul_ui::label(self, Point::new(pos.x as i32, pos.y as i32), &text);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn color_to_gray8(c: egui::Color32) -> Gray8 {
+    // Simple luma conversion: (r + g + b) / 3
+    let luma = (c.r() as u32 + c.g() as u32 + c.b() as u32) / 3;
+    Gray8::new(luma as u8)
 }
 
 // --- System call protocol -----------------------------------------------
@@ -223,6 +269,13 @@ static mut ACTIVE_DB: Option<*mut Database> = None;
 static mut ACTIVE_CTX: Option<*mut ()> = None;
 // Content height tracking for scroll detection
 static mut ACTIVE_CONTENT_HEIGHT: u32 = 0;
+// EGUI bridge for native scrolling
+static mut ACTIVE_EGUI_BRIDGE: Option<*mut soul_ui::EguiRhaiBridge> = None;
+
+// Rhai engine, scope, and AST for executing FnPtrs within EGUI closures
+static mut ACTIVE_RHAI_ENGINE: Option<*mut Engine> = None;
+static mut ACTIVE_RHAI_SCOPE: Option<*mut Scope<'static>> = None;
+static mut ACTIVE_RHAI_AST: Option<*const AST> = None;
 
 /// Enhanced error information for debugging (no_std compatible)
 #[derive(Debug)]
@@ -317,6 +370,8 @@ pub struct ScriptedApp {
     last_error: Option<ScriptError>,
     // Simple state tracking
     last_content_height: u32,
+    egui_context: egui::Context,
+    egui_bridge: soul_ui::EguiRhaiBridge,
 }
 
 impl ScriptedApp {
@@ -676,6 +731,79 @@ impl ScriptedApp {
         
         engine.register_fn("get_viewport_height", || -> i32 {
             APP_HEIGHT as i32
+        });
+
+        // Register EGUI Bridge functions for native scrolling
+        Self::register_egui_bridge_functions(&mut engine);
+        
+        // Register native EGUI widgets
+        engine.register_fn("egui_label", |_ui: Dynamic, text: String| unsafe {
+            if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                (*ui_ptr).label(text);
+            }
+        });
+        engine.register_fn("egui_button", |_ui: Dynamic, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    (*ui_ptr).button(text).clicked()
+                } else {
+                    false
+                }
+            }
+        });
+        engine.register_fn("egui_checkbox", |_ui: Dynamic, checked: bool, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    let mut val = checked;
+                    (*ui_ptr).checkbox(&mut val, text);
+                    val
+                } else {
+                    checked
+                }
+            }
+        });
+        engine.register_fn("egui_separator", |_ui: Dynamic| unsafe {
+            if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                (*ui_ptr).separator();
+            }
+        });
+        engine.register_fn("egui_space", |_ui: Dynamic, amount: i32| unsafe {
+            if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                (*ui_ptr).add_space(amount as f32);
+            }
+        });
+        engine.register_fn("egui_begin", || {});
+        engine.register_fn("egui_end", || {});
+
+        engine.register_fn("egui_small_button", |_ui: Dynamic, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    // Small button style
+                    (*ui_ptr).add(egui::Button::new(text).small()).clicked()
+                } else {
+                    false
+                }
+            }
+        });
+
+        engine.register_fn("egui_toolbar", |_w: i32, _h: i32, content: FnPtr| {
+            // Toolbars are usually at the top/bottom. 
+            // In SoulOS, we can just treat it as a group or just run the content.
+            // For now, let's just run the content.
+            if let (Some(engine_ptr), Some(ast_ptr)) = unsafe { (ACTIVE_RHAI_ENGINE, ACTIVE_RHAI_AST) } {
+                let engine = unsafe { &*engine_ptr };
+                let ast = unsafe { &*ast_ptr };
+                let _ = content.call::<()>(engine, ast, (Dynamic::from(()),));
+            }
+        });
+        engine.register_fn("egui_selectable_label", |_ui: Dynamic, selected: bool, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    (*ui_ptr).selectable_label(selected, text).clicked()
+                } else {
+                    false
+                }
+            }
         });
 
         // Register Global drawing functions
@@ -1541,6 +1669,9 @@ impl ScriptedApp {
         // Ignore initialization errors in no_std - they'll be caught at runtime
         let _ = engine.run_with_scope(&mut scope, script);
 
+        let egui_context = egui::Context::default();
+        let egui_bridge = soul_ui::EguiRhaiBridge::new(egui_context.clone());
+
         Ok(Self {
             engine,
             ast,
@@ -1550,6 +1681,8 @@ impl ScriptedApp {
             script_source: script.to_string(),
             last_error: None,
             last_content_height: 0,
+            egui_context,
+            egui_bridge,
         })
     }
 
@@ -1566,6 +1699,11 @@ impl ScriptedApp {
     /// Get script name for debugging
     pub fn script_name(&self) -> &str {
         &self.script_name
+    }
+
+    /// Get a value from the script's global scope.
+    pub fn get_var<T: 'static + Clone>(&self, name: &str) -> Option<T> {
+        self.scope.get_value::<T>(name)
     }
 
     /// Get script source for debugging  
@@ -1604,10 +1742,105 @@ impl ScriptedApp {
             .filter_map(|v| v.try_cast::<String>())
             .collect()
     }
+
+    /// Register EGUI bridge functions with the Rhai engine
+    fn register_egui_bridge_functions(engine: &mut Engine) {
+        // Register native EGUI scroll area function
+        engine.register_fn("egui_scroll_area", |id: String, max_height: i32, content: FnPtr| {
+            unsafe {
+                if let Some(bridge_ptr) = ACTIVE_EGUI_BRIDGE {
+                    let bridge = &*bridge_ptr;
+                    (*bridge).create_scroll_area(&id, max_height as f32, |_ui| {
+                        if let (Some(engine_ptr), Some(ast_ptr)) = (ACTIVE_RHAI_ENGINE, ACTIVE_RHAI_AST) {
+                            let engine = &*engine_ptr;
+                            let ast = &*ast_ptr;
+                            // Pass mock ui object for compatibility
+                            let _ = content.call::<()>(engine, ast, (Dynamic::from(()),));
+                        }
+                    });
+                }
+            }
+        });
+
+        // Register EGUI group function
+        engine.register_fn("egui_group", |_ui: Dynamic, title: String, content: FnPtr| {
+            unsafe {
+                if let Some(bridge_ptr) = ACTIVE_EGUI_BRIDGE {
+                    let bridge = &*bridge_ptr;
+                    (*bridge).group(&title, |_ui| {
+                        if let (Some(engine_ptr), Some(ast_ptr)) = (ACTIVE_RHAI_ENGINE, ACTIVE_RHAI_AST) {
+                            let engine = &*engine_ptr;
+                            let ast = &*ast_ptr;
+                            let _ = content.call::<()>(engine, ast, (Dynamic::from(()),));
+                        }
+                    });
+                }
+            }
+        });
+
+        // Register horizontal layout function
+        engine.register_fn("egui_horizontal_layout", |_ui: Dynamic, content: FnPtr| {
+            unsafe {
+                if let Some(bridge_ptr) = ACTIVE_EGUI_BRIDGE {
+                    let bridge = &*bridge_ptr;
+                    bridge.horizontal_layout(|_ui| {
+                        if let (Some(engine_ptr), Some(ast_ptr)) = (ACTIVE_RHAI_ENGINE, ACTIVE_RHAI_AST) {
+                            let engine = &*engine_ptr;
+                            let ast = &*ast_ptr;
+                            let _ = content.call::<()>(engine, ast, (Dynamic::from(()),));
+                        }
+                    });
+                }
+            }
+        });
+
+        // Register vertical layout function
+        engine.register_fn("egui_vertical_layout", |_ui: Dynamic, content: FnPtr| {
+            unsafe {
+                if let Some(bridge_ptr) = ACTIVE_EGUI_BRIDGE {
+                    let bridge = &*bridge_ptr;
+                    bridge.vertical_layout(|_ui| {
+                        if let (Some(engine_ptr), Some(ast_ptr)) = (ACTIVE_RHAI_ENGINE, ACTIVE_RHAI_AST) {
+                            let engine = &*engine_ptr;
+                            let ast = &*ast_ptr;
+                            let _ = content.call::<()>(engine, ast, (Dynamic::from(()),));
+                        }
+                    });
+                }
+            }
+        });
+    }
 }
 
 impl App for ScriptedApp {
     fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+        // Convert SoulOS event to EGUI event
+        let egui_event = match event {
+            Event::PenDown { x, y } => Some(egui::Event::PointerButton {
+                pos: egui::Pos2::new(x as f32, y as f32),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }),
+            Event::PenMove { x, y } => Some(egui::Event::PointerMoved(egui::Pos2::new(x as f32, y as f32))),
+            Event::PenUp { x, y } => Some(egui::Event::PointerButton {
+                pos: egui::Pos2::new(x as f32, y as f32),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }),
+            _ => None,
+        };
+
+        // Let EGUI handle the event
+        let mut consumed = false;
+        if let Some(e) = egui_event {
+            self.egui_context.input_mut(|i| i.events.push(e));
+            // Check if any widget consumed the pointer in the last frame
+            // This is a heuristic; proper consumption check happens during `run()`
+            consumed = self.egui_context.wants_pointer_input();
+        }
+
         let mut map = Map::new();
         match event {
             Event::AppStart => {
@@ -1706,24 +1939,26 @@ impl App for ScriptedApp {
         }
         map.insert("now_ms".into(), Dynamic::from(ctx.now_ms as i32));
 
-        unsafe {
-            ACTIVE_DB = Some(&mut self.db as *mut Database);
-            ACTIVE_CTX = Some(ctx as *mut Ctx as *mut ());
+        if !consumed {
+            unsafe {
+                ACTIVE_DB = Some(&mut self.db as *mut Database);
+                ACTIVE_CTX = Some(ctx as *mut Ctx as *mut ());
 
-            // Execute on_event and capture any errors for std environments to log
-            if let Err(e) =
-                self.engine
-                    .call_fn::<()>(&mut self.scope, &self.ast, "on_event", (map,))
-            {
-                self.last_error = Some(ScriptError::from_rhai_error(
-                    &self.script_name,
-                    "on_event",
-                    &e,
-                ));
+                // Execute on_event and capture any errors for std environments to log
+                if let Err(e) =
+                    self.engine
+                        .call_fn::<()>(&mut self.scope, &self.ast, "on_event", (map,))
+                {
+                    self.last_error = Some(ScriptError::from_rhai_error(
+                        &self.script_name,
+                        "on_event",
+                        &e,
+                    ));
+                }
+
+                ACTIVE_DB = None;
+                ACTIVE_CTX = None;
             }
-
-            ACTIVE_DB = None;
-            ACTIVE_CTX = None;
         }
     }
 
@@ -1732,25 +1967,43 @@ impl App for ScriptedApp {
         D: DrawTarget<Color = Gray8>,
     {
         unsafe {
-            let bridge: &mut dyn ObjectSafeDraw = canvas;
+            let bridge_interface: &mut dyn ObjectSafeDraw = canvas;
             // Erase lifetime for storage in static
             let erased =
-                core::mem::transmute::<&mut dyn ObjectSafeDraw, *mut dyn ObjectSafeDraw>(bridge);
+                core::mem::transmute::<&mut dyn ObjectSafeDraw, *mut dyn ObjectSafeDraw>(bridge_interface);
             ACTIVE_CANVAS = Some(erased);
             ACTIVE_DB = Some(&mut self.db as *mut Database);
             ACTIVE_CONTENT_HEIGHT = 0;
 
-            // Execute on_draw and capture any errors for std environments to log
-            if let Err(e) = self
-                .engine
-                .call_fn::<()>(&mut self.scope, &self.ast, "on_draw", ())
-            {
-                self.last_error = Some(ScriptError::from_rhai_error(
-                    &self.script_name,
-                    "on_draw",
-                    &e,
-                ));
-            }
+            // Set global Rhai engine, scope, and EGUI bridge pointers
+            ACTIVE_RHAI_ENGINE = Some(&mut self.engine as *mut Engine);
+            ACTIVE_RHAI_SCOPE = Some(&mut self.scope as *mut Scope<'static>);
+            ACTIVE_RHAI_AST = Some(&self.ast as *const AST);
+            ACTIVE_EGUI_BRIDGE = Some(&mut self.egui_bridge as *mut soul_ui::EguiRhaiBridge);
+
+            // Run EGUI frame and capture output
+            let egui_output = self.egui_bridge.run(|_ui| {
+                // Execute on_draw and capture any errors for std environments to log
+                if let Err(e) = self
+                    .engine
+                    .call_fn::<()>(&mut self.scope, &self.ast, "on_draw", ())
+                {
+                    self.last_error = Some(ScriptError::from_rhai_error(
+                        &self.script_name,
+                        "on_draw",
+                        &e,
+                    ));
+                }
+            });
+
+            // Render EGUI output to the canvas
+            canvas.render_egui_frame(egui_output);
+
+            // Clear global pointers
+            ACTIVE_RHAI_ENGINE = None;
+            ACTIVE_RHAI_SCOPE = None;
+            ACTIVE_RHAI_AST = None;
+            ACTIVE_EGUI_BRIDGE = None;
 
             // Update content height tracking
             self.last_content_height = ACTIVE_CONTENT_HEIGHT;

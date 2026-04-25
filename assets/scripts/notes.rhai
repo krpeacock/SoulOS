@@ -1,7 +1,5 @@
 // assets/scripts/notes.rhai
-// A simple Notes app.
-// When opened via open_script exchange (from Builder) the user edits the
-// supplied text and taps "Done" in the menu to return the result.
+// A simple Notes app migrated to native EGUI.
 
 let app_id      = "com.soulos.notes";
 let app_name    = "Notes";
@@ -13,25 +11,6 @@ let kb   = new_keyboard();
 let active_id    = 0;
 let exchange_mode = false;  // true when opened via open_script exchange
 let menu_open    = false;
-let menu_pressed = -1;      // index of button held during PenDown
-
-// Menu layout — 2-column grid, 3 items: 0=Save  1=Done  2=Close menu
-// These are plain functions so they're always in scope inside on_event/on_draw.
-fn menu_item_x(i) { 15 + (i % 2) * 105 }
-fn menu_item_y(i) { 25 + (i / 2) * 28  }
-fn menu_w()       { 100 }
-fn menu_h()       { 24  }
-
-fn hit_menu(x, y) {
-    for i in range(0, 3) {
-        let mx = menu_item_x(i);
-        let my = menu_item_y(i);
-        if x >= mx && x < mx + menu_w() && y >= my && y < my + menu_h() {
-            return i;
-        }
-    }
-    return -1;
-}
 
 fn on_event(event) {
     if event.type == "AppStart" {
@@ -54,10 +33,9 @@ fn on_event(event) {
         invalidate_all();
     }
 
-    // Menu button (hardware or system strip) toggles the menu overlay.
+    // Menu button toggles the menu overlay.
     if event.type == "Menu" {
         menu_open = !menu_open;
-        menu_pressed = -1;
         invalidate_all();
     }
 
@@ -83,7 +61,6 @@ fn on_event(event) {
         invalidate_all();
     }
 
-    // PageUp / PageDown hardware buttons scroll the text area.
     if event.type == "ButtonDown" {
         if event.button == "PageUp" {
             area.page_up();
@@ -95,13 +72,9 @@ fn on_event(event) {
     }
 
     if event.type == "PenDown" {
-        if menu_open {
-            menu_pressed = hit_menu(event.x, event.y);
-            invalidate_all();
-            return;
-        }
+        // EGUI handles its own PenDown events if consumed
         if event.y >= 205 {
-            kb.handle_pen(event.x, event.y, true);
+            handle_pen(keyboard, event.x, event.y, true);
         } else {
             area.pen_down(event.x, event.y, event.now_ms);
         }
@@ -109,9 +82,8 @@ fn on_event(event) {
     }
 
     if event.type == "PenMove" {
-        if menu_open { return; }
         if event.y >= 205 {
-            kb.handle_pen(event.x, event.y, true);
+            handle_pen(keyboard, event.x, event.y, true);
         } else {
             area.pen_move(event.x, event.y);
         }
@@ -119,34 +91,8 @@ fn on_event(event) {
     }
 
     if event.type == "PenUp" {
-        if menu_open {
-            let i = hit_menu(event.x, event.y);
-            if i >= 0 && i == menu_pressed {
-                menu_open = false;
-                menu_pressed = -1;
-                if i == 0 {
-                    // Save
-                    db_update(active_id, to_bytes(area.get_text()));
-                } else if i == 1 {
-                    // Done — in exchange_mode this returns the text to Builder;
-                    // outside exchange_mode it just saves.
-                    if exchange_mode {
-                        system_send_text_result("return_text", area.get_text());
-                        exchange_mode = false;
-                    } else {
-                        db_update(active_id, to_bytes(area.get_text()));
-                    }
-                }
-                // i == 2: Close menu — already closed above
-            } else {
-                menu_pressed = -1;
-            }
-            invalidate_all();
-            return;
-        }
-
         if event.y >= 205 {
-            let key = kb.handle_pen(event.x, event.y, false);
+            let key = handle_pen(keyboard, event.x, event.y, false);
             if key != "" {
                 if key == "Backspace" {
                     area.backspace();
@@ -167,25 +113,46 @@ fn on_event(event) {
 }
 
 fn on_draw() {
+    clear();
     if exchange_mode {
         title_bar("Notes · Edit Script");
     } else {
         title_bar("Notes");
     }
+    
+    // Draw manual components
     draw_text_area(area);
     draw_keyboard(kb);
 
+    // Overlay EGUI menu if open
     if menu_open {
-        // Draw a white panel with a border.
-        draw_rect(10, 15, 220, 90, 255);   // white fill
-        draw_rect(10, 15, 220, 1,  0);     // top border
-        draw_rect(10, 15, 1,   90, 0);     // left border
-        draw_rect(229, 15, 1,  90, 0);     // right border
-        draw_rect(10, 104, 220, 1, 0);     // bottom border
-
-        let done_label = if exchange_mode { "Done ▶" } else { "Done" };
-        button(menu_item_x(0), menu_item_y(0), menu_w(), menu_h(), "Save",       menu_pressed == 0);
-        button(menu_item_x(1), menu_item_y(1), menu_w(), menu_h(), done_label,   menu_pressed == 1);
-        button(menu_item_x(2), menu_item_y(2), menu_w(), menu_h(), "Close menu", menu_pressed == 2);
+        egui_begin();
+        // Position menu near top
+        egui_scroll_area("menu_scroll", 100, |ui| {
+            egui_group(ui, "Notes Menu", |ui| {
+                egui_vertical_layout(ui, |ui| {
+                    if egui_button(ui, "Save") {
+                        db_update(active_id, to_bytes(area.get_text()));
+                        menu_open = false;
+                    }
+                    
+                    let done_label = if exchange_mode { "Done ▶" } else { "Done" };
+                    if egui_button(ui, done_label) {
+                        if exchange_mode {
+                            system_send_text_result("return_text", area.get_text());
+                            exchange_mode = false;
+                        } else {
+                            db_update(active_id, to_bytes(area.get_text()));
+                        }
+                        menu_open = false;
+                    }
+                    
+                    if egui_button(ui, "Close Menu") {
+                        menu_open = false;
+                    }
+                });
+            });
+        });
+        egui_end();
     }
 }

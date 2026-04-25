@@ -3,10 +3,8 @@
 //! This module provides the bridge between Rhai scripts and EGUI's immediate mode GUI system,
 //! specifically implementing proper ScrollArea support.
 
-use alloc::boxed::Box;
-use egui::{Context, ScrollArea, Ui, Vec2, Pos2, Rect, Color32};
-use embedded_graphics::{prelude::*, primitives::Rectangle};
-use embedded_graphics::pixelcolor::Gray8;
+use egui::{Context, ScrollArea, Ui, Vec2, Pos2, Rect};
+use embedded_graphics::{pixelcolor::Gray8, prelude::DrawTarget};
 
 /// EGUI context wrapper for SoulOS script integration
 pub struct SoulOSEguiContext {
@@ -47,7 +45,7 @@ impl SoulOSEguiContext {
 
     /// Track content size for scroll determination
     pub fn track_content(&mut self, rect: Rect) {
-        self.content_size = self.content_size.max(rect.max);
+        self.content_size = self.content_size.max(rect.max.to_vec2());
     }
 
     /// Get the EGUI context
@@ -78,20 +76,23 @@ impl EguiScriptDrawing {
     /// Execute drawing within EGUI context
     pub fn draw<R>(&mut self, draw_fn: impl FnOnce(&mut Ui) -> R) -> R {
         let mut result = None;
+        let mut draw_fn = Some(draw_fn);
         
-        self.context.context().run(Default::default(), |ctx| {
+        let _ = self.context.context().run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                // Check if we need scrolling based on previous frame's content
-                if self.context.needs_scrolling(self.viewport_rect.height()) {
-                    // Use ScrollArea for content that exceeds viewport
-                    ScrollArea::vertical()
-                        .max_height(self.viewport_rect.height())
-                        .show(ui, |ui| {
-                            result = Some(draw_fn(ui));
-                        });
-                } else {
-                    // Draw directly for content that fits
-                    result = Some(draw_fn(ui));
+                if let Some(f) = draw_fn.take() {
+                    // Check if we need scrolling based on previous frame's content
+                    if self.context.needs_scrolling(self.viewport_rect.height()) {
+                        // Use ScrollArea for content that exceeds viewport
+                        ScrollArea::vertical()
+                            .max_height(self.viewport_rect.height())
+                            .show(ui, |ui| {
+                                result = Some(f(ui));
+                            });
+                    } else {
+                        // Draw directly for content that fits
+                        result = Some(f(ui));
+                    }
                 }
             });
         });
@@ -100,7 +101,7 @@ impl EguiScriptDrawing {
     }
 
     /// Convert EGUI output to embedded-graphics drawing commands
-    pub fn render_to_canvas<D>(&self, canvas: &mut D) 
+    pub fn render_to_canvas<D>(&self, _canvas: &mut D) 
     where 
         D: DrawTarget<Color = Gray8>,
     {
@@ -116,7 +117,7 @@ impl EguiScriptDrawing {
 
 /// High-level API for scripts to use EGUI scrolling
 pub fn with_scroll_area<R>(
-    max_height: f32,
+    _max_height: f32,
     content_fn: impl FnOnce() -> R,
 ) -> R {
     // This would be the main entry point for scripts

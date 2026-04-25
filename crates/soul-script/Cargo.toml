@@ -16,4 +16,7 @@ rhai = { version = "1.24", default-features = false, features = ["no_std", "only
 serde.workspace = true
 serde_json.workspace = true
 embedded-graphics.workspace = true
-egui = "0.29"
+egui.workspace = true
+
+[dev-dependencies]
+soul-hal-hosted = { path = "../soul-hal-hosted" }

@@ -198,6 +198,23 @@ impl<A: soul_core::App> Harness<A> {
         self.tick();
     }
 
+    /// Simulate a stylus drag from `from` to `to` over `steps` ticks.
+    pub fn drag(&mut self, from: (i16, i16), to: (i16, i16), steps: u8) {
+        self.platform.pending.push_back(InputEvent::StylusDown { x: from.0, y: from.1 });
+        self.tick();
+
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let x = from.0 + ((to.0 - from.0) as f32 * t) as i16;
+            let y = from.1 + ((to.1 - from.1) as f32 * t) as i16;
+            self.platform.pending.push_back(InputEvent::StylusMove { x, y });
+            self.tick();
+        }
+
+        self.platform.pending.push_back(InputEvent::StylusUp { x: to.0, y: to.1 });
+        self.tick();
+    }
+
     /// Simulate a hard button press.
     /// Sends ButtonDown, waits 1 tick, then ButtonUp.
     pub fn press(&mut self, button: HardButton) {
@@ -495,6 +512,16 @@ impl<A: soul_core::App> Harness<A> {
     pub fn tap_node(&mut self, node: &soul_core::a11y::A11yNode) {
         let center = node.bounds.center();
         self.tap(center.x as i16, center.y as i16);
+    }
+
+    /// Access the application being driven by this harness.
+    pub fn app(&self) -> &A {
+        &self.app
+    }
+
+    /// Access the application being driven by this harness (mutable).
+    pub fn app_mut(&mut self) -> &mut A {
+        &mut self.app
     }
 }
 
