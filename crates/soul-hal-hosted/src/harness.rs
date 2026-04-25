@@ -1,14 +1,35 @@
 //! Headless platform for deterministic testing.
 //!
-//! Stage 1+2+3+4 of the test harness (see `docs/Harness.md`).
+//! Stage 1+2+3+4+5 complete (see `docs/Harness.md`).
 //! Provides a `Platform` impl that runs with no window and reads time
 //! from a clock the test advances explicitly, plus the `Harness` driver API
-//! for input, stepping, A11y queries, and PNG snapshots with golden images.
+//! for input, stepping, A11y queries, PNG snapshots with golden images,
+//! settle() for waiting until the app stabilizes, and advance_ms() for
+//! time-based testing.
 
 use std::collections::VecDeque;
 
 use soul_core::{Ctx, Event, Dirty, SCREEN_HEIGHT, SCREEN_WIDTH, a11y::A11yManager};
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
+
+/// Error returned when settle() times out waiting for the app to settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettleTimeout {
+    pub ticks_elapsed: u32,
+    pub max_ticks: u32,
+}
+
+impl std::fmt::Display for SettleTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "settle() timed out after {} ticks (max {})",
+            self.ticks_elapsed, self.max_ticks
+        )
+    }
+}
+
+impl std::error::Error for SettleTimeout {}
 
 use crate::MiniFbDisplay;
 
@@ -197,6 +218,113 @@ impl<A: soul_core::App> Harness<A> {
         for c in text.chars() {
             self.key(KeyCode::Char(c));
         }
+    }
+
+    /// Advance the virtual clock by the specified number of milliseconds,
+    /// ticking frames as needed to reach that time.
+    pub fn advance_ms(&mut self, ms: u32) {
+        let target_time = self.platform.clock.now_ms() + ms as u64;
+        while self.platform.clock.now_ms() < target_time {
+            self.tick();
+        }
+    }
+
+    /// Repeatedly tick() until the app has settled (no dirty regions for N consecutive frames).
+    /// 
+    /// Returns `Err(SettleTimeout)` if the app doesn't settle within the maximum tick count.
+    /// Default: 2 consecutive clean frames, 120 tick maximum.
+    pub fn settle(&mut self) -> Result<(), SettleTimeout> {
+        self.settle_with_params(2, 120)
+    }
+
+    /// settle() with configurable parameters.
+    /// 
+    /// - `clean_frames`: Number of consecutive frames with no dirty regions required
+    /// - `max_ticks`: Maximum number of ticks before timing out
+    pub fn settle_with_params(&mut self, clean_frames: u32, max_ticks: u32) -> Result<(), SettleTimeout> {
+        let mut consecutive_clean = 0;
+        let mut ticks_elapsed = 0;
+
+        while consecutive_clean < clean_frames && ticks_elapsed < max_ticks {
+            // Run a tick but track if it generated any drawing
+            let had_drawing = self.tick_and_check_dirty();
+            ticks_elapsed += 1;
+            
+            if had_drawing {
+                // Reset clean counter if there was drawing
+                consecutive_clean = 0;
+            } else {
+                // Increment clean counter if no drawing
+                consecutive_clean += 1;
+            }
+        }
+
+        if consecutive_clean >= clean_frames {
+            Ok(())
+        } else {
+            Err(SettleTimeout {
+                ticks_elapsed,
+                max_ticks,
+            })
+        }
+    }
+
+    /// Run one tick and return true if any drawing occurred.
+    fn tick_and_check_dirty(&mut self) -> bool {
+        let _frame_start = self.platform.now_ms();
+        
+        // Drain all pending events
+        while let Some(ev) = self.platform.poll_event() {
+            if let Some(e) = translate_input_event(ev) {
+                let now = self.platform.now_ms();
+                let mut ctx = Ctx {
+                    now_ms: now,
+                    dirty: &mut self.dirty,
+                    a11y: &mut self.a11y,
+                };
+                self.app.handle(e, &mut ctx);
+            }
+        }
+        
+        // Send tick event
+        {
+            let now = self.platform.now_ms();
+            let mut ctx = Ctx {
+                now_ms: now,
+                dirty: &mut self.dirty,
+                a11y: &mut self.a11y,
+            };
+            self.app.handle(Event::Tick(now), &mut ctx);
+        }
+        
+        // Check if we need to draw and do it
+        let had_drawing = if let Some(rect) = self.dirty.take() {
+            use embedded_graphics::{
+                draw_target::DrawTargetExt,
+                pixelcolor::Gray8,
+                primitives::PrimitiveStyle,
+                prelude::*,
+            };
+            let mut clip = self.platform.display.clipped(&rect);
+            // Clear only the dirty region to white before drawing.
+            let _ = rect
+                .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
+                .draw(&mut clip);
+            self.app.draw(&mut clip, rect);
+            true // Had drawing
+        } else {
+            false // No drawing
+        };
+        
+        // Drain accessibility speech
+        for text in self.a11y.pending_speech.drain(..) {
+            self.platform.speak(&text);
+        }
+        
+        // Advance virtual clock by 16ms (like the real event loop)
+        self.platform.clock.advance(16);
+        
+        had_drawing
     }
 
     /// Get the current framebuffer for inspection.
@@ -946,5 +1074,183 @@ mod tests {
         
         // Clean up test artifact
         std::fs::remove_file(&golden_path).ok();
+    }
+
+    #[test]
+    fn harness_advance_ms() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        let start_time = harness.platform.clock.now_ms();
+        
+        // Advance by 100ms
+        harness.advance_ms(100);
+        
+        let end_time = harness.platform.clock.now_ms();
+        
+        // Should have advanced by at least 100ms (might be slightly more due to frame ticking)
+        assert!(end_time >= start_time + 100);
+        // Should not have advanced too much beyond that
+        assert!(end_time < start_time + 200); // Allow some tolerance for frame boundaries
+    }
+
+    #[test]
+    fn harness_advance_ms_with_frames() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        let start_time = harness.platform.clock.now_ms();
+        
+        // Advance by exactly one frame (16ms)
+        harness.advance_ms(16);
+        
+        let end_time = harness.platform.clock.now_ms();
+        
+        // Should be exactly 16ms later
+        assert_eq!(end_time, start_time + 16);
+    }
+
+    #[test]
+    fn harness_settle_basic() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        // The app should settle quickly after initial drawing
+        let result = harness.settle();
+        assert!(result.is_ok(), "App should settle successfully");
+    }
+
+    #[test]
+    fn harness_settle_after_input() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        // Initial settle
+        harness.settle().expect("Initial settle should succeed");
+        
+        // Type some text (this will make it dirty)
+        harness.type_text("test");
+        
+        // Should settle again after the input
+        let result = harness.settle();
+        assert!(result.is_ok(), "App should settle after input");
+    }
+
+    #[test]
+    fn harness_settle_timeout() {
+        // Create an app that never settles by always marking itself dirty
+        struct NeverSettleApp;
+        
+        impl soul_core::App for NeverSettleApp {
+            fn handle(&mut self, event: Event, ctx: &mut Ctx) {
+                match event {
+                    Event::Tick(_) => {
+                        // Always mark ourselves dirty so we never settle
+                        ctx.invalidate(Rectangle::new(Point::zero(), Size::new(10, 10)));
+                    }
+                    _ => {}
+                }
+            }
+            
+            fn draw<D>(&mut self, _canvas: &mut D, _dirty: Rectangle) 
+            where D: embedded_graphics::draw_target::DrawTarget<Color = embedded_graphics::pixelcolor::Gray8> {
+                // Do nothing
+            }
+            
+            fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+                vec![]
+            }
+        }
+        
+        let app = NeverSettleApp;
+        let mut harness = Harness::new(app);
+        
+        // This should timeout quickly
+        let result = harness.settle_with_params(2, 5); // Only 5 ticks max
+        assert!(result.is_err(), "Should timeout");
+        
+        let timeout = result.unwrap_err();
+        assert_eq!(timeout.ticks_elapsed, 5);
+        assert_eq!(timeout.max_ticks, 5);
+    }
+
+    #[test]
+    fn harness_settle_custom_params() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        // Should succeed with custom parameters
+        let result = harness.settle_with_params(3, 50);
+        assert!(result.is_ok(), "Should settle with custom params");
+    }
+
+    #[test]
+    fn harness_settle_timeout_display() {
+        let timeout = SettleTimeout {
+            ticks_elapsed: 42,
+            max_ticks: 100,
+        };
+        
+        let display_str = format!("{}", timeout);
+        assert!(display_str.contains("42"));
+        assert!(display_str.contains("100"));
+        assert!(display_str.contains("settle() timed out"));
+    }
+
+    #[test]
+    fn harness_stage_5_integration() {
+        // This test demonstrates all the stage 5 functionality working together
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        // Start with settle to ensure clean state
+        harness.settle().expect("Should settle initially");
+        
+        // Advance time
+        let start_time = harness.platform.clock.now_ms();
+        harness.advance_ms(50);
+        let after_advance = harness.platform.clock.now_ms();
+        assert!(after_advance >= start_time + 50);
+        
+        // Do some input
+        harness.type_text("Stage 5 test");
+        
+        // Settle again after input
+        harness.settle().expect("Should settle after input");
+        
+        // Verify speech log is still accessible (from stage 3)
+        let speech = harness.speech_log();
+        assert!(speech.is_empty()); // SimpleNotesApp doesn't speak
+        
+        println!("✅ Stage 5 integration test completed successfully");
+    }
+
+    #[test]
+    fn docs_architecture_example_with_settle() {
+        // This demonstrates the updated architecture example from docs/Harness.md
+        // now using settle() as intended in the final API
+        
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        
+        // The scenario from the docs architecture diagram, now with settle()
+        // let mut h = Harness::new();
+        // h.launch("notes");  // (we start directly in the app)
+        harness.type_text("hello");
+        harness.settle().expect("Should settle after typing");  // ← This is the new settle() functionality
+        
+        assert!(harness.find_text("hello").is_some());
+        
+        // Set UPDATE_SNAPSHOTS to avoid first-run panic
+        std::env::set_var("UPDATE_SNAPSHOTS", "1");
+        harness.snapshot("notes_hello_with_settle");
+        std::env::remove_var("UPDATE_SNAPSHOTS");
+        
+        // Clean up
+        let snapshots_dir = std::path::PathBuf::from("tests/snapshots");
+        let golden_path = snapshots_dir.join("notes_hello_with_settle.png");
+        std::fs::remove_file(&golden_path).ok();
+        
+        println!("✅ Architecture example with settle() completed");
     }
 }
