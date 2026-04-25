@@ -583,11 +583,10 @@ impl MobileBuilder {
                 }
             }
             Event::PenMove { x, y } => {
-                if !self.menu_open {
-                    if self.edit_overlay.pen_move(&mut self.form, x, y) {
+                if !self.menu_open
+                    && self.edit_overlay.pen_move(&mut self.form, x, y) {
                         ctx.invalidate_all();
                     }
-                }
             }
             Event::PenUp { x, y } => {
                 if self.menu_open {

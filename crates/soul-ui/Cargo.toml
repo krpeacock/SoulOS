@@ -10,3 +10,4 @@ embedded-graphics.workspace = true
 soul-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+egui.workspace = true
