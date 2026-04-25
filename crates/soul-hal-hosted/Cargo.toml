@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 soul-hal.workspace = true
+soul-core.workspace = true
 embedded-graphics.workspace = true
 minifb = "0.28"
