@@ -17,6 +17,9 @@ use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 pub mod harness;
 pub mod testing;
 
+// Re-export key types from harness for convenience
+pub use harness::{SettleTimeout, Harness, HeadlessPlatform, VirtualClock};
+
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 
 /// A `DrawTarget<Color = Gray8>` backed by a `Vec<u32>` pixel buffer.
