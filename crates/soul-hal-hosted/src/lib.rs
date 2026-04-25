@@ -15,7 +15,6 @@ use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOption
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 
 pub mod harness;
-pub mod testing;
 
 // Re-export key types from harness for convenience
 pub use harness::{SettleTimeout, Harness, HeadlessPlatform, VirtualClock};

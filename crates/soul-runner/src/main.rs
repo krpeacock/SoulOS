@@ -1064,61 +1064,6 @@ fn main() {
         .init();
     log::info!("🚀 SoulOS starting up...");
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 2 && args[1] == "--test" {
-        run_headless_test(&args[2]);
-        return;
-    }
-
     let mut platform = HostedPlatform::new("SoulOS", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
     run(&mut platform, Host::new());
-}
-
-fn run_headless_test(name: &str) {
-    use soul_hal_hosted::testing::{scenarios, TestingPlatform};
-    let scenario = match name {
-        "build-todo" => scenarios::build_todo_app(),
-        "verify-todo" => scenarios::verify_todo_app(),
-        _ => {
-            eprintln!("Unknown test scenario: {}", name);
-            return;
-        }
-    };
-
-    println!("Running headless test: {}", scenario.name);
-    let platform = HostedPlatform::new("SoulOS Test", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
-    let mut host = Host::new();
-    let mut dirty = soul_core::Dirty::full();
-    let mut a11y = soul_core::a11y::A11yManager::new();
-
-    for event in scenario.events {
-        println!(
-            "  → {} (Active: {})",
-            event.description,
-            host.active_label()
-        );
-        let mut ctx = soul_core::Ctx {
-            now_ms: 0,
-            dirty: &mut dirty,
-            a11y: &mut a11y,
-        };
-
-        let core_event = match event.event {
-            soul_hal::InputEvent::StylusDown { x, y } => soul_core::Event::PenDown { x, y },
-            soul_hal::InputEvent::StylusMove { x, y } => soul_core::Event::PenMove { x, y },
-            soul_hal::InputEvent::StylusUp { x, y } => soul_core::Event::PenUp { x, y },
-            soul_hal::InputEvent::Key(k) => soul_core::Event::Key(k),
-            soul_hal::InputEvent::ButtonDown(soul_hal::HardButton::Menu) => soul_core::Event::Menu,
-            soul_hal::InputEvent::ButtonDown(b) => soul_core::Event::ButtonDown(b),
-            soul_hal::InputEvent::ButtonUp(b) => soul_core::Event::ButtonUp(b),
-            _ => continue,
-        };
-
-        host.handle(core_event, &mut ctx);
-        let mut display = platform.get_display_buffer().clone();
-        let display_size = display.size();
-        host.draw(&mut display, Rectangle::new(Point::zero(), display_size));
-        std::thread::sleep(std::time::Duration::from_millis(event.delay_ms));
-    }
-    println!("Headless test finished.");
 }
