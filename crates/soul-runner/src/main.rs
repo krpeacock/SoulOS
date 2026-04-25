@@ -2,6 +2,7 @@
 
 mod builder;
 mod draw;
+mod gremlins;
 mod launcher;
 mod paint;
 
@@ -887,7 +888,12 @@ impl App for Host {
                             ctx.invalidate_all();
                         }
                         return;
-                    } else if dx.abs() < 10 && dy.abs() < 10 {
+                    } else if dx.abs() < 10 && dy.abs() < 10 && !self.strip_pressed {
+                        // Only count canvas taps toward the triple-tap gesture.
+                        // Strip taps are system-strip interactions and must not
+                        // accumulate the counter — the strip is narrow enough
+                        // that consecutive strip events almost always land within
+                        // the 15 px threshold, causing spurious a11y activation.
                         let mut triple_tap = false;
                         if let Some((lx, ly, lt)) = self.last_tap {
                             if (x - lx).abs() < 15 && (y - ly).abs() < 15 && (ctx.now_ms - lt) < 400
@@ -983,8 +989,29 @@ fn main() {
     log::info!("🚀 SoulOS starting up...");
 
     let args: Vec<String> = std::env::args().collect();
+
     if args.len() > 2 && args[1] == "--test" {
         run_headless_test(&args[2]);
+        return;
+    }
+
+    // --gremlins [seed] [limit]
+    //   seed  — u64 PRNG seed (default: microseconds since epoch)
+    //   limit — stop after N gremlins; 0 = run until crash (default: 10 000)
+    if args.len() > 1 && args[1] == "--gremlins" {
+        let seed: u64 = args.get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(12345)
+            });
+        let limit: u64 = args.get(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        let platform = HostedPlatform::new("SoulOS Gremlins", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+        gremlins::run_gremlins(Host::new(), platform, seed, limit);
         return;
     }
 
