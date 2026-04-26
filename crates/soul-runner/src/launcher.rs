@@ -15,7 +15,7 @@ use embedded_graphics::{
     primitives::Rectangle,
     text::{Baseline, Text},
 };
-use soul_core::{Ctx, Event, HardButton, APP_HEIGHT, SCREEN_WIDTH};
+use soul_core::{App, Ctx, Event, HardButton, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
 use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H};
 
@@ -263,7 +263,7 @@ impl Launcher {
 
     // --- App interface --------------------------------------------------
 
-    pub fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+    pub fn handle_event(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         match event {
             Event::AppStart => {
                 self.picker_mode = false;
@@ -438,6 +438,23 @@ fn read_pair<R: std::io::BufRead>(r: &mut R) -> std::io::Result<(usize, usize)> 
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad height"))?;
         return Ok((w, h));
+    }
+}
+
+impl App for Launcher {
+    fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+        self.handle_event(event, ctx);
+    }
+
+    fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
+    where
+        D: DrawTarget<Color = Gray8>,
+    {
+        self.draw(canvas, dirty);
+    }
+
+    fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        self.a11y_nodes()
     }
 }
 

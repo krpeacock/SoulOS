@@ -9,6 +9,4 @@ soul-hal.workspace = true
 soul-core.workspace = true
 embedded-graphics.workspace = true
 minifb = "0.28"
-
-[dev-dependencies]
 png = "0.17"
