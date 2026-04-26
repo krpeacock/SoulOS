@@ -67,6 +67,23 @@ jobs:
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
 
+      - name: Generate debug keystore
+        # cargo-apk's release profile demands an explicit keystore. We're
+        # not signing for the Play Store yet, so we generate a throwaway
+        # keystore here with the standard Android debug credentials. The
+        # resulting APK is fine for `adb install` and side-loading.
+        run: |
+          set -eux
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storetype PKCS12 \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
       - name: Build APK (release)
         run: cargo apk build -p soul-runner-android --release
 

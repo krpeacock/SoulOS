@@ -27,6 +27,15 @@ assets = "../../assets"
 min_sdk_version = 24
 target_sdk_version = 33
 
+# Sign the release APK with a debug keystore. We're a long way out from
+# wanting Play Store-grade signing — this just satisfies cargo-apk's
+# requirement that release builds carry *some* signature. CI generates
+# the keystore on each run; locally `keytool -genkeypair ...` against
+# `~/.android/debug.keystore` produces a compatible file.
+[package.metadata.android.signing.release]
+path = "~/.android/debug.keystore"
+keystore_password = "android"
+
 [package.metadata.android.application]
 label = "SoulOS"
 debuggable = true
