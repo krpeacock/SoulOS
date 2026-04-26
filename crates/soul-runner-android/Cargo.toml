@@ -22,7 +22,6 @@ log = "0.4"
 package = "com.soulos.dev"
 build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
 assets = "../../assets"
-runtime_libs = "../../target/runtime-libs"
 
 [package.metadata.android.sdk]
 min_sdk_version = 24
