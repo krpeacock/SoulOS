@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "soul_runner"
+path = "src/lib.rs"
+
 [dependencies]
 soul-hal.workspace = true
 soul-core.workspace = true

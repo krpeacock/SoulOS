@@ -37,7 +37,7 @@ fn on_draw() {
     
     egui_begin();
     
-    egui_group(ui, "", |ui| {
+    egui_group((), "", |ui| {
         egui_vertical_layout(ui, |ui| {
             // 1. Display
             egui_label(ui, display);
@@ -46,28 +46,28 @@ fn on_draw() {
             // 2. Buttons in a simulated grid using horizontal layouts
             // (In a more advanced bridge we'd have egui_grid)
             
-            egui_horizontal_layout(ui, |ui| {
+            egui_horizontal_layout((), |ui| {
                 if egui_button(ui, "7") { add_digit(7); }
                 if egui_button(ui, "8") { add_digit(8); }
                 if egui_button(ui, "9") { add_digit(9); }
                 if egui_button(ui, "/") { do_op(); op = "/"; }
             });
             
-            egui_horizontal_layout(ui, |ui| {
+            egui_horizontal_layout((), |ui| {
                 if egui_button(ui, "4") { add_digit(4); }
                 if egui_button(ui, "5") { add_digit(5); }
                 if egui_button(ui, "6") { add_digit(6); }
                 if egui_button(ui, "*") { do_op(); op = "*"; }
             });
             
-            egui_horizontal_layout(ui, |ui| {
+            egui_horizontal_layout((), |ui| {
                 if egui_button(ui, "1") { add_digit(1); }
                 if egui_button(ui, "2") { add_digit(2); }
                 if egui_button(ui, "3") { add_digit(3); }
                 if egui_button(ui, "-") { do_op(); op = "-"; }
             });
             
-            egui_horizontal_layout(ui, |ui| {
+            egui_horizontal_layout((), |ui| {
                 if egui_button(ui, "0") { add_digit(0); }
                 if egui_button(ui, "C") { display = "0"; last_val = 0; op = ""; clear_on_next = true; }
                 if egui_button(ui, "=") { do_op(); op = ""; }

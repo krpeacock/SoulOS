@@ -372,7 +372,6 @@ impl<A: soul_core::App> Harness<A> {
 
     /// Save the current framebuffer as a PNG file.
     /// Format: 8-bit grayscale, 240×320 (or current display dimensions).
-    #[cfg(test)]
     pub fn save_png(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
@@ -405,7 +404,6 @@ impl<A: soul_core::App> Harness<A> {
     /// Take a snapshot and compare with golden image.
     /// Panics on mismatch. Missing golden → write on first run and fail with message.
     /// Set UPDATE_SNAPSHOTS=1 environment variable to regenerate golden images.
-    #[cfg(test)]
     pub fn snapshot(&self, name: &str) {
         use std::path::PathBuf;
         
@@ -452,8 +450,6 @@ impl<A: soul_core::App> Harness<A> {
         }
     }
 
-    /// Helper to convert framebuffer to grayscale bytes for comparison.
-    #[cfg(test)]
     fn framebuffer_as_grayscale_bytes(&self) -> Vec<u8> {
         self.platform.display.buffer
             .iter()
@@ -461,8 +457,6 @@ impl<A: soul_core::App> Harness<A> {
             .collect()
     }
 
-    /// Helper to load a PNG file as grayscale bytes.
-    #[cfg(test)]
     fn load_png_as_grayscale_bytes(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         use std::fs::File;
         use std::io::BufReader;
