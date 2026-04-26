@@ -85,7 +85,7 @@ impl NativeKind {
 
     fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<soul_script::SystemRequest> {
         match self {
-            NativeKind::Launcher(l) => l.handle(event, ctx),
+            NativeKind::Launcher(l) => l.handle_event(event, ctx),
             NativeKind::Draw(d) => d.handle_event(event, ctx),
             NativeKind::Builder(b) => b.handle_event(event, ctx),
             NativeKind::Paint(p) => p.handle_event(event, ctx),

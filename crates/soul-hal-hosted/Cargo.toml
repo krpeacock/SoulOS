@@ -9,7 +9,7 @@ soul-hal.workspace = true
 soul-core.workspace = true
 embedded-graphics.workspace = true
 minifb = "0.28"
+png = "0.17"
 
 [dev-dependencies]
-png = "0.17"
 soul-runner = { path = "../soul-runner" }
