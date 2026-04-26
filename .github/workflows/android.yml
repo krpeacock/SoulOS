@@ -33,9 +33,19 @@ jobs:
       # (see https://github.com/actions/runner-images). cargo-apk wants
       # ANDROID_NDK_HOME for the toolchain and ANDROID_HOME for d8/aapt.
       ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install required Android SDK platform + build-tools
+        # cargo-apk demands the exact `platforms;android-N` matching
+        # `target_sdk_version` in Cargo.toml. The set preinstalled on
+        # ubuntu-latest rotates, so we install ours explicitly rather than
+        # hope it's already there.
+        run: |
+          set -eux
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "platforms;android-33" "build-tools;33.0.2"
 
       - name: Resolve NDK path
         run: |
