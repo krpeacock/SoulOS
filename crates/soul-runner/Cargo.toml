@@ -10,7 +10,12 @@ soul-core.workspace = true
 soul-ui.workspace = true
 soul-db.workspace = true
 soul-script = { path = "../soul-script" }
-soul-hal-hosted.workspace = true
 embedded-graphics.workspace = true
-env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 log = "0.4"
+
+# Desktop-only deps. The library half of this crate is platform-neutral
+# so it can be reused by `soul-runner-android`; only the binary needs the
+# minifb-backed hosted HAL and env_logger.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+soul-hal-hosted.workspace = true
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }

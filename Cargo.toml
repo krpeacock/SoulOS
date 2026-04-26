@@ -9,6 +9,20 @@ members = [
     "crates/soul-runner",
     "crates/soul-a11y",
     "crates/soul-script",
+    "crates/soul-hal-android",
+    "crates/soul-runner-android",
+]
+# Desktop builds (`cargo build`, `cargo check`, `cargo test`) skip the
+# Android crates — they only compile under `cargo apk` with the NDK on PATH.
+default-members = [
+    "crates/soul-hal",
+    "crates/soul-core",
+    "crates/soul-ui",
+    "crates/soul-db",
+    "crates/soul-hal-hosted",
+    "crates/soul-runner",
+    "crates/soul-a11y",
+    "crates/soul-script",
 ]
 
 [workspace.package]

@@ -1,0 +1,44 @@
+[package]
+name = "soul-runner-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+soul-runner = { path = "../soul-runner" }
+soul-hal-android = { path = "../soul-hal-android" }
+soul-core = { workspace = true }
+android-activity = { version = "0.6", features = ["native-activity"] }
+log = "0.4"
+
+# cargo-apk packaging metadata. The `assets` path is interpreted relative
+# to this crate's manifest; everything under it is dropped into the APK's
+# `assets/` directory verbatim and extracted at runtime by the bootstrap
+# in `soul-hal-android`.
+[package.metadata.android]
+package = "com.soulos.dev"
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
+assets = "../../assets"
+runtime_libs = "../../target/runtime-libs"
+
+[package.metadata.android.sdk]
+min_sdk_version = 24
+target_sdk_version = 33
+
+[package.metadata.android.application]
+label = "SoulOS"
+debuggable = true
+
+# NativeActivity, fullscreen, portrait — matches the 240×320 virtual canvas.
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.touchscreen"
+required = true
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|screenSize|keyboardHidden"
+launch_mode = "singleTask"
+orientation = "portrait"
+resizeable_activity = false

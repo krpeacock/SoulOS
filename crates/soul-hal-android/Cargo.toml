@@ -1,0 +1,20 @@
+[package]
+name = "soul-hal-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+soul-hal.workspace = true
+embedded-graphics.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+softbuffer = "0.4"
+ndk = "0.9"
+android_logger = "0.14"
+log = "0.4"
+raw-window-handle = "0.6"
