@@ -1,6 +1,6 @@
 //! Web `Platform` implementation: a 240×320 Gray8 framebuffer that
 //! blits to an HTML `<canvas>` via `ImageData`, plus mouse → stylus
-//! input wiring.
+//! and keyboard input wiring.
 //!
 //! Mirrors the structure of `soul-hal-hosted` (desktop minifb) and
 //! `soul-hal-android`: virtual buffer in 0x00RRGGBB packing, owned
@@ -18,9 +18,12 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
 };
-use soul_hal::{InputEvent, Platform};
+use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 use wasm_bindgen::{prelude::*, Clamped, JsCast};
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData, MouseEvent};
+use web_sys::{
+    CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement, ImageData, KeyboardEvent,
+    MouseEvent,
+};
 
 use soul_core::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -82,21 +85,25 @@ pub struct WebPlatform {
     ctx: CanvasRenderingContext2d,
     /// Scratch RGBA buffer reused each `flush` to feed `ImageData`.
     rgba: Vec<u8>,
-    /// Shared with mouse-event closures so they can enqueue input
+    /// Shared with all event closures so they can enqueue input
     /// without holding any borrow on `WebPlatform`.
     queue: Rc<RefCell<VecDeque<InputEvent>>>,
-    /// Closures live as long as the platform; `forget` would leak,
-    /// so we hold them so `remove_event_listener_*` could be wired
-    /// later if we ever tear the platform down.
+    /// Closures must be held so the JS GC doesn't collect them.
     _on_down: Closure<dyn FnMut(MouseEvent)>,
     _on_move: Closure<dyn FnMut(MouseEvent)>,
     _on_up: Closure<dyn FnMut(MouseEvent)>,
+    _on_keydown: Closure<dyn FnMut(KeyboardEvent)>,
+    _on_keyup: Closure<dyn FnMut(KeyboardEvent)>,
+    /// Catches characters from the mobile virtual keyboard. The
+    /// browser delivers IME-composed characters via `input` events on
+    /// a focused text field rather than `keydown`, so we keep a hidden
+    /// `<input>` in the DOM and forward its value to the queue.
+    _hidden_input: HtmlInputElement,
+    _on_input: Closure<dyn FnMut(web_sys::Event)>,
+    /// Focuses `_hidden_input` on canvas tap so the OS shows its
+    /// soft keyboard.
+    _on_canvas_focus: Closure<dyn FnMut(web_sys::Event)>,
     start_ms: f64,
-    /// Tracks whether the primary pointer is currently down. Read by
-    /// the mouse-event closures (move events fire constantly and we
-    /// only forward them while the button is held, matching StylusMove
-    /// semantics); the field exists on the struct to keep the Rc alive
-    /// for the closures' lifetime.
     _pointer_down: Rc<RefCell<bool>>,
 }
 
@@ -127,9 +134,31 @@ impl WebPlatform {
         let queue: Rc<RefCell<VecDeque<InputEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
         let pointer_down: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-        let on_down = mouse_listener(&canvas, &queue, &pointer_down, EventKind::Down)?;
-        let on_move = mouse_listener(&canvas, &queue, &pointer_down, EventKind::Move)?;
-        let on_up = mouse_listener(&canvas, &queue, &pointer_down, EventKind::Up)?;
+        let on_down = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Down)?;
+        let on_move = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Move)?;
+        let on_up = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Up)?;
+
+        // Hidden off-screen text field: focused on canvas tap so the OS
+        // virtual keyboard appears. Its `input` event delivers chars that
+        // mobile IMEs bypass `keydown` for.
+        let hidden_input: HtmlInputElement = document
+            .create_element("input")?
+            .dyn_into()?;
+        hidden_input.set_attribute("type", "text")?;
+        // Positioned off-screen so it never renders, but still focusable.
+        hidden_input.set_attribute(
+            "style",
+            "position:absolute;opacity:0;top:-9999px;left:-9999px;width:1px;height:1px;",
+        )?;
+        document
+            .body()
+            .ok_or_else(|| JsValue::from_str("no body"))?
+            .append_child(&hidden_input)?;
+
+        let on_keydown = keyboard_listener(&window, &queue, KeyKind::Down)?;
+        let on_keyup = keyboard_listener(&window, &queue, KeyKind::Up)?;
+        let on_input = input_listener(&hidden_input, &queue)?;
+        let on_canvas_focus = focus_listener(&canvas, &hidden_input)?;
 
         let start_ms = window
             .performance()
@@ -145,6 +174,11 @@ impl WebPlatform {
             _on_down: on_down,
             _on_move: on_move,
             _on_up: on_up,
+            _on_keydown: on_keydown,
+            _on_keyup: on_keyup,
+            _hidden_input: hidden_input,
+            _on_input: on_input,
+            _on_canvas_focus: on_canvas_focus,
             start_ms,
             _pointer_down: pointer_down,
         })
@@ -204,8 +238,10 @@ impl Platform for WebPlatform {
     }
 }
 
+// ── Mouse ────────────────────────────────────────────────────────────────────
+
 #[derive(Copy, Clone)]
-enum EventKind {
+enum MouseKind {
     Down,
     Move,
     Up,
@@ -215,7 +251,7 @@ fn mouse_listener(
     canvas: &HtmlCanvasElement,
     queue: &Rc<RefCell<VecDeque<InputEvent>>>,
     pointer_down: &Rc<RefCell<bool>>,
-    kind: EventKind,
+    kind: MouseKind,
 ) -> Result<Closure<dyn FnMut(MouseEvent)>, JsValue> {
     let queue = queue.clone();
     let pointer_down = pointer_down.clone();
@@ -235,15 +271,15 @@ fn mouse_listener(
         let mut q = queue.borrow_mut();
         let mut down = pointer_down.borrow_mut();
         match kind {
-            EventKind::Down => {
+            MouseKind::Down => {
                 *down = true;
                 q.push_back(InputEvent::StylusDown { x, y });
             }
-            EventKind::Move if *down => {
+            MouseKind::Move if *down => {
                 q.push_back(InputEvent::StylusMove { x, y });
             }
-            EventKind::Move => {}
-            EventKind::Up => {
+            MouseKind::Move => {}
+            MouseKind::Up => {
                 if *down {
                     q.push_back(InputEvent::StylusUp { x, y });
                     *down = false;
@@ -253,10 +289,142 @@ fn mouse_listener(
     }) as Box<dyn FnMut(MouseEvent)>);
 
     let event_name = match kind {
-        EventKind::Down => "mousedown",
-        EventKind::Move => "mousemove",
-        EventKind::Up => "mouseup",
+        MouseKind::Down => "mousedown",
+        MouseKind::Move => "mousemove",
+        MouseKind::Up => "mouseup",
     };
     canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
     Ok(closure)
+}
+
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone)]
+enum KeyKind {
+    Down,
+    Up,
+}
+
+fn keyboard_listener(
+    window: &web_sys::Window,
+    queue: &Rc<RefCell<VecDeque<InputEvent>>>,
+    kind: KeyKind,
+) -> Result<Closure<dyn FnMut(KeyboardEvent)>, JsValue> {
+    let queue = queue.clone();
+    let closure = Closure::wrap(Box::new(move |event: KeyboardEvent| {
+        let key = event.key();
+        match kind {
+            KeyKind::Down => {
+                if let Some(button) = key_to_hard_button(&key) {
+                    // Suppress OS auto-repeat for hard button presses.
+                    if !event.repeat() {
+                        queue.borrow_mut().push_back(InputEvent::ButtonDown(button));
+                    }
+                    event.prevent_default();
+                } else if let Some(kc) = key_to_keycode(&key) {
+                    queue.borrow_mut().push_back(InputEvent::Key(kc));
+                    // prevent_default stops:
+                    //  - arrow/page keys from scrolling the page
+                    //  - tab from shifting focus out of the hidden input
+                    //  - printable chars from reaching the hidden input
+                    //    (which would fire an `input` event and
+                    //     double-deliver the character)
+                    event.prevent_default();
+                }
+                // key == "Process" or "Unidentified" means the mobile
+                // IME is composing; don't prevent_default so the char
+                // reaches the hidden input's `input` listener.
+            }
+            KeyKind::Up => {
+                if let Some(button) = key_to_hard_button(&key) {
+                    queue.borrow_mut().push_back(InputEvent::ButtonUp(button));
+                    event.prevent_default();
+                }
+            }
+        }
+    }) as Box<dyn FnMut(KeyboardEvent)>);
+
+    let event_name = match kind {
+        KeyKind::Down => "keydown",
+        KeyKind::Up => "keyup",
+    };
+    window.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
+    Ok(closure)
+}
+
+/// Drain chars from the hidden input element. Fires when the mobile
+/// virtual keyboard commits a character through the DOM `input` event
+/// rather than via `keydown` (which we intercept for printable chars
+/// on physical keyboards via `prevent_default`).
+fn input_listener(
+    input: &HtmlInputElement,
+    queue: &Rc<RefCell<VecDeque<InputEvent>>>,
+) -> Result<Closure<dyn FnMut(web_sys::Event)>, JsValue> {
+    let queue = queue.clone();
+    let input_ref = input.clone();
+    let closure = Closure::wrap(Box::new(move |_ev: web_sys::Event| {
+        let value = input_ref.value();
+        if !value.is_empty() {
+            let mut q = queue.borrow_mut();
+            for c in value.chars() {
+                q.push_back(InputEvent::Key(KeyCode::Char(c)));
+            }
+            // Clear so the next `input` event only contains the new delta.
+            input_ref.set_value("");
+        }
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    input.add_event_listener_with_callback("input", closure.as_ref().unchecked_ref())?;
+    Ok(closure)
+}
+
+/// Register mousedown + touchstart on the canvas to keep the hidden
+/// input focused, which is what tells the OS to display its virtual
+/// keyboard on mobile devices.
+fn focus_listener(
+    canvas: &HtmlCanvasElement,
+    hidden_input: &HtmlInputElement,
+) -> Result<Closure<dyn FnMut(web_sys::Event)>, JsValue> {
+    let input_ref = hidden_input.clone();
+    let closure = Closure::wrap(Box::new(move |_ev: web_sys::Event| {
+        let _ = input_ref.focus();
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    let fn_ref: &js_sys::Function = closure.as_ref().unchecked_ref();
+    canvas.add_event_listener_with_callback("mousedown", fn_ref)?;
+    canvas.add_event_listener_with_callback("touchstart", fn_ref)?;
+    Ok(closure)
+}
+
+// ── Key translation ───────────────────────────────────────────────────────────
+
+fn key_to_hard_button(key: &str) -> Option<HardButton> {
+    Some(match key {
+        "Escape" => HardButton::Power,
+        "F1" => HardButton::AppA,
+        "F2" => HardButton::AppB,
+        "F3" => HardButton::AppC,
+        "F4" => HardButton::AppD,
+        // F5 and the named Home key both map to the Home hard button,
+        // matching the desktop HAL's mapping.
+        "F5" | "Home" => HardButton::Home,
+        "F6" => HardButton::Menu,
+        "PageUp" => HardButton::PageUp,
+        "PageDown" => HardButton::PageDown,
+        _ => return None,
+    })
+}
+
+fn key_to_keycode(key: &str) -> Option<KeyCode> {
+    Some(match key {
+        "Backspace" => KeyCode::Backspace,
+        "Enter" => KeyCode::Enter,
+        "Tab" => KeyCode::Tab,
+        "ArrowLeft" => KeyCode::ArrowLeft,
+        "ArrowRight" => KeyCode::ArrowRight,
+        "ArrowUp" => KeyCode::ArrowUp,
+        "ArrowDown" => KeyCode::ArrowDown,
+        // The browser already resolves shift/caps/alt modifiers into the
+        // correct Unicode scalar, so a single-char key string maps directly.
+        k if k.chars().count() == 1 => KeyCode::Char(k.chars().next().unwrap()),
+        _ => return None,
+    })
 }

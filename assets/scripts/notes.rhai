@@ -74,7 +74,7 @@ fn on_event(event) {
     if event.type == "PenDown" {
         // EGUI handles its own PenDown events if consumed
         if event.y >= 205 {
-            handle_pen(keyboard, event.x, event.y, true);
+            handle_pen(kb, event.x, event.y, true);
         } else {
             area.pen_down(event.x, event.y, event.now_ms);
         }
@@ -83,7 +83,7 @@ fn on_event(event) {
 
     if event.type == "PenMove" {
         if event.y >= 205 {
-            handle_pen(keyboard, event.x, event.y, true);
+            handle_pen(kb, event.x, event.y, true);
         } else {
             area.pen_move(event.x, event.y);
         }
@@ -92,7 +92,7 @@ fn on_event(event) {
 
     if event.type == "PenUp" {
         if event.y >= 205 {
-            let key = handle_pen(keyboard, event.x, event.y, false);
+            let key = handle_pen(kb, event.x, event.y, false);
             if key != "" {
                 if key == "Backspace" {
                     area.backspace();
