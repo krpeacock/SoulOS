@@ -5,6 +5,7 @@
 //! into `soul_core::run` with their respective `Platform` impls.
 
 pub mod builder;
+pub mod calculator;
 pub mod draw;
 pub mod egui_demo;
 pub mod launcher;
@@ -28,6 +29,7 @@ use soul_ui::{hit_test, BLACK, WHITE};
 use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
+use calculator::Calculator;
 use draw::Draw;
 use egui_demo::EguiDemo;
 use launcher::Launcher;
@@ -48,6 +50,7 @@ const HOME_APP_ID: &str = Launcher::APP_ID;
 /// straight through with zero indirection or intermediate buffer.
 pub(crate) enum NativeKind {
     Launcher(Launcher),
+    Calculator(Calculator),
     Draw(Box<Draw>),
     Builder(MobileBuilder),
     Paint(Paint),
@@ -57,21 +60,23 @@ pub(crate) enum NativeKind {
 impl NativeKind {
     fn app_id(&self) -> &str {
         match self {
-            NativeKind::Launcher(_) => Launcher::APP_ID,
-            NativeKind::Draw(_) => Draw::APP_ID,
-            NativeKind::Builder(_) => MobileBuilder::APP_ID,
-            NativeKind::Paint(_) => Paint::APP_ID,
-            NativeKind::EguiDemo(_) => EguiDemo::APP_ID,
+            NativeKind::Launcher(_)   => Launcher::APP_ID,
+            NativeKind::Calculator(_) => Calculator::APP_ID,
+            NativeKind::Draw(_)       => Draw::APP_ID,
+            NativeKind::Builder(_)    => MobileBuilder::APP_ID,
+            NativeKind::Paint(_)      => Paint::APP_ID,
+            NativeKind::EguiDemo(_)   => EguiDemo::APP_ID,
         }
     }
 
     fn name(&self) -> &str {
         match self {
-            NativeKind::Launcher(_) => Launcher::NAME,
-            NativeKind::Draw(_) => Draw::NAME,
-            NativeKind::Builder(_) => MobileBuilder::NAME,
-            NativeKind::Paint(_) => Paint::NAME,
-            NativeKind::EguiDemo(_) => EguiDemo::NAME,
+            NativeKind::Launcher(_)   => Launcher::NAME,
+            NativeKind::Calculator(_) => Calculator::NAME,
+            NativeKind::Draw(_)       => Draw::NAME,
+            NativeKind::Builder(_)    => MobileBuilder::NAME,
+            NativeKind::Paint(_)      => Paint::NAME,
+            NativeKind::EguiDemo(_)   => EguiDemo::NAME,
         }
     }
 
@@ -79,54 +84,56 @@ impl NativeKind {
     /// Launcher returns `None` — it is not listed in the app registry.
     fn icon_stem(&self) -> Option<&str> {
         match self {
-            NativeKind::Launcher(_) => None,
-            NativeKind::Draw(_) => Some("draw"),
-            NativeKind::Builder(_) => Some("builder"),
-            NativeKind::Paint(_) => Some("paint"),
-            NativeKind::EguiDemo(_) => Some("egui_demo"),
+            NativeKind::Launcher(_)   => None,
+            NativeKind::Calculator(_) => Some("calc"),
+            NativeKind::Draw(_)       => Some("draw"),
+            NativeKind::Builder(_)    => Some("builder"),
+            NativeKind::Paint(_)      => Some("paint"),
+            NativeKind::EguiDemo(_)   => Some("egui_demo"),
         }
     }
 
     fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<soul_script::SystemRequest> {
         match self {
-            NativeKind::Launcher(l) => l.handle_event(event, ctx),
-            NativeKind::Draw(d) => d.handle_event(event, ctx),
-            NativeKind::Builder(b) => b.handle_event(event, ctx),
-            NativeKind::Paint(p) => p.handle_event(event, ctx),
-            NativeKind::EguiDemo(e) => {
-                e.handle(event, ctx);
-                None
-            }
+            NativeKind::Launcher(l)   => l.handle_event(event, ctx),
+            NativeKind::Calculator(c) => { c.handle(event, ctx); None }
+            NativeKind::Draw(d)       => d.handle_event(event, ctx),
+            NativeKind::Builder(b)    => b.handle_event(event, ctx),
+            NativeKind::Paint(p)      => p.handle_event(event, ctx),
+            NativeKind::EguiDemo(e)   => { e.handle(event, ctx); None }
         }
     }
 
     fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         match self {
-            NativeKind::Launcher(l) => l.draw(canvas, dirty),
-            NativeKind::Draw(d) => d.draw(canvas, dirty),
-            NativeKind::Builder(b) => b.draw(canvas, dirty),
-            NativeKind::Paint(p) => p.draw(canvas, dirty),
-            NativeKind::EguiDemo(e) => e.draw(canvas, dirty),
+            NativeKind::Launcher(l)   => l.draw(canvas, dirty),
+            NativeKind::Calculator(c) => c.draw(canvas, dirty),
+            NativeKind::Draw(d)       => d.draw(canvas, dirty),
+            NativeKind::Builder(b)    => b.draw(canvas, dirty),
+            NativeKind::Paint(p)      => p.draw(canvas, dirty),
+            NativeKind::EguiDemo(e)   => e.draw(canvas, dirty),
         }
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
         match self {
-            NativeKind::Launcher(l) => l.a11y_nodes(),
-            NativeKind::Draw(d) => d.a11y_nodes(),
-            NativeKind::Builder(b) => b.a11y_nodes(),
-            NativeKind::Paint(p) => p.a11y_nodes(),
-            NativeKind::EguiDemo(e) => e.a11y_nodes(),
+            NativeKind::Launcher(l)   => l.a11y_nodes(),
+            NativeKind::Calculator(c) => c.a11y_nodes(),
+            NativeKind::Draw(d)       => d.a11y_nodes(),
+            NativeKind::Builder(b)    => b.a11y_nodes(),
+            NativeKind::Paint(p)      => p.a11y_nodes(),
+            NativeKind::EguiDemo(e)   => e.a11y_nodes(),
         }
     }
 
     fn persist(&mut self) {
         match self {
-            NativeKind::Launcher(_) => {}
-            NativeKind::Draw(d) => d.persist(),
-            NativeKind::Builder(b) => b.persist(),
-            NativeKind::Paint(p) => p.persist(),
-            NativeKind::EguiDemo(e) => e.persist(),
+            NativeKind::Launcher(_)   => {}
+            NativeKind::Calculator(c) => c.persist(),
+            NativeKind::Draw(d)       => d.persist(),
+            NativeKind::Builder(b)    => b.persist(),
+            NativeKind::Paint(p)      => p.persist(),
+            NativeKind::EguiDemo(e)   => e.persist(),
         }
     }
 }
@@ -155,6 +162,7 @@ enum AppKind {
         script: &'static str,
         db: &'static str,
     },
+    Calculator,
     Draw {
         db: &'static str,
     },
@@ -211,10 +219,7 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         handles: &[],
     },
     AppDescriptor {
-        kind: AppKind::Scripted {
-            script: "assets/scripts/calc.rhai",
-            db: ".soulos/calc.sdb",
-        },
+        kind: AppKind::Calculator,
         handles: &[],
     },
     AppDescriptor {
@@ -317,6 +322,9 @@ impl AppSlot {
                         }
                     }
                 }
+            }
+            AppKind::Calculator => {
+                AppSlot::Native(NativeKind::Calculator(Calculator::new()))
             }
             AppKind::Draw { db } => {
                 AppSlot::Native(NativeKind::Draw(Box::new(Draw::new(PathBuf::from(db)))))
