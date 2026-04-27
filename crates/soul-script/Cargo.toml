@@ -12,11 +12,21 @@ std = ["rhai/std"]
 soul-core = { workspace = true }
 soul-ui = { workspace = true }
 soul-db = { workspace = true }
-rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float"] }
 serde.workspace = true
 serde_json.workspace = true
 embedded-graphics.workspace = true
 egui.workspace = true
+
+# rhai gates its own `no_std` feature behind a `compile_error!` for
+# `target_arch = "wasm32"`, so we pick per-target: outside wasm we
+# keep the no_std build (this crate stays usable from a future bare-
+# metal target); on wasm rhai uses its std build, which compiles
+# cleanly because wasm has std.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rhai = { version = "1.24", default-features = false, features = ["no_std", "only_i32", "no_float"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rhai = { version = "1.24", default-features = false, features = ["only_i32", "no_float"] }
 
 [dev-dependencies]
 soul-hal-hosted = { path = "../soul-hal-hosted" }

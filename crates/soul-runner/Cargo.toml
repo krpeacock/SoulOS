@@ -18,8 +18,10 @@ embedded-graphics.workspace = true
 log = "0.4"
 
 # Desktop-only deps. The library half of this crate is platform-neutral
-# so it can be reused by `soul-runner-android`; only the binary needs the
-# minifb-backed hosted HAL and env_logger.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# so it can be reused by `soul-runner-android` and `soul-runner-web`;
+# only the desktop binary needs the minifb-backed hosted HAL and
+# env_logger. Both depend transitively on `std::fs` / threading,
+# which makes them unsuitable for the wasm target as well.
+[target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
 soul-hal-hosted.workspace = true
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }

@@ -4,6 +4,7 @@
 //! (`soul-runner-android`) construct the same `Host` here and feed it
 //! into `soul_core::run` with their respective `Platform` impls.
 
+pub mod assets;
 pub mod builder;
 pub mod calculator;
 pub mod draw;
@@ -287,13 +288,13 @@ impl AppSlot {
                     .and_then(|s| s.to_str())
                     .unwrap_or("app");
                 let db_path = PathBuf::from(db);
-                let script_src = std::fs::read_to_string(script).unwrap_or_else(|e| {
+                let script_src = assets::read_to_string(script).unwrap_or_else(|e| {
                     log::error!("Failed to load {}: {}", script, e);
                     format!(
                         "fn on_draw() {{ title_bar(\"Load Error\"); }} fn on_event(_ev) {{}}"
                     )
                 });
-                let soul_db = if let Ok(bytes) = std::fs::read(&db_path) {
+                let soul_db = if let Ok(bytes) = assets::read(&db_path) {
                     soul_db::Database::decode(&bytes)
                         .unwrap_or_else(|| soul_db::Database::new(script_stem))
                 } else {
@@ -403,7 +404,7 @@ impl AppSlot {
         match self {
             AppSlot::Scripted { app, db_path } => {
                 if !db_path.as_os_str().is_empty() {
-                    let _ = std::fs::write(db_path, app.db.encode());
+                    let _ = assets::write(db_path, &app.db.encode());
                 }
             }
             AppSlot::Native(n) => n.persist(),

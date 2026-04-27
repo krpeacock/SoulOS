@@ -64,12 +64,19 @@ trunk serve
 ```
 
 Then open <http://127.0.0.1:8080>. A 240×320 SoulOS canvas renders
-on a black page; pointer input, dirty-rect redraw, and the `soul-core`
-event loop are all wired through the same way as the desktop and
-Android runners. The current app is a small placeholder (title bar,
-welcome text, a "Tap me" button, system strip) — once wasm asset
-loading is in place the full Host can drop in unchanged, since
-`soul_core::run`-equivalent driving doesn't care which `App` it owns.
+on a black page running the full `Host` — the Launcher, the native
+apps (Calculator, Draw, Paint, Builder, EguiDemo) and every Rhai
+scripted app (Notes, Address, Date, ToDo, Mail, Prefs, Sync,
+Launcher 2, EguiDemo). Pointer input, dirty-rect redraw, and the
+`soul-core` event loop are wired through the same way as the desktop
+and Android runners.
+
+Scripts and icons under `assets/` are embedded into the wasm bundle
+at compile time via `crates/soul-runner/src/assets.rs`, so the build
+needs no asset-fetching infrastructure. Database paths
+(`.soulos/*.sdb`) are non-persistent on the web target — state is
+in-memory for the page session and is reset on reload. (LocalStorage
+persistence can layer on later without touching call sites.)
 
 A one-shot release build (output in `dist/`) is:
 

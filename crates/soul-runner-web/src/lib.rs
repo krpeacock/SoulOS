@@ -10,7 +10,6 @@
 
 extern crate alloc;
 
-mod app;
 mod platform;
 
 use alloc::boxed::Box;
@@ -25,9 +24,9 @@ use embedded_graphics::{
 };
 use soul_core::{a11y::A11yManager, App, Ctx, Dirty, Event};
 use soul_hal::{InputEvent, Platform};
+use soul_runner::Host;
 use wasm_bindgen::{prelude::*, JsCast};
 
-use app::WelcomeApp;
 use platform::WebPlatform;
 
 const CANVAS_ID: &str = "soulos-canvas";
@@ -43,7 +42,7 @@ fn request_animation_frame(f: &Closure<dyn FnMut()>) {
 
 struct RunState {
     platform: WebPlatform,
-    app: WelcomeApp,
+    app: Host,
     dirty: Dirty,
     a11y: A11yManager,
     quit: bool,
@@ -54,7 +53,7 @@ pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
 
     let platform = WebPlatform::new(CANVAS_ID)?;
-    let mut app = WelcomeApp::new();
+    let mut app = Host::new();
     let mut dirty = Dirty::full();
     let mut a11y = A11yManager::new();
 
