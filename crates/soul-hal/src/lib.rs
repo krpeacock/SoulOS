@@ -99,8 +99,31 @@ pub enum InputEvent {
     ButtonUp(HardButton),
     /// A typing-keyboard key was pressed (repeats on hold).
     Key(KeyCode),
+    /// A standard editing intent (Cut / Copy / Paste / Select-All)
+    /// resolved by the platform — e.g. from a Ctrl+letter combo on
+    /// the host keyboard. Apps almost never see this directly: the
+    /// shell intercepts and routes it to the focused edit target.
+    EditIntent(EditIntent),
     /// The platform requests shutdown (e.g., window closed).
     Quit,
+}
+
+/// Standard editing intents produced by the platform.
+///
+/// Modeled as an explicit set so the HAL can map platform-specific
+/// gestures (Ctrl+C, ⌘C, dedicated buttons, accessibility commands)
+/// to the same semantic event the shell consumes. Adding new intents
+/// here is the canonical way to extend the edit menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditIntent {
+    /// Copy current selection to the clipboard.
+    Copy,
+    /// Copy current selection and remove it from the source.
+    Cut,
+    /// Insert the clipboard content at the cursor / over the selection.
+    Paste,
+    /// Extend selection to cover everything.
+    SelectAll,
 }
 
 /// A typing-keyboard key, either a printable character or a named

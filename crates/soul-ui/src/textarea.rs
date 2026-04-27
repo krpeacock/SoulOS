@@ -46,7 +46,7 @@
 //! // }
 //! ```
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use embedded_graphics::{
@@ -58,7 +58,9 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 
+use crate::editmenu::{EditOutput, EditTarget};
 use crate::palette::{BLACK, WHITE};
+use soul_core::ExchangePayload;
 
 const CHAR_W: i32 = 5;
 const LINE_H: i32 = 10;
@@ -698,4 +700,79 @@ fn word_range(buffer: &str, pos: usize) -> (usize, usize) {
         }
     }
     (start, end)
+}
+
+// --- EditTarget integration -------------------------------------------------
+//
+// TextArea is a text-only edit target.  It produces and consumes only
+// [`ExchangePayload::Text`]; bitmap and resource payloads are silently
+// ignored on paste (and reported as such by `accepts_paste` so the menu
+// can grey out the Paste item).
+
+impl TextArea {
+    /// Byte range of the current selection, if non-empty.
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let (lo, hi) = (anchor.min(self.cursor), anchor.max(self.cursor));
+        (lo != hi).then_some((lo, hi))
+    }
+}
+
+impl EditTarget for TextArea {
+    fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    fn copy_selection(&self) -> Option<ExchangePayload> {
+        let (lo, hi) = self.selection_range()?;
+        Some(ExchangePayload::from_text(self.buffer[lo..hi].to_string()))
+    }
+
+    fn cut_selection(&mut self) -> EditOutput {
+        let Some(payload) = self.copy_selection() else {
+            return EditOutput::default();
+        };
+        // delete_selection is private; use it the same way backspace does.
+        self.delete_selection();
+        self.recompute_layout();
+        self.ensure_cursor_visible();
+        EditOutput {
+            dirty: Some(self.area),
+            text_changed: true,
+            clipboard: Some(payload),
+        }
+    }
+
+    fn paste(&mut self, payload: &ExchangePayload) -> EditOutput {
+        let Some(text) = payload.as_text() else {
+            return EditOutput::default();
+        };
+        if text.is_empty() {
+            return EditOutput::default();
+        }
+        let out = self.insert_str(text);
+        EditOutput {
+            dirty: out.dirty,
+            text_changed: out.text_changed,
+            clipboard: None,
+        }
+    }
+
+    fn accepts_paste(&self, payload: &ExchangePayload) -> bool {
+        payload.as_text().is_some()
+    }
+
+    fn select_all(&mut self) -> EditOutput {
+        if self.buffer.is_empty() {
+            return EditOutput::default();
+        }
+        self.anchor = Some(0);
+        self.cursor = self.buffer.len();
+        self.ensure_cursor_visible();
+        EditOutput {
+            dirty: Some(self.area),
+            text_changed: false,
+            clipboard: None,
+        }
+    }
 }

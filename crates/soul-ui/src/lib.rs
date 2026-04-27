@@ -73,6 +73,7 @@
 extern crate alloc;
 
 pub mod builder;
+pub mod editmenu;
 pub mod egui_bridge;
 pub mod egui_integration;
 pub mod egui_layout;
@@ -94,6 +95,7 @@ mod tests;
 /// Convenience re-exports for apps that prefer one glob import.
 pub mod prelude {
     pub use crate::builder::*;
+    pub use crate::editmenu::{EditMenu, EditOutput, EditTarget};
     pub use crate::egui_bridge::*;
     pub use crate::egui_integration::*;
     pub use crate::egui_layout::*;
@@ -111,6 +113,7 @@ pub mod prelude {
 }
 
 pub use builder::*;
+pub use editmenu::{EditMenu, EditOutput, EditTarget};
 pub use egui_bridge::*;
 pub use egui_integration::*;
 pub use egui_layout::*;

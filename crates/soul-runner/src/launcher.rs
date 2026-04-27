@@ -138,94 +138,89 @@ impl Launcher {
             self.picker_mode = false;
             Some(SystemRequest::SendResult {
                 action: "return_app".to_string(),
-                payload: soul_core::ExchangePayload::Text(entry.app_id.clone()),
+                payload: soul_core::ExchangePayload::from_text(entry.app_id.clone()),
             })
         } else {
             Some(SystemRequest::LaunchById(entry.app_id.clone()))
         }
     }
 
-    // --- Background resource management ---------------------------------
+    // --- Resource management (called directly by the Host for
+    //     GetResource / SetResource SystemRequests) ------------------------
 
-    fn handle_get_resource(&self, app_id: &str, kind: &str) -> Option<SystemRequest> {
+    /// Fetch a resource owned by `app_id`. Returns the payload to deliver
+    /// back to the requester via `Event::ResourceResult`.
+    pub fn get_resource(&mut self, app_id: &str, kind: &str) -> soul_core::ExchangePayload {
+        if self.apps.is_empty() {
+            self.refresh_app_list();
+        }
         match kind {
             "icon" => {
-                let entry = self.apps.iter().find(|e| e.app_id == app_id)?;
                 let cell = ICON_CELL as u16;
-                Some(SystemRequest::SendResult {
-                    action: "return_resource".to_string(),
-                    payload: soul_core::ExchangePayload::Resource {
-                        app_id: app_id.to_string(),
-                        kind: "icon".to_string(),
-                        width: cell,
-                        height: cell,
-                        pixels: entry.icon.clone(),
-                        text: String::new(),
-                    },
-                })
+                let pixels = self
+                    .apps
+                    .iter()
+                    .find(|e| e.app_id == app_id)
+                    .map(|e| e.icon.clone())
+                    .unwrap_or_default();
+                let bm = soul_core::Bitmap::from_pixels(cell, cell, pixels)
+                    .unwrap_or_else(|| soul_core::Bitmap::new(cell, cell));
+                soul_core::ExchangePayload::from_bitmap(&bm)
             }
             "script" => {
-                // Load script source from the registered app list.
                 let src = soul_script::app_list()
                     .iter()
                     .find(|e| e.app_id == app_id)
                     .and_then(|e| {
-                        // app_list icon_stem is the only path-adjacent field we have;
-                        // for now derive script path from the assets convention.
-                        // TODO: replace with resource DB lookup.
                         let stem = e.icon_stem.as_str();
-                        let path = if stem.is_empty() {
+                        if stem.is_empty() {
                             return None;
-                        } else {
-                            std::path::PathBuf::from("assets/scripts")
-                                .join(format!("{stem}.rhai"))
-                        };
+                        }
+                        let path = std::path::PathBuf::from("assets/scripts")
+                            .join(format!("{stem}.rhai"));
                         std::fs::read_to_string(&path).ok()
                     })
                     .unwrap_or_default();
-                Some(SystemRequest::SendResult {
-                    action: "return_resource".to_string(),
-                    payload: soul_core::ExchangePayload::Resource {
-                        app_id: app_id.to_string(),
-                        kind: "script".to_string(),
-                        width: 0,
-                        height: 0,
-                        pixels: vec![],
-                        text: src,
-                    },
-                })
+                soul_core::ExchangePayload::from_text(src)
             }
             _ => {
                 log::warn!("launcher: unknown resource kind '{kind}' requested for '{app_id}'");
-                None
+                soul_core::ExchangePayload::empty()
             }
         }
     }
 
-    fn handle_set_resource(
+    /// Persist a resource for `app_id`. The payload type is inferred from
+    /// the resource kind (icon = bitmap, script = text).
+    pub fn set_resource(
         &mut self,
         app_id: &str,
         kind: &str,
-        width: u16,
-        height: u16,
-        pixels: Vec<u8>,
-        _text: String,
+        payload: soul_core::ExchangePayload,
     ) {
+        if self.apps.is_empty() {
+            self.refresh_app_list();
+        }
         match kind {
             "icon" => {
+                let Some(bm) = payload.as_bitmap() else {
+                    log::warn!("launcher: set_resource icon: no bitmap representation");
+                    return;
+                };
                 if let Some(entry) = self.apps.iter_mut().find(|e| e.app_id == app_id) {
-                    entry.icon = pixels.clone();
+                    entry.icon = bm.pixels.clone();
                 }
-                // Persist the updated icon back to the PGM file so it survives restart.
                 let stem = soul_script::app_list()
                     .iter()
                     .find(|e| e.app_id == app_id)
                     .map(|e| e.icon_stem.clone())
                     .unwrap_or_default();
-                if !stem.is_empty() && width > 0 && height > 0 {
+                if !stem.is_empty() && bm.width > 0 && bm.height > 0 {
                     let path = std::path::PathBuf::from("assets/sprites")
                         .join(format!("{stem}_icon.pgm"));
-                    if let Err(e) = save_pgm(&path, width as usize, height as usize, &pixels) {
+                    if let Err(e) =
+                        save_pgm(&path, bm.width as usize, bm.height as usize, &bm.pixels)
+                    {
                         log::warn!("launcher: could not save icon for '{app_id}': {e}");
                     } else {
                         log::info!("launcher: saved icon for '{app_id}' → {}", path.display());
@@ -233,20 +228,26 @@ impl Launcher {
                 }
             }
             "script" => {
-                // Write the script source back to the .rhai file on disk.
+                let Some(text) = payload.as_text() else {
+                    log::warn!("launcher: set_resource script: no text representation");
+                    return;
+                };
                 let path = soul_script::app_list()
                     .iter()
                     .find(|e| e.app_id == app_id)
                     .and_then(|e| {
                         let stem = e.icon_stem.as_str();
-                        if stem.is_empty() { None }
-                        else {
-                            Some(std::path::PathBuf::from("assets/scripts")
-                                .join(format!("{stem}.rhai")))
+                        if stem.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                std::path::PathBuf::from("assets/scripts")
+                                    .join(format!("{stem}.rhai")),
+                            )
                         }
                     });
                 if let Some(p) = path {
-                    if let Err(e) = std::fs::write(&p, _text.as_bytes()) {
+                    if let Err(e) = std::fs::write(&p, text.as_bytes()) {
                         log::warn!("launcher: could not save script for '{app_id}': {e}");
                     } else {
                         log::info!("launcher: saved script for '{app_id}' → {}", p.display());
@@ -290,35 +291,13 @@ impl Launcher {
             Event::ButtonDown(HardButton::AppB) => self.activate_display_idx(1),
             Event::ButtonDown(HardButton::AppC) => self.activate_display_idx(2),
             Event::ButtonDown(HardButton::AppD) => self.activate_display_idx(3),
-            Event::Exchange { action, payload, .. } => match action.as_str() {
+            Event::Exchange { action, .. } => match action.as_str() {
                 "pick_app" => {
                     self.picker_mode = true;
                     if self.apps.is_empty() {
                         self.refresh_app_list();
                     }
                     ctx.invalidate_all();
-                    None
-                }
-                "get_resource" => {
-                    if let soul_core::ExchangePayload::Resource { app_id, kind, .. } = payload {
-                        // Ensure the app list is populated before serving requests.
-                        if self.apps.is_empty() {
-                            self.refresh_app_list();
-                        }
-                        return self.handle_get_resource(&app_id, &kind);
-                    }
-                    None
-                }
-                "set_resource" => {
-                    if let soul_core::ExchangePayload::Resource {
-                        app_id, kind, width, height, pixels, text,
-                    } = payload
-                    {
-                        if self.apps.is_empty() {
-                            self.refresh_app_list();
-                        }
-                        self.handle_set_resource(&app_id, &kind, width, height, pixels, text);
-                    }
                     None
                 }
                 _ => None,

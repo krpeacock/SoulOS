@@ -13,7 +13,9 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 
+use crate::editmenu::{EditOutput, EditTarget};
 use crate::{BLACK, GRAY, WHITE};
+use soul_core::ExchangePayload;
 
 /// Tracks text selection state and handles user interaction.
 #[derive(Clone, Debug)]
@@ -251,6 +253,39 @@ impl SelectableText {
             }
 
             current_char = line_end + 1; // +1 for conceptual newline
+        }
+    }
+}
+
+// --- EditTarget integration -------------------------------------------------
+//
+// SelectableText is read-only: it implements `copy_selection` and
+// `select_all`, but `cut_selection` and `paste` remain the trait's
+// no-op defaults.  `accepts_paste` returns `false` so the menu
+// greys out the Paste item when this widget is focused.
+
+impl EditTarget for SelectableText {
+    fn has_selection(&self) -> bool {
+        match (self.selection_start, self.selection_end) {
+            (Some(s), Some(e)) => s != e,
+            _ => false,
+        }
+    }
+
+    fn copy_selection(&self) -> Option<ExchangePayload> {
+        self.selected_text().map(ExchangePayload::from_text)
+    }
+
+    fn select_all(&mut self) -> EditOutput {
+        if self.text.is_empty() {
+            return EditOutput::default();
+        }
+        self.selection_start = Some(0);
+        self.selection_end = Some(self.text.len());
+        EditOutput {
+            dirty: Some(self.area),
+            text_changed: false,
+            clipboard: None,
         }
     }
 }

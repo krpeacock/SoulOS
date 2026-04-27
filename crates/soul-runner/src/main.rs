@@ -5,6 +5,7 @@ mod draw;
 mod egui_demo;
 mod launcher;
 mod paint;
+mod snarf;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -15,12 +16,12 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use soul_core::{
-    run, App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_HEIGHT, SCREEN_WIDTH,
-    SYSTEM_STRIP_H,
+    run, App, Ctx, EditIntent, EditTarget, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_HEIGHT,
+    SCREEN_WIDTH, SYSTEM_STRIP_H,
 };
 use soul_hal_hosted::HostedPlatform;
 use soul_script::ScriptedApp;
-use soul_ui::{hit_test, BLACK, WHITE};
+use soul_ui::{hit_test, EditMenu, BLACK, WHITE};
 use std::path::{Path, PathBuf};
 
 use builder::MobileBuilder;
@@ -28,6 +29,7 @@ use draw::Draw;
 use egui_demo::EguiDemo;
 use launcher::Launcher;
 use paint::Paint;
+use snarf::Snarf;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
@@ -48,6 +50,7 @@ pub(crate) enum NativeKind {
     Builder(MobileBuilder),
     Paint(Paint),
     EguiDemo(EguiDemo),
+    Snarf(Snarf),
 }
 
 impl NativeKind {
@@ -58,6 +61,7 @@ impl NativeKind {
             NativeKind::Builder(_) => MobileBuilder::APP_ID,
             NativeKind::Paint(_) => Paint::APP_ID,
             NativeKind::EguiDemo(_) => EguiDemo::APP_ID,
+            NativeKind::Snarf(_) => Snarf::APP_ID,
         }
     }
 
@@ -68,6 +72,7 @@ impl NativeKind {
             NativeKind::Builder(_) => MobileBuilder::NAME,
             NativeKind::Paint(_) => Paint::NAME,
             NativeKind::EguiDemo(_) => EguiDemo::NAME,
+            NativeKind::Snarf(_) => Snarf::NAME,
         }
     }
 
@@ -80,6 +85,7 @@ impl NativeKind {
             NativeKind::Builder(_) => Some("builder"),
             NativeKind::Paint(_) => Some("paint"),
             NativeKind::EguiDemo(_) => Some("egui_demo"),
+            NativeKind::Snarf(_) => Some("snarf"),
         }
     }
 
@@ -93,6 +99,7 @@ impl NativeKind {
                 e.handle(event, ctx);
                 None
             }
+            NativeKind::Snarf(s) => s.handle_event(event, ctx),
         }
     }
 
@@ -103,6 +110,7 @@ impl NativeKind {
             NativeKind::Builder(b) => b.draw(canvas, dirty),
             NativeKind::Paint(p) => p.draw(canvas, dirty),
             NativeKind::EguiDemo(e) => e.draw(canvas, dirty),
+            NativeKind::Snarf(s) => s.draw(canvas, dirty),
         }
     }
 
@@ -113,6 +121,7 @@ impl NativeKind {
             NativeKind::Builder(b) => b.a11y_nodes(),
             NativeKind::Paint(p) => p.a11y_nodes(),
             NativeKind::EguiDemo(e) => e.a11y_nodes(),
+            NativeKind::Snarf(s) => s.a11y_nodes(),
         }
     }
 
@@ -123,6 +132,18 @@ impl NativeKind {
             NativeKind::Builder(b) => b.persist(),
             NativeKind::Paint(p) => p.persist(),
             NativeKind::EguiDemo(e) => e.persist(),
+            NativeKind::Snarf(s) => s.persist(),
+        }
+    }
+
+    /// Return the widget the system edit menu should target while
+    /// this app is foreground, or `None` if the app handles its own
+    /// edit affordances. Most native apps opt out (default `None`);
+    /// Paint exposes itself so the marquee selection participates.
+    fn focused_edit_target(&mut self) -> Option<&mut dyn EditTarget> {
+        match self {
+            NativeKind::Paint(p) => Some(p),
+            _ => None,
         }
     }
 }
@@ -159,6 +180,7 @@ enum AppKind {
     },
     Builder,
     EguiDemo,
+    Snarf,
 }
 
 /// The app manifest. Only the minimum needed to locate and load each app.
@@ -261,6 +283,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         kind: AppKind::EguiDemo,
         handles: &[],
     },
+    AppDescriptor {
+        kind: AppKind::Snarf,
+        handles: &["clipboard_copy", "clipboard_paste"],
+    },
 ];
 
 /// A live app instance.
@@ -336,6 +362,7 @@ impl AppSlot {
             }
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
             AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
+            AppKind::Snarf => AppSlot::Native(NativeKind::Snarf(Snarf::new())),
         }
     }
 
@@ -409,6 +436,16 @@ impl AppSlot {
                 }
             }
             AppSlot::Native(n) => n.persist(),
+        }
+    }
+
+    /// Forward to the inner app's edit-menu hook.
+    /// Scripted apps don't expose a focused widget yet, so they
+    /// always opt out for now.
+    fn focused_edit_target(&mut self) -> Option<&mut dyn EditTarget> {
+        match self {
+            AppSlot::Native(n) => n.focused_edit_target(),
+            AppSlot::Scripted { .. } => None,
         }
     }
 
@@ -502,6 +539,11 @@ struct Host {
     /// Resolved by `HOME_APP_ID` after all apps are loaded.
     home_idx: usize,
 
+    /// Cached slot index of the system clipboard service (Snarf).
+    /// `None` if the runner was built without it, which short-circuits
+    /// edit-menu Cut/Copy/Paste operations to no-ops.
+    snarf_idx: Option<usize>,
+
     /// Navigation stack of indices into `apps`.
     /// The bottom entry is always `home_idx`. Launching pushes; returning pops.
     stack: Vec<usize>,
@@ -524,6 +566,11 @@ struct Host {
     pen_start: Option<(i16, i16, u64)>,
     last_tap: Option<(i16, i16, u64)>,
     tap_count: u8,
+
+    /// Shell-owned edit menu popup. When `Some`, all PenDown/PenUp
+    /// events go to the menu (not the active app) and the menu is
+    /// rendered above the app.
+    edit_menu: Option<EditMenu>,
 }
 
 impl Host {
@@ -542,6 +589,10 @@ impl Host {
             .iter()
             .position(|s| s.app_id() == HOME_APP_ID)
             .unwrap_or(0);
+
+        // Cache Snarf so edit-menu Cut/Copy/Paste can talk to it without
+        // walking the manifest each time.
+        let snarf_idx = apps.iter().position(|s| s.app_id() == Snarf::APP_ID);
 
         // Build and register the app metadata for Rhai's `system_list_apps()`.
         // Excludes the home app (identified by ID). `icon_stem` lets launchers load PGM icons.
@@ -577,13 +628,13 @@ impl Host {
                     .push(slot_idx);
             }
         }
-        // The Launcher handles kernel resource requests (background) and app picking (foreground).
-        for action in &["get_resource", "set_resource", "pick_app"] {
-            capability_index
-                .entry(action.to_string())
-                .or_default()
-                .insert(0, home_idx); // highest priority — always goes to Launcher
-        }
+        // The Launcher handles app picking (foreground). Resource fetch/save
+        // is now a kernel-level SystemRequest (`GetResource`/`SetResource`)
+        // that the Host dispatches directly to the Launcher.
+        capability_index
+            .entry("pick_app".to_string())
+            .or_default()
+            .insert(0, home_idx);
 
         log::info!(
             "🎉 All apps loaded ({} + home '{HOME_APP_ID}' at slot {home_idx}). \
@@ -594,6 +645,7 @@ impl Host {
         Self {
             apps,
             home_idx,
+            snarf_idx,
             stack: vec![home_idx],
             _app_meta: app_meta,
             capability_index,
@@ -604,6 +656,7 @@ impl Host {
             pen_start: None,
             last_tap: None,
             tap_count: 0,
+            edit_menu: None,
         }
     }
 
@@ -683,7 +736,9 @@ impl Host {
                     if node.label == "Home" {
                         self.go_home(ctx);
                     } else if node.label == "Menu" {
-                        self.dispatch_event(Event::Menu, ctx);
+                        if !self.try_open_edit_menu(ctx) {
+                            self.dispatch_event(Event::Menu, ctx);
+                        }
                     }
                 } else {
                     self.dispatch_event(Event::PenDown { x, y }, ctx);
@@ -729,6 +784,78 @@ impl Host {
             } => {
                 self.route_background_send(action, payload, target, ctx);
             }
+            soul_script::SystemRequest::GetResource { app_id, kind } => {
+                self.route_get_resource(app_id, kind, ctx);
+            }
+            soul_script::SystemRequest::SetResource {
+                app_id,
+                kind,
+                payload,
+            } => {
+                self.route_set_resource(app_id, kind, payload);
+            }
+            soul_script::SystemRequest::ReturnResource {
+                app_id,
+                kind,
+                payload,
+            } => {
+                self.route_return_resource(app_id, kind, payload, ctx);
+            }
+        }
+    }
+
+    /// Fetch a resource from the Launcher and deliver it to the requester
+    /// as `Event::ResourceResult`. The Launcher is the canonical owner of
+    /// app-scoped resources (icons, scripts, …) on the desktop runner.
+    fn route_get_resource(&mut self, app_id: String, kind: String, ctx: &mut Ctx<'_>) {
+        let requester = self.active_idx();
+        let payload = match &mut self.apps[self.home_idx] {
+            AppSlot::Native(NativeKind::Launcher(l)) => l.get_resource(&app_id, &kind),
+            _ => soul_core::ExchangePayload::empty(),
+        };
+        let ev = Event::ResourceResult {
+            app_id,
+            kind,
+            payload,
+        };
+        let follow_up = self.apps[requester].handle(ev, ctx);
+        if let Some(req) = follow_up {
+            self.process_request(req, ctx);
+        }
+    }
+
+    fn route_set_resource(
+        &mut self,
+        app_id: String,
+        kind: String,
+        payload: soul_core::ExchangePayload,
+    ) {
+        if let AppSlot::Native(NativeKind::Launcher(l)) = &mut self.apps[self.home_idx] {
+            l.set_resource(&app_id, &kind, payload);
+        }
+    }
+
+    /// A resource provider returned a resource it owns. Deliver the value
+    /// directly to the requester as `Event::ResourceResult`. (Used by
+    /// scripted apps that act as resource servers.)
+    fn route_return_resource(
+        &mut self,
+        app_id: String,
+        kind: String,
+        payload: soul_core::ExchangePayload,
+        ctx: &mut Ctx<'_>,
+    ) {
+        let Some(requester) = self.pending_request.take() else {
+            return;
+        };
+        let ev = Event::ResourceResult {
+            app_id,
+            kind,
+            payload,
+        };
+        let follow_up = self.apps[requester].handle(ev, ctx);
+        if let Some(req) = follow_up {
+            self.process_request(req, ctx);
         }
     }
 
@@ -909,6 +1036,101 @@ impl Host {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Edit menu / clipboard
+    // -----------------------------------------------------------------
+
+    /// Read the system clipboard's current payload. Returns an empty
+    /// payload if Snarf is missing or holds nothing.
+    fn snarf_get(&self) -> soul_core::ExchangePayload {
+        let Some(idx) = self.snarf_idx else {
+            return soul_core::ExchangePayload::empty();
+        };
+        if let AppSlot::Native(NativeKind::Snarf(s)) = &self.apps[idx] {
+            s.get_payload()
+        } else {
+            soul_core::ExchangePayload::empty()
+        }
+    }
+
+    /// Replace the system clipboard's contents. No-op when Snarf is
+    /// not loaded.
+    fn snarf_set(&mut self, payload: soul_core::ExchangePayload) {
+        let Some(idx) = self.snarf_idx else {
+            return;
+        };
+        if let AppSlot::Native(NativeKind::Snarf(s)) = &mut self.apps[idx] {
+            s.set_payload(payload);
+        }
+    }
+
+    /// Open the system edit menu when the active app exposes a focused
+    /// edit target. Returns `true` when the menu was opened (caller
+    /// should suppress further dispatch); `false` lets the caller
+    /// fall through to whatever default Menu handling it has.
+    fn try_open_edit_menu(&mut self, ctx: &mut Ctx<'_>) -> bool {
+        if self.edit_menu.is_some() {
+            // A second Menu press while the menu is up dismisses it.
+            self.edit_menu = None;
+            ctx.invalidate_all();
+            return true;
+        }
+        let active = self.active_idx();
+        if self.apps[active].focused_edit_target().is_none() {
+            return false;
+        }
+        // Anchor the popup against the Menu strip segment so it appears
+        // to drop out of the system strip — Palm-style menu affordance.
+        let anchor = strip_menu_rect().top_left;
+        self.edit_menu = Some(EditMenu::anchored_top_right(
+            anchor,
+            SCREEN_WIDTH as i32,
+            APP_HEIGHT as i32,
+        ));
+        ctx.invalidate_all();
+        true
+    }
+
+    /// Apply an [`EditIntent`] (from the popup or a Ctrl+letter combo)
+    /// to the active app's focused edit target.
+    fn apply_edit_intent(&mut self, intent: EditIntent, ctx: &mut Ctx<'_>) {
+        // Read the clipboard up front so we don't hold a borrow on
+        // `self.apps` across the snarf_set call later.
+        let clipboard = self.snarf_get();
+        let active = self.active_idx();
+
+        let out = {
+            let Some(target) = self.apps[active].focused_edit_target() else {
+                return;
+            };
+            match intent {
+                EditIntent::Copy => soul_core::EditOutput {
+                    clipboard: target.copy_selection(),
+                    ..Default::default()
+                },
+                EditIntent::Cut => target.cut_selection(),
+                EditIntent::Paste => {
+                    if !target.accepts_paste(&clipboard) {
+                        return;
+                    }
+                    target.paste(&clipboard)
+                }
+                EditIntent::SelectAll => target.select_all(),
+            }
+        };
+
+        if let Some(payload) = out.clipboard {
+            self.snarf_set(payload);
+        }
+        if let Some(rect) = out.dirty {
+            ctx.invalidate(rect);
+        }
+        if out.text_changed {
+            // Persist immediately so accidental quits don't lose data.
+            self.apps[active].persist();
+        }
+    }
+
     fn toggle_a11y(&mut self, ctx: &mut Ctx<'_>) {
         self.a11y_enabled = !self.a11y_enabled;
         if self.a11y_enabled {
@@ -936,6 +1158,49 @@ impl App for Host {
         if matches!(event, Event::Key(KeyCode::Tab)) {
             self.toggle_a11y(ctx);
             return;
+        }
+
+        // Standard editing intent (Ctrl+C/X/V/A on the host keyboard,
+        // or any HAL that emits these). Always routed to the focused
+        // edit target — apps that opt out of the protocol return
+        // `None` from `focused_edit_target` and the intent is dropped.
+        if let Event::EditIntent(intent) = event {
+            self.apply_edit_intent(intent, ctx);
+            return;
+        }
+
+        // While the shell edit menu is up, the menu intercepts pen
+        // input. We let the menu have first crack at PenDown / PenUp
+        // before any system-strip / a11y handling.
+        if self.edit_menu.is_some() {
+            match event {
+                Event::PenDown { .. } => return,
+                Event::PenUp { x, y } => {
+                    let clipboard = self.snarf_get();
+                    let active = self.active_idx();
+                    let menu = self.edit_menu.as_ref().expect("checked above");
+                    let outside = !menu.contains(x, y);
+                    let intent = if outside {
+                        None
+                    } else {
+                        self.apps[active]
+                            .focused_edit_target()
+                            .and_then(|t| menu.hit(x, y, t, Some(&clipboard)))
+                    };
+                    self.edit_menu = None;
+                    ctx.invalidate_all();
+                    if let Some(intent) = intent {
+                        self.apply_edit_intent(intent, ctx);
+                    }
+                    return;
+                }
+                Event::Menu => {
+                    self.edit_menu = None;
+                    ctx.invalidate_all();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match event {
@@ -1005,7 +1270,9 @@ impl App for Host {
                     if hit_test(&strip_home_rect(), x, y) {
                         self.go_home(ctx);
                     } else if hit_test(&strip_menu_rect(), x, y) {
-                        self.dispatch_event(Event::Menu, ctx);
+                        if !self.try_open_edit_menu(ctx) {
+                            self.dispatch_event(Event::Menu, ctx);
+                        }
                     }
                     return;
                 }
@@ -1025,6 +1292,16 @@ impl App for Host {
             return;
         }
 
+        // Menu (hard button / a11y triggered): if the active app
+        // exposes an edit target, the shell shows its standard menu
+        // instead of forwarding. Apps that own their own menu return
+        // `None` and keep handling Event::Menu themselves.
+        if matches!(event, Event::Menu) {
+            if self.try_open_edit_menu(ctx) {
+                return;
+            }
+        }
+
         self.dispatch_event(event, ctx);
     }
 
@@ -1036,6 +1313,16 @@ impl App for Host {
         self.apps[active].draw(canvas, dirty);
         let label = self.active_label().to_string();
         draw_system_strip(canvas, &label);
+
+        // Edit menu popup (drawn last so it sits above the app and the
+        // system strip). Read clipboard first so we don't hold a
+        // mutable borrow on `self.apps` while invoking the target.
+        if let Some(menu) = self.edit_menu.as_ref() {
+            let clipboard = self.snarf_get();
+            if let Some(target) = self.apps[active].focused_edit_target() {
+                menu.draw(canvas, target, Some(&clipboard));
+            }
+        }
 
         if self.a11y_enabled {
             if let Some(idx) = self.a11y_focus {

@@ -41,9 +41,9 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
+use soul_core::{App, Bitmap, Ctx, Event, ExchangePayload, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
-use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H, WHITE};
+use soul_ui::{hit_test, title_bar, EditOutput, EditTarget, BLACK, TITLE_BAR_H, WHITE};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -427,7 +427,6 @@ pub struct Paint {
     ant_last_ms: u64, // platform time of last phase step
 
     touch: TouchTarget,
-    menu_open: bool,
 
     /// The paint_tools.pgm sprite sheet; `None` if the file is missing.
     tool_sheet: Option<ToolSheet>,
@@ -461,7 +460,6 @@ impl Paint {
             ant_phase: 0,
             ant_last_ms: 0,
             touch: TouchTarget::None,
-            menu_open: false,
             tool_sheet,
         }
     }
@@ -1396,16 +1394,7 @@ impl Paint {
                     ctx.invalidate(Self::canvas_rect());
                 }
             }
-            Event::Menu => {
-                self.menu_open = !self.menu_open;
-                ctx.invalidate_all();
-            }
             Event::PenDown { x, y } => {
-                if self.menu_open {
-                    self.menu_open = false;
-                    ctx.invalidate_all();
-                    return None;
-                }
                 if (x as i32) < PALETTE_W {
                     self.touch = Self::hit_palette(x, y);
                     ctx.invalidate(palette_rect());
@@ -1778,6 +1767,154 @@ impl App for Paint {
 
     fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, dirty: Rectangle) {
         Paint::draw(self, canvas, dirty);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EditTarget integration
+//
+// Paint plugs into the system edit menu via [`EditTarget`].  It produces and
+// consumes only [`ExchangePayload::Bitmap`]; text and resource payloads are
+// ignored by `paste` and reported as such by `accepts_paste` so the menu
+// can grey out the Paste item when there's nothing useful on the clipboard.
+//
+// Cut and copy work on the active marquee selection.  When the selection is
+// "lifted" (its captured pixels are non-`None`, i.e. a drag is in progress
+// or a paste is floating), copy returns those pixels directly.  Otherwise we
+// snapshot the canvas at the selection's bounds — non-destructively for copy,
+// destructively (white-out) for cut.
+//
+// Paste creates a new floating selection at the canvas centre (or at the
+// current selection's origin), switches to the Selection tool, and lets the
+// user drag the bitmap into place.  Pen-up commits it just like any other
+// selection drag.
+// ---------------------------------------------------------------------------
+impl EditTarget for Paint {
+    fn has_selection(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    fn copy_selection(&self) -> Option<ExchangePayload> {
+        let sel = self.selection.as_ref()?;
+        // Already-lifted pixels are the freshest source (mid-drag or floating
+        // after a paste).  Use them directly so we capture the moved content
+        // rather than the whited-out hole left in the canvas.
+        if let Some(ref captured) = sel.pixels {
+            let w = (sel.x1 - sel.x0 + 1) as u16;
+            let h = ((captured.len() / w.max(1) as usize) as u16).max(1);
+            let bm = Bitmap::from_pixels(w, h, captured.clone())?;
+            return Some(ExchangePayload::from_bitmap(&bm));
+        }
+        let pr = PixelRect::capture(&self.pixels, sel.x0, sel.y0, sel.x1, sel.y1)?;
+        let bm = Bitmap::from_pixels(pr.w as u16, pr.h as u16, pr.data)?;
+        Some(ExchangePayload::from_bitmap(&bm))
+    }
+
+    fn cut_selection(&mut self) -> EditOutput {
+        let payload = self.copy_selection();
+        let Some(sel) = self.selection.take() else {
+            return EditOutput::default();
+        };
+
+        // White out the source region in both pixels and ghost so the canvas
+        // (and any future undo capture) reflects the removal.  If the
+        // selection was already lifted (`sel.pixels.is_some()`) the source
+        // region is already white — but writing 255 again is a cheap no-op.
+        let cw = CANVAS_W as usize;
+        let x0 = sel.x0.max(0) as usize;
+        let y0 = sel.y0.max(0) as usize;
+        let x1 = sel.x1.min(CANVAS_W - 1) as usize;
+        let y1 = sel.y1.min(CANVAS_H - 1) as usize;
+        if x1 >= x0 && y1 >= y0 {
+            for y in y0..=y1 {
+                let off = y * cw;
+                for x in x0..=x1 {
+                    self.pixels[off + x] = 255;
+                    self.ghost[off + x] = 255;
+                }
+            }
+        }
+        self.sel_dragging = false;
+
+        let dirty = Self::canvas_strip_rect(
+            sel.x0,
+            sel.y0,
+            sel.x1 - sel.x0 + 1,
+            sel.y1 - sel.y0 + 1,
+        );
+        EditOutput {
+            dirty,
+            text_changed: true,
+            clipboard: payload,
+        }
+    }
+
+    fn paste(&mut self, payload: &ExchangePayload) -> EditOutput {
+        let Some(bm) = payload.as_bitmap() else {
+            return EditOutput::default();
+        };
+        let w = bm.width as i32;
+        let h = bm.height as i32;
+        let pixels = bm.pixels;
+        if w <= 0 || h <= 0 || pixels.len() != (w * h) as usize {
+            return EditOutput::default();
+        }
+
+        // Drop any floating selection that's mid-air before introducing a
+        // new one — otherwise the old one would silently lose its pixels.
+        self.commit_selection();
+
+        // Anchor the paste either at the current selection's origin or
+        // centred on the canvas, clamped to keep the bitmap on-screen.
+        let (px, py) = if let Some(s) = self.selection.as_ref() {
+            (s.x0, s.y0)
+        } else {
+            ((CANVAS_W - w) / 2, (CANVAS_H - h) / 2)
+        };
+        let px = px.max(0).min((CANVAS_W - w).max(0));
+        let py = py.max(0).min((CANVAS_H - h).max(0));
+
+        self.tool = Tool::Selection;
+        self.selection = Some(Selection {
+            x0: px,
+            y0: py,
+            x1: px + w - 1,
+            y1: py + h - 1,
+            pixels: Some(pixels),
+        });
+        self.sel_dragging = false;
+
+        let dirty = Self::canvas_strip_rect(px, py, w, h);
+        EditOutput {
+            dirty,
+            text_changed: true,
+            clipboard: None,
+        }
+    }
+
+    fn accepts_paste(&self, payload: &ExchangePayload) -> bool {
+        payload.find_kind(soul_core::Kind::Bitmap).is_some()
+    }
+
+    fn select_all(&mut self) -> EditOutput {
+        // Drop any floating bitmap before redefining the selection rect,
+        // otherwise its captured pixels would be reinterpreted as the
+        // pixels of the new full-canvas selection on the next render.
+        self.commit_selection();
+        self.tool = Tool::Selection;
+        self.selection = Some(Selection {
+            x0: 0,
+            y0: 0,
+            x1: CANVAS_W - 1,
+            y1: CANVAS_H - 1,
+            pixels: None,
+        });
+        self.sel_dragging = false;
+        EditOutput {
+            dirty: Some(Self::canvas_rect()),
+            text_changed: false,
+            clipboard: None,
+        }
     }
 }
 

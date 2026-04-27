@@ -160,6 +160,81 @@ fn color_to_gray8(c: egui::Color32) -> Gray8 {
     Gray8::new(luma as u8)
 }
 
+/// Convert a kernel [`soul_core::ExchangePayload`] into a Rhai map.
+///
+/// The shape mirrors the legacy single-rep payloads scripts have always
+/// seen, so existing scripts don't need changes:
+///   { kind: "text"|"bitmap"|"other", text, pixels, width, height,
+///     mime, subtype, meta, app_id }
+/// Multi-representation payloads expose their first text and first bitmap
+/// view through `text` / `pixels` etc., and the full `representations`
+/// array for scripts that want the rest.
+fn payload_to_rhai_map(payload: &soul_core::ExchangePayload) -> Map {
+    let mut p = Map::new();
+
+    // Coarse kind hint (text > bitmap > other > "empty"), based on the
+    // primary representation. Stays stable for legacy scripts.
+    let primary_kind = match payload.primary().map(|r| soul_core::classify_mime(&r.mime)) {
+        Some(soul_core::Kind::Text) => "text",
+        Some(soul_core::Kind::Bitmap) => "bitmap",
+        Some(soul_core::Kind::Other) => "other",
+        None => "empty",
+    };
+    p.insert("kind".into(), Dynamic::from(primary_kind.to_string()));
+
+    if let Some(t) = payload.as_text() {
+        p.insert("text".into(), Dynamic::from(t.to_string()));
+    } else {
+        p.insert("text".into(), Dynamic::from(String::new()));
+    }
+
+    if let Some(bm) = payload.as_bitmap() {
+        p.insert("width".into(), Dynamic::from(bm.width as i32));
+        p.insert("height".into(), Dynamic::from(bm.height as i32));
+        p.insert("pixels".into(), Dynamic::from(bm.pixels));
+    } else {
+        p.insert("width".into(), Dynamic::from(0i32));
+        p.insert("height".into(), Dynamic::from(0i32));
+        p.insert("pixels".into(), Dynamic::from(Vec::<u8>::new()));
+    }
+
+    if let Some(rep) = payload.primary() {
+        p.insert("mime".into(), Dynamic::from(rep.mime.clone()));
+        if let Some(sub) = rep.subtype() {
+            p.insert("subtype".into(), Dynamic::from(sub.to_string()));
+        }
+        if let Some(app_id) = rep.meta.get("app_id") {
+            p.insert("app_id".into(), Dynamic::from(app_id.clone()));
+        }
+        let mut meta_map = Map::new();
+        for (k, v) in &rep.meta {
+            meta_map.insert(k.as_str().into(), Dynamic::from(v.clone()));
+        }
+        p.insert("meta".into(), Dynamic::from_map(meta_map));
+    } else {
+        p.insert("mime".into(), Dynamic::from(String::new()));
+    }
+
+    let mut reps = rhai::Array::new();
+    for r in &payload.representations {
+        let mut rm = Map::new();
+        rm.insert("mime".into(), Dynamic::from(r.mime.clone()));
+        rm.insert("bytes".into(), Dynamic::from(r.bytes.clone()));
+        if let Some(sub) = r.subtype() {
+            rm.insert("subtype".into(), Dynamic::from(sub.to_string()));
+        }
+        let mut meta_map = Map::new();
+        for (k, v) in &r.meta {
+            meta_map.insert(k.as_str().into(), Dynamic::from(v.clone()));
+        }
+        rm.insert("meta".into(), Dynamic::from_map(meta_map));
+        reps.push(Dynamic::from_map(rm));
+    }
+    p.insert("representations".into(), Dynamic::from(reps));
+
+    p
+}
+
 // --- System call protocol -----------------------------------------------
 
 /// A request from a scripted app to the runtime kernel.
@@ -206,8 +281,8 @@ pub enum SystemRequest {
     },
     /// Dispatch a payload directly to a named target app **without** pushing
     /// it onto the navigation stack or calling its `draw`. Used for
-    /// kernel-mediated background services (e.g. resource get/set via the
-    /// Launcher). The target app handles the event synchronously and any
+    /// kernel-mediated background services (e.g. clipboard via Snarf).
+    /// The target app handles the event synchronously and any
     /// `SendResult` it emits is delivered back to the caller in the same
     /// dispatch cycle.
     BackgroundSend {
@@ -216,6 +291,35 @@ pub enum SystemRequest {
         /// Target app ID. Empty string routes to the first registered
         /// capability-index handler (same as `Send`).
         target: String,
+    },
+    /// Background-fetch a named resource (icon, script, …) owned by
+    /// `app_id`.
+    ///
+    /// The kernel dispatches this directly to the canonical resource
+    /// owner (on the desktop runner: the Launcher) and delivers the
+    /// result back to the caller as
+    /// [`soul_core::Event::ResourceResult`]. No UI is shown and the
+    /// navigation stack is not touched.
+    GetResource {
+        app_id: String,
+        kind: String,
+    },
+    /// Background-update a named resource owned by `app_id`. The
+    /// kernel persists the new payload through the resource owner;
+    /// no result event is delivered to the caller.
+    SetResource {
+        app_id: String,
+        kind: String,
+        payload: soul_core::ExchangePayload,
+    },
+    /// Reply emitted by a script-implemented resource owner in response
+    /// to a [`SystemRequest::GetResource`]. The kernel routes the
+    /// payload back to the original requester as
+    /// [`soul_core::Event::ResourceResult`].
+    ReturnResource {
+        app_id: String,
+        kind: String,
+        payload: soul_core::ExchangePayload,
     },
 }
 
@@ -521,20 +625,18 @@ impl ScriptedApp {
         engine.register_fn("system_return", || unsafe {
             PENDING_SYSTEM = Some(SystemRequest::Return);
         });
-        // System call: send a payload to another app (or a kernel-chosen handler).
-        // In Rhai: system_send("open_bitmap", pixels_blob, "com.soulos.draw")
-        //          system_send("open_bitmap", pixels_blob, "")   ← kernel picks handler
+        // System call: send a bitmap-without-dimensions to another app.
+        // Kept for back-compat with scripts that pass raw pixel blobs;
+        // dimensions default to 0/0 (the receiver should treat that as
+        // "shape inferred from context"). Prefer system_send_bitmap.
         engine.register_fn(
             "system_send",
             |action: String, pixels: Vec<u8>, target: String| unsafe {
-                let payload = soul_core::ExchangePayload::Bitmap {
-                    width: 0,
-                    height: 0,
-                    pixels,
-                };
+                let bm = soul_core::Bitmap::from_pixels(0, 0, pixels)
+                    .unwrap_or_default();
                 PENDING_SYSTEM = Some(SystemRequest::Send {
                     action,
-                    payload,
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
                     target: if target.is_empty() { None } else { Some(target) },
                 });
             },
@@ -544,14 +646,11 @@ impl ScriptedApp {
         engine.register_fn(
             "system_send_bitmap",
             |action: String, width: i32, height: i32, pixels: Vec<u8>, target: String| unsafe {
-                let payload = soul_core::ExchangePayload::Bitmap {
-                    width: width as u16,
-                    height: height as u16,
-                    pixels,
-                };
+                let bm = soul_core::Bitmap::from_pixels(width as u16, height as u16, pixels)
+                    .unwrap_or_default();
                 PENDING_SYSTEM = Some(SystemRequest::Send {
                     action,
-                    payload,
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
                     target: if target.is_empty() { None } else { Some(target) },
                 });
             },
@@ -561,10 +660,9 @@ impl ScriptedApp {
         engine.register_fn(
             "system_send_text",
             |action: String, text: String, target: String| unsafe {
-                let payload = soul_core::ExchangePayload::Text(text);
                 PENDING_SYSTEM = Some(SystemRequest::Send {
                     action,
-                    payload,
+                    payload: soul_core::ExchangePayload::from_text(text),
                     target: if target.is_empty() { None } else { Some(target) },
                 });
             },
@@ -575,7 +673,7 @@ impl ScriptedApp {
         engine.register_fn("system_request", |action: String| unsafe {
             PENDING_SYSTEM = Some(SystemRequest::Request {
                 action,
-                payload: soul_core::ExchangePayload::Text(String::new()),
+                payload: soul_core::ExchangePayload::empty(),
             });
         });
         // System call: return a bitmap result to the app that request-ed this one.
@@ -583,12 +681,12 @@ impl ScriptedApp {
         engine.register_fn(
             "system_send_result",
             |action: String, width: i32, height: i32, pixels: Vec<u8>| unsafe {
-                let payload = soul_core::ExchangePayload::Bitmap {
-                    width: width as u16,
-                    height: height as u16,
-                    pixels,
-                };
-                PENDING_SYSTEM = Some(SystemRequest::SendResult { action, payload });
+                let bm = soul_core::Bitmap::from_pixels(width as u16, height as u16, pixels)
+                    .unwrap_or_default();
+                PENDING_SYSTEM = Some(SystemRequest::SendResult {
+                    action,
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
+                });
             },
         );
         // System call: return a text result to the app that request-ed this one.
@@ -596,53 +694,37 @@ impl ScriptedApp {
         engine.register_fn(
             "system_send_text_result",
             |action: String, text: String| unsafe {
-                let payload = soul_core::ExchangePayload::Text(text);
-                PENDING_SYSTEM = Some(SystemRequest::SendResult { action, payload });
+                PENDING_SYSTEM = Some(SystemRequest::SendResult {
+                    action,
+                    payload: soul_core::ExchangePayload::from_text(text),
+                });
             },
         );
 
         // --- Kernel resource API -----------------------------------------------
         // Background calls — dispatched to the Launcher without showing any UI.
-        // The result arrives as an Exchange event (action "return_resource") in the
-        // next on_event call.
+        // The result arrives as an `Event::ResourceResult { app_id, kind, payload }`
+        // in the next on_event call; scripts read it as
+        //   ev.type == "ResourceResult", ev.app_id, ev.kind,
+        //   ev.payload.text or ev.payload.pixels (+ width/height).
         //
         // In Rhai: system_get_resource("com.soulos.notes", "icon")
-        //   → ev.type=="Exchange", ev.action=="return_resource",
-        //     ev.payload.resource=="icon", ev.payload.pixels==[...]
         engine.register_fn(
             "system_get_resource",
             |app_id: String, kind: String| unsafe {
-                let payload = soul_core::ExchangePayload::Resource {
-                    app_id,
-                    kind,
-                    width: 0,
-                    height: 0,
-                    pixels: alloc::vec![],
-                    text: String::new(),
-                };
-                PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
-                    action: "get_resource".to_string(),
-                    payload,
-                    target: String::new(),
-                });
+                PENDING_SYSTEM = Some(SystemRequest::GetResource { app_id, kind });
             },
         );
         // In Rhai: system_set_resource_bitmap("com.soulos.notes", "icon", w, h, pixels)
         engine.register_fn(
             "system_set_resource_bitmap",
             |app_id: String, kind: String, width: i32, height: i32, pixels: Vec<u8>| unsafe {
-                let payload = soul_core::ExchangePayload::Resource {
+                let bm = soul_core::Bitmap::from_pixels(width as u16, height as u16, pixels)
+                    .unwrap_or_default();
+                PENDING_SYSTEM = Some(SystemRequest::SetResource {
                     app_id,
                     kind,
-                    width: width as u16,
-                    height: height as u16,
-                    pixels,
-                    text: String::new(),
-                };
-                PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
-                    action: "set_resource".to_string(),
-                    payload,
-                    target: String::new(),
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
                 });
             },
         );
@@ -650,21 +732,57 @@ impl ScriptedApp {
         engine.register_fn(
             "system_set_resource_text",
             |app_id: String, kind: String, text: String| unsafe {
-                let payload = soul_core::ExchangePayload::Resource {
+                PENDING_SYSTEM = Some(SystemRequest::SetResource {
                     app_id,
                     kind,
-                    width: 0,
-                    height: 0,
-                    pixels: alloc::vec![],
-                    text,
-                };
-                PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
-                    action: "set_resource".to_string(),
-                    payload,
-                    target: String::new(),
+                    payload: soul_core::ExchangePayload::from_text(text),
                 });
             },
         );
+
+        // --- Snarf (system clipboard) ---------------------------------------
+        // Snarf is the single-slot system clipboard.  Background calls put
+        // content on the clipboard or fetch it back as an Exchange event,
+        // never popping any UI.
+        //
+        // Copy:
+        //   system_clipboard_copy_text("hello")
+        //   system_clipboard_copy_bitmap(w, h, pixels)
+        //
+        // Paste:
+        //   system_clipboard_paste()
+        //   → ev.type == "Exchange", ev.action == "clipboard_paste",
+        //     ev.payload.text or ev.payload.pixels carries the held content.
+        engine.register_fn(
+            "system_clipboard_copy_text",
+            |text: String| unsafe {
+                PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
+                    action: "clipboard_copy".to_string(),
+                    payload: soul_core::ExchangePayload::from_text(text),
+                    target: "com.soulos.snarf".to_string(),
+                });
+            },
+        );
+        engine.register_fn(
+            "system_clipboard_copy_bitmap",
+            |width: i32, height: i32, pixels: Vec<u8>| unsafe {
+                let bm = soul_core::Bitmap::from_pixels(width as u16, height as u16, pixels)
+                    .unwrap_or_default();
+                PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
+                    action: "clipboard_copy".to_string(),
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
+                    target: "com.soulos.snarf".to_string(),
+                });
+            },
+        );
+        engine.register_fn("system_clipboard_paste", || unsafe {
+            PENDING_SYSTEM = Some(SystemRequest::BackgroundSend {
+                action: "clipboard_paste".to_string(),
+                payload: soul_core::ExchangePayload::empty(),
+                target: "com.soulos.snarf".to_string(),
+            });
+        });
+
         // System call: get the list of launchable apps as [{id, name, idx, icon}]
         engine.register_fn("system_list_apps", || -> rhai::Array {
             unsafe {
@@ -1885,33 +2003,13 @@ impl App for ScriptedApp {
                 map.insert("type".into(), "Exchange".into());
                 map.insert("action".into(), Dynamic::from(action));
                 map.insert("sender".into(), Dynamic::from(sender));
-                match payload {
-                    soul_core::ExchangePayload::Bitmap { width, height, pixels } => {
-                        let mut p = Map::new();
-                        p.insert("kind".into(),   Dynamic::from("bitmap".to_string()));
-                        p.insert("width".into(),  Dynamic::from(width as i32));
-                        p.insert("height".into(), Dynamic::from(height as i32));
-                        p.insert("pixels".into(), Dynamic::from(pixels));
-                        map.insert("payload".into(), Dynamic::from_map(p));
-                    }
-                    soul_core::ExchangePayload::Text(text) => {
-                        let mut p = Map::new();
-                        p.insert("kind".into(), Dynamic::from("text".to_string()));
-                        p.insert("text".into(), Dynamic::from(text));
-                        map.insert("payload".into(), Dynamic::from_map(p));
-                    }
-                    soul_core::ExchangePayload::Resource { app_id, kind, width, height, pixels, text } => {
-                        let mut p = Map::new();
-                        p.insert("kind".into(),   Dynamic::from("resource".to_string()));
-                        p.insert("app_id".into(), Dynamic::from(app_id));
-                        p.insert("resource".into(), Dynamic::from(kind));
-                        p.insert("width".into(),  Dynamic::from(width as i32));
-                        p.insert("height".into(), Dynamic::from(height as i32));
-                        p.insert("pixels".into(), Dynamic::from(pixels));
-                        p.insert("text".into(),   Dynamic::from(text));
-                        map.insert("payload".into(), Dynamic::from_map(p));
-                    }
-                }
+                map.insert("payload".into(), Dynamic::from_map(payload_to_rhai_map(&payload)));
+            }
+            Event::ResourceResult { app_id, kind, payload } => {
+                map.insert("type".into(), "ResourceResult".into());
+                map.insert("app_id".into(), Dynamic::from(app_id));
+                map.insert("kind".into(), Dynamic::from(kind));
+                map.insert("payload".into(), Dynamic::from_map(payload_to_rhai_map(&payload)));
             }
             Event::Menu => {
                 map.insert("type".into(), "Menu".into());

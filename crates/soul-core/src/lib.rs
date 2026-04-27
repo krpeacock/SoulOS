@@ -70,7 +70,7 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, Rectangle},
 };
 
-pub use soul_hal::{HardButton, KeyCode};
+pub use soul_hal::{EditIntent, HardButton, KeyCode};
 use soul_hal::{InputEvent, Platform};
 
 /// Width of the SoulOS virtual screen in pixels.
@@ -97,36 +97,12 @@ pub const SYSTEM_STRIP_H: u16 = 16;
 /// bottom for the system strip.
 pub const APP_HEIGHT: u16 = SCREEN_HEIGHT - SYSTEM_STRIP_H;
 
-/// Data carried by an [`Event::Exchange`] delivery.
-///
-/// The kernel routes exchange payloads between apps without either
-/// side knowing the other's internal structure. New payload kinds
-/// can be added here without changing the exchange protocol.
-#[derive(Debug, Clone)]
-pub enum ExchangePayload {
-    /// Raw grayscale bitmap. `pixels.len() == width as usize * height as usize`.
-    Bitmap {
-        width: u16,
-        height: u16,
-        pixels: alloc::vec::Vec<u8>,
-    },
-    /// Plain text — a script, a note, a template.
-    Text(alloc::string::String),
-    /// A named resource belonging to a specific app — used for kernel-mediated
-    /// resource get/set without launching the owning app's UI.
-    ///
-    /// `app_id` identifies the owning app. `kind` names the resource type
-    /// ("icon", "script", "form", …). For get requests `pixels` and `text`
-    /// are empty; for set/return they carry the resource data.
-    Resource {
-        app_id: alloc::string::String,
-        kind: alloc::string::String,
-        width: u16,
-        height: u16,
-        pixels: alloc::vec::Vec<u8>,
-        text: alloc::string::String,
-    },
-}
+pub mod edit;
+pub mod exchange;
+pub use edit::{EditOutput, EditTarget};
+pub use exchange::{
+    classify_mime, Bitmap, ExchangePayload, ExchangeRegistry, Kind, RegistryEntry, Representation,
+};
 
 /// An event delivered to [`App::handle`].
 ///
@@ -168,17 +144,40 @@ pub enum Event {
     /// hard [`HardButton::Menu`] key). Delivered once per activation,
     /// not paired with a release.
     Menu,
+    /// A standard editing intent (Cut / Copy / Paste / Select-All).
+    ///
+    /// The shell intercepts this event and routes it to the active
+    /// app's focused [`EditTarget`] (see
+    /// [`App::focused_edit_target`]); apps that opt out of the
+    /// generic edit-menu protocol see this event in their `handle`
+    /// only when no edit target is focused.
+    EditIntent(EditIntent),
     /// The kernel is delivering an exchange payload to this app.
     ///
     /// Fired when another app (or the system) called `system_send` or
     /// when this app's `system_request` was fulfilled. `action` names
     /// what kind of data is arriving; `sender` is the originating
-    /// app's ID. The app should inspect `action` and handle `payload`
-    /// accordingly, then call `system_return` when done.
+    /// app's ID. `payload` carries one or more typed
+    /// [`Representation`]s; receivers usually call
+    /// [`ExchangePayload::as_text`] / [`ExchangePayload::as_bitmap`]
+    /// or `payload.find_kind(...)` to extract what they care about.
     Exchange {
         action: alloc::string::String,
         payload: ExchangePayload,
         sender: alloc::string::String,
+    },
+    /// A previously-issued resource request has been fulfilled.
+    ///
+    /// Delivered to the app that called the kernel's `GetResource`
+    /// helper (Rhai: `system_get_resource`). `app_id` and `kind`
+    /// echo the original request so the receiver can route the
+    /// result; `payload` carries the data (typically a single text
+    /// or bitmap representation). Returned with an empty payload
+    /// when the owner has nothing to give.
+    ResourceResult {
+        app_id: alloc::string::String,
+        kind: alloc::string::String,
+        payload: ExchangePayload,
     },
 }
 
@@ -315,6 +314,33 @@ pub trait App {
     fn a11y_nodes(&self) -> alloc::vec::Vec<a11y::A11yNode> {
         alloc::vec::Vec::new()
     }
+
+    /// Extend the host's [`ExchangeRegistry`] with any MIME types,
+    /// kinds, or file extensions this app introduces.
+    ///
+    /// Called once at startup, before the first event. Default is a
+    /// no-op — apps that only deal in built-in payloads (text,
+    /// bitmap) need not implement this.
+    fn register_exchange_types(&self, _registry: &mut ExchangeRegistry) {}
+
+    /// Return the widget (or self) that currently owns "edit focus",
+    /// or `None` if the app does not want the system edit menu.
+    ///
+    /// When this returns `Some(target)`, the shell:
+    ///
+    /// - shows the system edit menu (Cut / Copy / Paste / Select All)
+    ///   on [`Event::Menu`] instead of forwarding the event;
+    /// - routes [`Event::EditIntent`] (e.g. Ctrl+C/X/V/A) to `target`
+    ///   automatically and ships any produced payload to the system
+    ///   clipboard.
+    ///
+    /// When this returns `None`, the app keeps full control of both
+    /// events and is expected to draw / dispatch its own menu.
+    /// Default returns `None`; native apps that wrap a single
+    /// editable widget can simply forward to it.
+    fn focused_edit_target(&mut self) -> Option<&mut dyn EditTarget> {
+        None
+    }
 }
 
 fn translate(input: InputEvent) -> Option<Event> {
@@ -327,6 +353,7 @@ fn translate(input: InputEvent) -> Option<Event> {
         InputEvent::ButtonDown(b) => Some(Event::ButtonDown(b)),
         InputEvent::ButtonUp(b) => Some(Event::ButtonUp(b)),
         InputEvent::Key(k) => Some(Event::Key(k)),
+        InputEvent::EditIntent(i) => Some(Event::EditIntent(i)),
         InputEvent::Quit => None,
     }
 }

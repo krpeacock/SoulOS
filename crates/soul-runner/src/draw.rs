@@ -227,11 +227,11 @@ impl Draw {
         match action {
             // Builder opened Draw for icon editing and supplied the pixels directly.
             "open_bitmap" => {
-                if let soul_core::ExchangePayload::Bitmap { width, height, ref pixels } = payload {
-                    let w = width as usize;
-                    let h = height as usize;
-                    if !pixels.is_empty() && w > 0 && h > 0 {
-                        self.load_icon_pixels(pixels, w, h, ctx);
+                if let Some(bm) = payload.as_bitmap() {
+                    let w = bm.width as usize;
+                    let h = bm.height as usize;
+                    if !bm.pixels.is_empty() && w > 0 && h > 0 {
+                        self.load_icon_pixels(&bm.pixels, w, h, ctx);
                     }
                 }
                 // Mark that "Done" should return the result to the caller.
@@ -619,13 +619,15 @@ impl Draw {
                             buf.push(self.display_value(i));
                         }
                     }
+                    let bm = soul_core::Bitmap::from_pixels(
+                        ICON_CELL as u16,
+                        ICON_CELL as u16,
+                        buf,
+                    )
+                    .unwrap_or_default();
                     return Some(soul_script::SystemRequest::SendResult {
                         action,
-                        payload: soul_core::ExchangePayload::Bitmap {
-                            width: ICON_CELL as u16,
-                            height: ICON_CELL as u16,
-                            pixels: buf,
-                        },
+                        payload: soul_core::ExchangePayload::from_bitmap(&bm),
                     });
                 }
                 ctx.invalidate_all();

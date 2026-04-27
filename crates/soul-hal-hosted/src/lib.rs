@@ -12,7 +12,7 @@ use embedded_graphics::{
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 // KeyRepeat::No is used in pump() to guarantee single-fire per keypress.
-use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
+use soul_hal::{EditIntent, HardButton, InputEvent, KeyCode, Platform};
 
 pub mod harness;
 
@@ -155,10 +155,15 @@ impl HostedPlatform {
         let pressed_new   = self.window.get_keys_pressed(KeyRepeat::No);
         let pressed_all   = self.window.get_keys_pressed(KeyRepeat::Yes);
 
+        let ctrl_held = current_keys.contains(&Key::LeftCtrl)
+            || current_keys.contains(&Key::RightCtrl);
+
         // Initial key-down (fires exactly once per physical press).
         for key in &pressed_new {
             if let Some(b) = map_hard_button(*key) {
                 self.pending.push_back(InputEvent::ButtonDown(b));
+            } else if let Some(intent) = map_edit_intent(*key, ctrl_held) {
+                self.pending.push_back(InputEvent::EditIntent(intent));
             } else if let Some(kc) = map_keycode(*key, &current_keys) {
                 self.pending.push_back(InputEvent::Key(kc));
             }
@@ -167,6 +172,12 @@ impl HostedPlatform {
         // Key repeat: in Yes but not in No (pure repeats, no initial press).
         for key in &pressed_all {
             if !pressed_new.contains(key) && map_hard_button(*key).is_none() {
+                if map_edit_intent(*key, ctrl_held).is_some() {
+                    // Editing intents do not auto-repeat — Ctrl+V three times
+                    // pasting three times is fine, but accidental held repeats
+                    // would silently spam the clipboard.
+                    continue;
+                }
                 if let Some(kc) = map_keycode(*key, &current_keys) {
                     self.pending.push_back(InputEvent::Key(kc));
                 }
@@ -225,6 +236,21 @@ impl Platform for HostedPlatform {
 }
 
 // ── Key mapping ───────────────────────────────────────────────────────────────
+
+/// Map a Ctrl+letter combo to a standard editing intent.
+/// Returns `None` when Ctrl isn't held or the letter has no mapping.
+fn map_edit_intent(k: Key, ctrl_held: bool) -> Option<EditIntent> {
+    if !ctrl_held {
+        return None;
+    }
+    Some(match k {
+        Key::C => EditIntent::Copy,
+        Key::X => EditIntent::Cut,
+        Key::V => EditIntent::Paste,
+        Key::A => EditIntent::SelectAll,
+        _ => return None,
+    })
+}
 
 /// Map F-keys and special keys to hardware buttons.
 fn map_hard_button(k: Key) -> Option<HardButton> {

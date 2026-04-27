@@ -12,8 +12,6 @@ use soul_ui::{
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::launcher::Launcher;
-
 // ── State machine ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +131,9 @@ impl MobileBuilder {
             Event::Exchange { action, payload, .. } => {
                 self.handle_exchange(&action, payload, ctx)
             }
+            Event::ResourceResult { kind, payload, .. } => {
+                self.handle_resource_result(&kind, payload, ctx)
+            }
             Event::Menu => {
                 self.menu_open = !self.menu_open;
                 ctx.invalidate_all();
@@ -155,88 +156,57 @@ impl MobileBuilder {
         match action {
             // Launcher returned a picked app ID.
             "return_app" => {
-                if let soul_core::ExchangePayload::Text(app_id) = payload {
-                    self.selected_app_id = app_id.clone();
+                if let Some(app_id) = payload.as_text() {
+                    self.selected_app_id = app_id.to_string();
                     // Try to derive a display name from the app list.
                     self.selected_app_name = soul_script::app_list()
                         .iter()
                         .find(|e| e.app_id == app_id)
                         .map(|e| e.name.clone())
-                        .unwrap_or_else(|| app_id.clone());
+                        .unwrap_or_else(|| app_id.to_string());
                     self.state = BuilderState::ResourcePicker;
                     ctx.invalidate_all();
                 }
                 None
             }
-            // Launcher returned a resource (icon pixels or script text).
-            "return_resource" => {
-                match payload {
-                    soul_core::ExchangePayload::Resource { kind, pixels, width, height, text, .. } => {
-                        match kind.as_str() {
-                            "icon" => {
-                                // Open Draw with the fetched icon pixels.
-                                Some(SystemRequest::Request {
-                                    action: "open_bitmap".to_string(),
-                                    payload: soul_core::ExchangePayload::Bitmap {
-                                        width,
-                                        height,
-                                        pixels,
-                                    },
-                                })
-                            }
-                            "script" => {
-                                // Open Notes with the fetched script text.
-                                Some(SystemRequest::Request {
-                                    action: "open_script".to_string(),
-                                    payload: soul_core::ExchangePayload::Text(text),
-                                })
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
-            }
             // Draw returned edited icon pixels → save back via Launcher.
-            "return_bitmap" => {
-                if let soul_core::ExchangePayload::Bitmap { width, height, pixels } = payload {
-                    let app_id = self.selected_app_id.clone();
-                    Some(SystemRequest::BackgroundSend {
-                        action: "set_resource".to_string(),
-                        payload: soul_core::ExchangePayload::Resource {
-                            app_id,
-                            kind: "icon".to_string(),
-                            width,
-                            height,
-                            pixels,
-                            text: String::new(),
-                        },
-                        target: Launcher::APP_ID.to_string(),
-                    })
-                } else {
-                    None
+            "return_bitmap" => payload.as_bitmap().map(|bm| {
+                let app_id = self.selected_app_id.clone();
+                SystemRequest::SetResource {
+                    app_id,
+                    kind: "icon".to_string(),
+                    payload: soul_core::ExchangePayload::from_bitmap(&bm),
                 }
-            }
+            }),
             // Notes returned edited script text → save back via Launcher.
-            "return_text" => {
-                if let soul_core::ExchangePayload::Text(text) = payload {
-                    let app_id = self.selected_app_id.clone();
-                    Some(SystemRequest::BackgroundSend {
-                        action: "set_resource".to_string(),
-                        payload: soul_core::ExchangePayload::Resource {
-                            app_id,
-                            kind: "script".to_string(),
-                            width: 0,
-                            height: 0,
-                            pixels: vec![],
-                            text,
-                        },
-                        target: Launcher::APP_ID.to_string(),
-                    })
-                } else {
-                    None
+            "return_text" => payload.as_text().map(|text| {
+                let app_id = self.selected_app_id.clone();
+                SystemRequest::SetResource {
+                    app_id,
+                    kind: "script".to_string(),
+                    payload: soul_core::ExchangePayload::from_text(text),
                 }
-            }
+            }),
+            _ => None,
+        }
+    }
+
+    /// React to a resource we previously asked the kernel for.
+    fn handle_resource_result(
+        &mut self,
+        kind: &str,
+        payload: soul_core::ExchangePayload,
+        _ctx: &mut Ctx<'_>,
+    ) -> Option<SystemRequest> {
+        match kind {
+            "icon" => payload.as_bitmap().map(|bm| SystemRequest::Request {
+                action: "open_bitmap".to_string(),
+                payload: soul_core::ExchangePayload::from_bitmap(&bm),
+            }),
+            "script" => payload.as_text().map(|text| SystemRequest::Request {
+                action: "open_script".to_string(),
+                payload: soul_core::ExchangePayload::from_text(text),
+            }),
             _ => None,
         }
     }
@@ -275,7 +245,7 @@ impl MobileBuilder {
                 // "Pick App" — request the Launcher to show the picker.
                 Some(SystemRequest::Request {
                     action: "pick_app".to_string(),
-                    payload: soul_core::ExchangePayload::Text(String::new()),
+                    payload: soul_core::ExchangePayload::empty(),
                 })
             }
             1 => {
@@ -334,33 +304,18 @@ impl MobileBuilder {
                 None
             }
             1 => {
-                // "Edit Icon" — fetch icon pixels from Launcher, then open Draw.
-                Some(SystemRequest::BackgroundSend {
-                    action: "get_resource".to_string(),
-                    payload: soul_core::ExchangePayload::Resource {
-                        app_id,
-                        kind: "icon".to_string(),
-                        width: 0,
-                        height: 0,
-                        pixels: vec![],
-                        text: String::new(),
-                    },
-                    target: Launcher::APP_ID.to_string(),
+                // "Edit Icon" — fetch icon from Launcher (delivered as
+                // `Event::ResourceResult`), then open Draw.
+                Some(SystemRequest::GetResource {
+                    app_id,
+                    kind: "icon".to_string(),
                 })
             }
             2 => {
-                // "Edit Script" — fetch script source from Launcher, then open Notes.
-                Some(SystemRequest::BackgroundSend {
-                    action: "get_resource".to_string(),
-                    payload: soul_core::ExchangePayload::Resource {
-                        app_id,
-                        kind: "script".to_string(),
-                        width: 0,
-                        height: 0,
-                        pixels: vec![],
-                        text: String::new(),
-                    },
-                    target: Launcher::APP_ID.to_string(),
+                // "Edit Script" — fetch script source from Launcher.
+                Some(SystemRequest::GetResource {
+                    app_id,
+                    kind: "script".to_string(),
                 })
             }
             3 => {
