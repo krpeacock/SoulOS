@@ -140,8 +140,10 @@ impl AndroidPlatform {
         let used_w = VIRT_W * self.scale;
         let used_h = VIRT_H * self.scale;
         self.offset_x = self.phys_w.saturating_sub(used_w) / 2;
-        // Push content to the bottom so the UI stays near the thumb.
-        self.offset_y = self.phys_h.saturating_sub(used_h);
+        // Near-bottom: leave ~8% of physical height clear for the Android
+        // navigation bar (back/home/recents) without needing window insets.
+        let nav_margin = self.phys_h * 8 / 100;
+        self.offset_y = self.phys_h.saturating_sub(used_h + nav_margin);
     }
 
     /// Acquire / reacquire the softbuffer surface against the current native window.
@@ -380,17 +382,18 @@ impl Platform for AndroidPlatform {
 /// Build an `AndroidPlatform` and prepare the working directory so the
 /// existing `std::fs` paths in soul-runner resolve correctly.
 ///
-/// On first launch this extracts every file under the APK's `assets/`
-/// directory into `<internal_data_path>/assets/`, then chdirs into the
-/// internal data path. Subsequent launches re-extract (cheap, idempotent)
-/// so that updated APKs ship updated scripts.
-pub fn bootstrap(app: AndroidApp) -> AndroidPlatform {
+/// `asset_subdirs` must list every subdirectory under the APK's `assets/`
+/// root (e.g. `&["scripts", "sprites", "sprites/paint_tools", "draw"]`).
+/// `AAssetDir_getNextFileName` never yields directory names, so callers
+/// must supply the list explicitly (typically from a build.rs env var).
+/// Assets are always re-extracted so updated APKs take effect immediately.
+pub fn bootstrap(app: AndroidApp, asset_subdirs: &[&str]) -> AndroidPlatform {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
             .with_tag("soulos"),
     );
-    log::info!("🚀 SoulOS bootstrap on Android");
+    log::info!("SoulOS bootstrap on Android");
 
     let data_dir = app
         .internal_data_path()
@@ -400,10 +403,26 @@ pub fn bootstrap(app: AndroidApp) -> AndroidPlatform {
     }
 
     let assets_root = data_dir.join("assets");
+    // Always wipe and re-extract so stale files (e.g. a 0-byte "scripts"
+    // left by a previous broken run) cannot block directory creation.
+    let _ = std::fs::remove_dir_all(&assets_root);
     let am = app.asset_manager();
+    // Root-level files (open_dir("") yields only files, never subdirs).
     if let Err(e) = extract_assets(&am, Path::new(""), &assets_root) {
-        log::error!("asset extraction failed: {e}");
+        log::error!("asset root extraction failed: {e}");
     }
+    // Subdirectories must be opened by name; AAssetDir_getNextFileName
+    // never returns directory entries.
+    for subdir in asset_subdirs {
+        if let Err(e) = extract_assets(&am, Path::new(subdir), &assets_root) {
+            log::warn!("asset extraction for '{subdir}' failed: {e}");
+        }
+    }
+    log::info!(
+        "assets extracted: {} subdirs → {}",
+        asset_subdirs.len(),
+        assets_root.display()
+    );
 
     if let Err(e) = std::env::set_current_dir(&data_dir) {
         log::error!("set_current_dir({}): {e}", data_dir.display());
@@ -435,16 +454,7 @@ fn extract_assets(am: &AssetManager, src_rel: &Path, dst_root: &Path) -> std::io
         };
         let child_cstr = path_to_cstring(&child_rel);
 
-        // open_dir succeeds only for real directories; open succeeds for
-        // both files *and* directories on some Android versions. Probe
-        // open_dir first so subdirectory entries are never written as files.
-        if am.open_dir(&child_cstr).is_some() {
-            if let Err(e) = extract_assets(am, &child_rel, dst_root) {
-                log::warn!("extract {}: {e}", child_rel.display());
-            }
-        } else if let Some(mut asset) = am.open(&child_cstr) {
-            // It's a file — stream bytes out. `buffer()` / `AAsset_getBuffer`
-            // only works for uncompressed assets; use Read to handle both.
+        if let Some(mut asset) = am.open(&child_cstr) {
             let mut bytes = Vec::new();
             if let Err(e) = std::io::Read::read_to_end(&mut asset, &mut bytes) {
                 log::warn!("read {}: {e}", child_rel.display());
