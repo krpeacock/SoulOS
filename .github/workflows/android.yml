@@ -72,11 +72,12 @@ jobs:
         # not signing for the Play Store yet, so we generate a throwaway
         # keystore here with the standard Android debug credentials. The
         # resulting APK is fine for `adb install` and side-loading.
+        # cargo-apk doesn't shell-expand `~`, so the keystore lives at
+        # the repo root and the path in Cargo.toml is repo-relative.
         run: |
           set -eux
-          mkdir -p "$HOME/.android"
           keytool -genkeypair -v \
-            -keystore "$HOME/.android/debug.keystore" \
+            -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
             -storetype PKCS12 \
             -alias androiddebugkey \
             -storepass android \

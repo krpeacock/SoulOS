@@ -5,3 +5,4 @@ Cargo.lock
 .soulos/
 
 assets/emoji
+debug.keystore
