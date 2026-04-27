@@ -63,10 +63,13 @@ Run the dev server:
 trunk serve
 ```
 
-Then open <http://127.0.0.1:8080>. The page is intentionally bare for
-now — black background, "SoulOS" centered — to confirm the wasm
-pipeline is wired end to end. Future work integrates `soul-core` behind
-a wasm `Platform` impl, mirroring `soul-runner` and `soul-runner-android`.
+Then open <http://127.0.0.1:8080>. A 240×320 SoulOS canvas renders
+on a black page; pointer input, dirty-rect redraw, and the `soul-core`
+event loop are all wired through the same way as the desktop and
+Android runners. The current app is a small placeholder (title bar,
+welcome text, a "Tap me" button, system strip) — once wasm asset
+loading is in place the full Host can drop in unchanged, since
+`soul_core::run`-equivalent driving doesn't care which `App` it owns.
 
 A one-shot release build (output in `dist/`) is:
 

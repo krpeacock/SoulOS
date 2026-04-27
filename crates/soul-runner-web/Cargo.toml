@@ -8,9 +8,29 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+soul-hal.workspace = true
+soul-core.workspace = true
+soul-ui.workspace = true
+embedded-graphics.workspace = true
 wasm-bindgen = "0.2"
+js-sys = "0.3"
 console_error_panic_hook = "0.1"
 
 [dependencies.web-sys]
 version = "0.3"
-features = ["Document", "Element", "HtmlElement", "Window"]
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "DomRect",
+    "MouseEvent",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
+    "EventTarget",
+    "Performance",
+]
