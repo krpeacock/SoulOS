@@ -347,7 +347,8 @@ impl Launcher {
                     let _ = Image::new(&raw, icon_r.top_left).draw(canvas);
                 }
             } else {
-                let _ = canvas.fill_solid(&icon_r, Gray8::new(if pressed { 128 } else { 255 }));
+                // Light gray so blank tiles are visible against the white background.
+                let _ = canvas.fill_solid(&icon_r, Gray8::new(if pressed { 128 } else { 210 }));
             }
 
             let lbl = Self::label_text(&entry.name);

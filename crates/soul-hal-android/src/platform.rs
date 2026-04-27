@@ -140,7 +140,8 @@ impl AndroidPlatform {
         let used_w = VIRT_W * self.scale;
         let used_h = VIRT_H * self.scale;
         self.offset_x = self.phys_w.saturating_sub(used_w) / 2;
-        self.offset_y = self.phys_h.saturating_sub(used_h) / 2;
+        // Push content to the bottom so the UI stays near the thumb.
+        self.offset_y = self.phys_h.saturating_sub(used_h);
     }
 
     /// Acquire / reacquire the softbuffer surface against the current native window.
