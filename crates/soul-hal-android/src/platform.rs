@@ -435,7 +435,14 @@ fn extract_assets(am: &AssetManager, src_rel: &Path, dst_root: &Path) -> std::io
         };
         let child_cstr = path_to_cstring(&child_rel);
 
-        if let Some(mut asset) = am.open(&child_cstr) {
+        // open_dir succeeds only for real directories; open succeeds for
+        // both files *and* directories on some Android versions. Probe
+        // open_dir first so subdirectory entries are never written as files.
+        if am.open_dir(&child_cstr).is_some() {
+            if let Err(e) = extract_assets(am, &child_rel, dst_root) {
+                log::warn!("extract {}: {e}", child_rel.display());
+            }
+        } else if let Some(mut asset) = am.open(&child_cstr) {
             // It's a file — stream bytes out. `buffer()` / `AAsset_getBuffer`
             // only works for uncompressed assets; use Read to handle both.
             let mut bytes = Vec::new();
@@ -445,11 +452,6 @@ fn extract_assets(am: &AssetManager, src_rel: &Path, dst_root: &Path) -> std::io
             let dst_file = dst_root.join(&child_rel);
             if let Err(e) = std::fs::write(&dst_file, &bytes) {
                 log::warn!("write {}: {e}", dst_file.display());
-            }
-        } else {
-            // Treat as a subdirectory and recurse.
-            if let Err(e) = extract_assets(am, &child_rel, dst_root) {
-                log::warn!("extract {}: {e}", child_rel.display());
             }
         }
     }
