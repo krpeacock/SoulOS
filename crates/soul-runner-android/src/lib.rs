@@ -9,8 +9,13 @@
 
 use android_activity::AndroidApp;
 
+// Subdirectory list emitted by build.rs — AAssetDir_getNextFileName never
+// yields directory names, so bootstrap cannot discover them via open_dir.
+const ASSET_DIRS: &str = env!("SOUL_ASSET_DIRS");
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    let mut platform = soul_hal_android::bootstrap(app);
+    let dirs: Vec<&str> = ASSET_DIRS.split(',').filter(|s| !s.is_empty()).collect();
+    let mut platform = soul_hal_android::bootstrap(app, &dirs);
     soul_core::run(&mut platform, soul_runner::Host::new());
 }
