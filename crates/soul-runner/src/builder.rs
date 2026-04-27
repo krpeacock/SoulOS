@@ -421,6 +421,7 @@ impl MobileBuilder {
                 ComponentType::TextInput => "input",
                 ComponentType::TextArea => "area",
                 ComponentType::Canvas => "canvas",
+                ComponentType::Region => "region",
                 ComponentType::Checkbox => "check",
             },
             self.form.components.len()

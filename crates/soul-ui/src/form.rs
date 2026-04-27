@@ -56,6 +56,8 @@ pub enum ComponentType {
     TextInput,
     TextArea,
     Canvas,
+    /// Invisible layout slot (bounds only; host app draws the surface).
+    Region,
     Checkbox,
 }
 
@@ -201,6 +203,9 @@ impl Form {
                         1,
                     ))
                     .draw(target)?;
+                }
+                ComponentType::Region => {
+                    // Host fills the region; nothing to draw here.
                 }
                 ComponentType::Checkbox => {
                     let checked = comp
