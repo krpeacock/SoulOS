@@ -3,6 +3,7 @@ Cargo.lock
 .DS_Store
 .venv/
 .soulos/
+dist/
 
 assets/emoji
 debug.keystore
