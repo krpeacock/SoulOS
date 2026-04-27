@@ -436,11 +436,12 @@ fn extract_assets(am: &AssetManager, src_rel: &Path, dst_root: &Path) -> std::io
         let child_cstr = path_to_cstring(&child_rel);
 
         if let Some(mut asset) = am.open(&child_cstr) {
-            // It's a file — copy bytes through.
-            let bytes = match asset.buffer() {
-                Ok(b) => b.to_vec(),
-                Err(_) => Vec::new(),
-            };
+            // It's a file — stream bytes out. `buffer()` / `AAsset_getBuffer`
+            // only works for uncompressed assets; use Read to handle both.
+            let mut bytes = Vec::new();
+            if let Err(e) = std::io::Read::read_to_end(&mut asset, &mut bytes) {
+                log::warn!("read {}: {e}", child_rel.display());
+            }
             let dst_file = dst_root.join(&child_rel);
             if let Err(e) = std::fs::write(&dst_file, &bytes) {
                 log::warn!("write {}: {e}", dst_file.display());
