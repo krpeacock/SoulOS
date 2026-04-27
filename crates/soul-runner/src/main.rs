@@ -4,7 +4,7 @@
 //! both to `soul_core::run`. The Android cdylib in `soul-runner-android`
 //! does the same with its own `Platform` impl.
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn main() {
     use soul_core::{run, SCREEN_HEIGHT, SCREEN_WIDTH};
     use soul_hal_hosted::HostedPlatform;
@@ -19,13 +19,14 @@ fn main() {
     run(&mut platform, Host::new());
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
 fn main() {
-    // The Android entry point is `android_main` in `soul-runner-android`.
-    // Cargo still wants a `main` for the bin target, so this is a no-op.
+    // Android entry is `android_main` in `soul-runner-android`; the
+    // wasm entry is `start` in `soul-runner-web`. Cargo still wants
+    // a `main` for the bin target, so this is a no-op.
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod screenshot_tests {
     use soul_hal_hosted::Harness;
     use soul_runner::{

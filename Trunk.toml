@@ -1,0 +1,11 @@
+# Trunk drives the web wasm build. `trunk serve` is the dev command:
+# it watches sources, runs cargo build for the wasm target, and triggers
+# a browser reload on every successful rebuild.
+[build]
+target = "crates/soul-runner-web/index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

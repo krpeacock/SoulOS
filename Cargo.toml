@@ -11,9 +11,12 @@ members = [
     "crates/soul-script",
     "crates/soul-hal-android",
     "crates/soul-runner-android",
+    "crates/soul-runner-web",
 ]
 # Desktop builds (`cargo build`, `cargo check`, `cargo test`) skip the
-# Android crates — they only compile under `cargo apk` with the NDK on PATH.
+# Android and web crates — Android only compiles under `cargo apk` with
+# the NDK on PATH, web only compiles for `wasm32-unknown-unknown` under
+# Trunk (`trunk serve`).
 default-members = [
     "crates/soul-hal",
     "crates/soul-core",

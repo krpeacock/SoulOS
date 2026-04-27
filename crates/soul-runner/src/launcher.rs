@@ -19,6 +19,8 @@ use soul_core::{App, Ctx, Event, HardButton, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
 use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H};
 
+use crate::assets;
+
 // --- Layout constants ---------------------------------------------------
 
 const ICON_CELL: u32 = 32;
@@ -180,7 +182,7 @@ impl Launcher {
                             std::path::PathBuf::from("assets/scripts")
                                 .join(format!("{stem}.rhai"))
                         };
-                        std::fs::read_to_string(&path).ok()
+                        assets::read_to_string(&path).ok()
                     })
                     .unwrap_or_default();
                 Some(SystemRequest::SendResult {
@@ -246,7 +248,7 @@ impl Launcher {
                         }
                     });
                 if let Some(p) = path {
-                    if let Err(e) = std::fs::write(&p, _text.as_bytes()) {
+                    if let Err(e) = assets::write(&p, _text.as_bytes()) {
                         log::warn!("launcher: could not save script for '{app_id}': {e}");
                     } else {
                         log::info!("launcher: saved script for '{app_id}' → {}", p.display());
@@ -370,13 +372,14 @@ impl Launcher {
 fn save_pgm(path: &std::path::Path, w: usize, h: usize, pixels: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        assets::create_dir_all(parent)?;
     }
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "P5")?;
-    writeln!(f, "{w} {h}")?;
-    writeln!(f, "255")?;
-    f.write_all(pixels)
+    let mut buf = Vec::with_capacity(pixels.len() + 32);
+    writeln!(buf, "P5")?;
+    writeln!(buf, "{w} {h}")?;
+    writeln!(buf, "255")?;
+    buf.extend_from_slice(pixels);
+    assets::write(path, &buf)
 }
 
 fn load_icon(stem: &str, cell: usize) -> Vec<u8> {
@@ -396,9 +399,9 @@ fn load_icon(stem: &str, cell: usize) -> Vec<u8> {
 }
 
 fn load_pgm(path: &std::path::Path) -> std::io::Result<(usize, usize, Vec<u8>)> {
-    use std::io::{BufRead, BufReader, Read};
-    let f = std::fs::File::open(path)?;
-    let mut r = BufReader::new(f);
+    use std::io::{BufRead, Read};
+    let bytes = assets::read(path)?;
+    let mut r = std::io::Cursor::new(bytes);
     let mut line = String::new();
     r.read_line(&mut line)?;
     if line.trim() != "P5" {

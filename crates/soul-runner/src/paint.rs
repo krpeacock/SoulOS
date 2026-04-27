@@ -1816,9 +1816,9 @@ fn invalidate_pixel(ctx: &mut Ctx<'_>, x: i32, y: i32) {
 /// regardless of the file's maxval.  maxval=1 binary images (common in
 /// original PadPaint assets) are supported: 0→0 (black), 1→255 (white).
 fn load_pgm(path: &std::path::Path) -> std::io::Result<(usize, usize, Vec<u8>)> {
-    use std::io::{BufRead, BufReader, Read};
-    let f = std::fs::File::open(path)?;
-    let mut r = BufReader::new(f);
+    use std::io::{BufRead, Read};
+    let bytes = crate::assets::read(path)?;
+    let mut r = std::io::Cursor::new(bytes);
 
     let mut line = String::new();
     r.read_line(&mut line)?;
@@ -1890,7 +1890,7 @@ const CAT_CANVAS: u8 = 0;
 
 fn load_db(path: &std::path::Path) -> (soul_db::Database, Vec<u8>) {
     let blank = vec![255u8; CANVAS_PIXELS];
-    if let Ok(bytes) = std::fs::read(path) {
+    if let Ok(bytes) = crate::assets::read(path) {
         if let Some(db) = soul_db::Database::decode(&bytes) {
             let pixels = db
                 .iter_category(CAT_CANVAS)
@@ -1916,7 +1916,7 @@ fn save_db(db: &soul_db::Database, path: &std::path::Path, pixels: &[u8]) {
         db.insert(CAT_CANVAS, data);
     }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::assets::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, db.encode());
+    let _ = crate::assets::write(path, &db.encode());
 }

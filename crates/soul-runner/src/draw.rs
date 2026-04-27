@@ -1288,7 +1288,7 @@ impl App for Draw {
 // --- DB persistence helpers ---------------------------------------------
 
 fn load_db(path: &std::path::Path) -> (soul_db::Database, Option<u32>) {
-    if let Ok(bytes) = std::fs::read(path) {
+    if let Ok(bytes) = crate::assets::read(path) {
         if let Some(db) = soul_db::Database::decode(&bytes) {
             let first_id = db.iter_category(CAT_CANVAS).next().map(|r| r.id);
             return (db, first_id);
@@ -1325,9 +1325,9 @@ fn load_form(db: &soul_db::Database) -> soul_ui::Form {
 
 fn save_db(db: &soul_db::Database, path: &std::path::Path) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::assets::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, db.encode());
+    let _ = crate::assets::write(path, &db.encode());
 }
 
 // --- Canvas record encoding/decoding ------------------------------------

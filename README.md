@@ -43,6 +43,51 @@ cargo apk run -p soul-runner-android --release
 CI builds an APK on every push to `main` (and on tag pushes) via
 `.github/workflows/android.yml`; grab it from the workflow artifacts.
 
+## Running on the web (wasm)
+
+`soul-runner-web` is a `cdylib` that compiles to `wasm32-unknown-unknown`
+and is served by [Trunk](https://trunkrs.dev/). `trunk serve` is the dev
+command — it watches sources, runs `cargo build` for the wasm target on
+each change, and reloads the browser tab when the rebuild succeeds.
+
+Install once:
+
+```
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+```
+
+Run the dev server:
+
+```
+trunk serve
+```
+
+Then open <http://127.0.0.1:8080>. A 240×320 SoulOS canvas renders
+on a black page running the full `Host` — the Launcher, the native
+apps (Calculator, Draw, Paint, Builder, EguiDemo) and every Rhai
+scripted app (Notes, Address, Date, ToDo, Mail, Prefs, Sync,
+Launcher 2, EguiDemo). Pointer input, dirty-rect redraw, and the
+`soul-core` event loop are wired through the same way as the desktop
+and Android runners.
+
+Scripts and icons under `assets/` are embedded into the wasm bundle
+at compile time via `crates/soul-runner/src/assets.rs`, so the build
+needs no asset-fetching infrastructure. Database paths
+(`.soulos/*.sdb`) are non-persistent on the web target — state is
+in-memory for the page session and is reset on reload. (LocalStorage
+persistence can layer on later without touching call sites.)
+
+A one-shot release build (output in `dist/`) is:
+
+```
+trunk build --release
+```
+
+CI builds the wasm bundle on every PR via `.github/workflows/web.yml`
+and uploads `dist/` as a workflow artifact, so PRs can carry a web
+preview link.
+
 ## Aspirations
 
 Eventually, the goal is to have this be software that can be run on bare metal. I would like to try to run it on an old Galaxy S4, or a deprecated Kindle.

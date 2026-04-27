@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>SoulOS</title>
+    <!-- rustc emits post-MVP wasm features by default; enable them on
+         the wasm-opt validator so release builds pass. The set tracks
+         what `target-cpu=generic` for wasm32-unknown-unknown produces. -->
+    <link data-trunk rel="rust"
+          data-wasm-opt="z"
+          data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types" />
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #000;
+            color: #fff;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        /* Canvas backing store is 240x320; scale up via CSS while
+           keeping the pixel grid sharp. The aspect ratio is locked
+           so it letterboxes inside whatever the viewport gives us. */
+        #soulos-canvas {
+            background: #fff;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            width: min(90vw, 480px);
+            aspect-ratio: 240 / 320;
+            height: auto;
+            max-height: 90vh;
+            touch-action: none;
+            box-shadow: 0 0 0 1px #333, 0 8px 32px rgba(255, 255, 255, 0.04);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="soulos-canvas" width="240" height="320"></canvas>
+</body>
+</html>

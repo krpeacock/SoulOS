@@ -1,0 +1,55 @@
+name: Web wasm
+
+# Builds the `soul-runner-web` crate via Trunk and uploads the resulting
+# `dist/` directory as a workflow artifact, so PRs can host a preview off
+# the artifact (or wire it to a static host like Cloudflare Pages /
+# GitHub Pages later).
+#
+# On PRs the build runs only when files that affect the web bundle change,
+# to keep the matrix lean.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    paths:
+      - "crates/soul-runner-web/**"
+      - "crates/soul-core/**"
+      - "crates/soul-ui/**"
+      - "crates/soul-db/**"
+      - "crates/soul-hal/**"
+      - "Cargo.toml"
+      - "Trunk.toml"
+      - ".github/workflows/web.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-wasm
+          workspaces: . -> target
+
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Build wasm bundle
+        run: trunk build --release
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ github.event.pull_request.number || github.sha }}
+          path: dist/
+          if-no-files-found: error

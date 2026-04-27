@@ -113,11 +113,11 @@ impl MobileBuilder {
             return;
         }
         if let Some(parent) = self.db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = crate::assets::create_dir_all(parent);
         }
         let mut db = soul_db::Database::new("builder_form");
         db.insert(0, self.form.to_json().into_bytes());
-        let _ = std::fs::write(&self.db_path, db.encode());
+        let _ = crate::assets::write(&self.db_path, &db.encode());
     }
 
     // ── Exchange handling ────────────────────────────────────────────────────
