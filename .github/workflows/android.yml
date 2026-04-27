@@ -1,0 +1,119 @@
+name: Android APK
+
+# Builds a debug-signed SoulOS APK with cargo-apk and uploads it as a
+# workflow artifact. On tag pushes (`v*`) it also attaches the APK to a
+# GitHub Release. The APK is unsigned for production purposes — fine for
+# `adb install` while the project is still pre-1.0, not fine for the
+# Play Store.
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "crates/soul-hal-android/**"
+      - "crates/soul-runner-android/**"
+      - "crates/soul-runner/**"
+      - "crates/soul-core/**"
+      - "crates/soul-ui/**"
+      - "crates/soul-db/**"
+      - "crates/soul-script/**"
+      - "crates/soul-hal/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # GitHub-hosted Ubuntu images ship the Android SDK + NDK at this path
+      # (see https://github.com/actions/runner-images). cargo-apk wants
+      # ANDROID_NDK_HOME for the toolchain and ANDROID_HOME for d8/aapt.
+      ANDROID_HOME: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install required Android SDK platform + build-tools
+        # cargo-apk demands the exact `platforms;android-N` matching
+        # `target_sdk_version` in Cargo.toml. The set preinstalled on
+        # ubuntu-latest rotates, so we install ours explicitly rather than
+        # hope it's already there.
+        run: |
+          set -eux
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "platforms;android-33" "build-tools;33.0.2"
+
+      - name: Resolve NDK path
+        run: |
+          ndk_root="$(ls -d "$ANDROID_HOME/ndk"/* | sort -V | tail -n1)"
+          echo "ANDROID_NDK_HOME=$ndk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
+          echo "Using NDK at $ndk_root"
+
+      - name: Install Rust + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-apk
+          workspaces: . -> target
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+
+      - name: Generate debug keystore
+        # cargo-apk's release profile demands an explicit keystore. We're
+        # not signing for the Play Store yet, so we generate a throwaway
+        # keystore here with the standard Android debug credentials. The
+        # resulting APK is fine for `adb install` and side-loading.
+        # cargo-apk doesn't shell-expand `~`, so the keystore lives at
+        # the repo root and the path in Cargo.toml is repo-relative.
+        run: |
+          set -eux
+          keytool -genkeypair -v \
+            -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
+            -storetype PKCS12 \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build APK (release)
+        run: cargo apk build -p soul-runner-android --release
+
+      - name: Locate APK
+        id: apk
+        run: |
+          apk_path="$(find target -path '*release/apk/*.apk' | head -n1)"
+          if [ -z "$apk_path" ]; then
+            echo "no APK produced under target/" >&2
+            find target -name '*.apk' || true
+            exit 1
+          fi
+          echo "Found APK at $apk_path"
+          echo "path=$apk_path" >> "$GITHUB_OUTPUT"
+          echo "name=soulos-${GITHUB_SHA::7}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach APK to release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

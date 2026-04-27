@@ -1,0 +1,58 @@
+[package]
+name = "soul-runner-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+soul-runner = { path = "../soul-runner" }
+soul-hal-android = { path = "../soul-hal-android" }
+soul-core = { workspace = true }
+android-activity = { version = "0.6", features = ["native-activity"] }
+log = "0.4"
+
+# cargo-apk packaging metadata. The `assets` path is interpreted relative
+# to this crate's manifest; everything under it is dropped into the APK's
+# `assets/` directory verbatim and extracted at runtime by the bootstrap
+# in `soul-hal-android`.
+[package.metadata.android]
+package = "com.soulos.dev"
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
+assets = "../../assets"
+
+[package.metadata.android.sdk]
+min_sdk_version = 24
+target_sdk_version = 33
+
+# Sign the release APK with a debug keystore. We're a long way out from
+# wanting Play Store-grade signing — this just satisfies cargo-apk's
+# requirement that release builds carry *some* signature. The path is
+# resolved relative to this manifest, so the keystore lives at the
+# repo root. CI generates it on each run; locally:
+#
+#   keytool -genkeypair -v \
+#     -keystore debug.keystore -storetype PKCS12 \
+#     -alias androiddebugkey -storepass android -keypass android \
+#     -keyalg RSA -keysize 2048 -validity 10000 \
+#     -dname "CN=Android Debug,O=Android,C=US"
+[package.metadata.android.signing.release]
+path = "../../debug.keystore"
+keystore_password = "android"
+
+[package.metadata.android.application]
+label = "SoulOS"
+debuggable = true
+
+# NativeActivity, fullscreen, portrait — matches the 240×320 virtual canvas.
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.touchscreen"
+required = true
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|screenSize|keyboardHidden"
+launch_mode = "singleTask"
+orientation = "portrait"
+resizeable_activity = false
