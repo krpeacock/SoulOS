@@ -15,6 +15,7 @@ if ! command -v rustup >/dev/null 2>&1; then
     --default-toolchain stable
 fi
 
+rustup default stable
 rustup target add wasm32-unknown-unknown
 
 if ! command -v trunk >/dev/null 2>&1; then
