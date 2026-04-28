@@ -94,7 +94,8 @@ enum Key {
     Numbers,
     /// (Symbols/Emoji layer only.) Switches back to lowercase letters.
     Letters,
-    /// (Symbols layer only.) Switches to the emoji layer.
+    /// Switches to the emoji layer. Available from every layer's
+    /// bottom row so emoji are one tap from any input mode.
     Emoji,
 }
 
@@ -181,8 +182,9 @@ const L_ROW2: &[Kd] = &[
 ];
 const L_ROW3: &[Kd] = &[
     (Key::Numbers, "123", 2),
+    (Key::Emoji, "\u{263A}", 1),
     (Key::Char(','), ",", 1),
-    (Key::Space, "space", 4),
+    (Key::Space, "space", 3),
     (Key::Char('.'), ".", 1),
     (Key::Return, "ret", 2),
 ];
@@ -223,8 +225,9 @@ const U_ROW2: &[Kd] = &[
 ];
 const U_ROW3: &[Kd] = &[
     (Key::Numbers, "123", 2),
+    (Key::Emoji, "\u{263A}", 1),
     (Key::Char(','), ",", 1),
-    (Key::Space, "space", 4),
+    (Key::Space, "space", 3),
     (Key::Char('.'), ".", 1),
     (Key::Return, "ret", 2),
 ];
@@ -265,7 +268,7 @@ const S_ROW2: &[Kd] = &[
 ];
 const S_ROW3: &[Kd] = &[
     (Key::Letters, "ABC", 2),
-    (Key::Emoji, "\u{263A}", 1),
+    (Key::Char(','), ",", 1),
     (Key::Space, "space", 4),
     (Key::Char('.'), ".", 1),
     (Key::Return, "ret", 2),
