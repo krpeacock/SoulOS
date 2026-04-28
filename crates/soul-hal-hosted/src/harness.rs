@@ -526,6 +526,7 @@ fn translate_input_event(ev: InputEvent) -> Option<Event> {
         InputEvent::StylusDown { x, y } => Some(Event::PenDown { x, y }),
         InputEvent::StylusMove { x, y } => Some(Event::PenMove { x, y }),
         InputEvent::StylusUp { x, y } => Some(Event::PenUp { x, y }),
+        InputEvent::Wheel { dx, dy } => Some(Event::Wheel { dx, dy }),
         InputEvent::Key(k) => Some(Event::Key(k)),
         InputEvent::ButtonDown(HardButton::Menu) => Some(Event::Menu),
         InputEvent::ButtonDown(b) => Some(Event::ButtonDown(b)),

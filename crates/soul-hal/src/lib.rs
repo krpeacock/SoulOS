@@ -93,6 +93,10 @@ pub enum InputEvent {
     StylusMove { x: i16, y: i16 },
     /// Stylus/finger left the panel at `(x, y)`.
     StylusUp { x: i16, y: i16 },
+    /// Scroll-wheel or two-finger swipe. Deltas are in pixel-equivalent
+    /// units. Positive `dy` means the user wants to scroll down (reveal
+    /// content below); positive `dx` means scroll right.
+    Wheel { dx: i16, dy: i16 },
     /// A hardware button was pressed.
     ButtonDown(HardButton),
     /// A hardware button was released.
