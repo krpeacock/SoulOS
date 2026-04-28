@@ -35,6 +35,8 @@ features = [
     "Touch",
     "TouchEvent",
     "TouchList",
+    "WheelEvent",
     "EventTarget",
+    "AddEventListenerOptions",
     "Performance",
 ]
