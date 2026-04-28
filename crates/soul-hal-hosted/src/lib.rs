@@ -142,6 +142,19 @@ impl HostedPlatform {
         self.prev_mouse_down = mouse_down;
         self.prev_mouse_pos  = mouse_pos;
 
+        // ── Scroll wheel / two-finger swipe ───────────────────────────────────
+        // minifb returns positive y when the wheel rolls forward (toward the
+        // screen) — i.e., the user wants to scroll *up*. We invert so positive
+        // dy in our event means "scroll content down". Multiply by a line-
+        // height-ish factor so a single wheel notch moves a useful distance.
+        if let Some((sx, sy)) = self.window.get_scroll_wheel() {
+            let dx = (sx * 16.0) as i16;
+            let dy = (-sy * 16.0) as i16;
+            if dx != 0 || dy != 0 {
+                self.pending.push_back(InputEvent::Wheel { dx, dy });
+            }
+        }
+
         // ── Keyboard ──────────────────────────────────────────────────────────
         // minifb provides two views after each update_with_buffer():
         //   get_keys_pressed(No)  → keys whose *first* press occurred this frame

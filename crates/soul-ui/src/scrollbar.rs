@@ -518,6 +518,15 @@ impl Scrollbar {
 ///
 /// Handles the coordination between scroll position and content display,
 /// automatically showing/hiding the scrollbar based on content size.
+///
+/// Two interaction styles are supported in the same view:
+/// - **Touch / drag-on-content**: pen-down on the content area starts a
+///   tracked gesture; pen-move past [`ScrollableView::DRAG_THRESHOLD`]
+///   pixels begins scrolling so the content follows the finger.
+/// - **Mouse / trackpad**: [`ScrollableView::handle_wheel`] consumes a
+///   pixel-delta from a wheel/two-finger swipe.
+///
+/// The included scrollbar widget remains visible and clickable for both.
 #[derive(Debug, Clone)]
 pub struct ScrollableView {
     /// Total area for the scrollable view including scrollbar.
@@ -528,6 +537,13 @@ pub struct ScrollableView {
     scrollbar: Scrollbar,
     /// Whether the scrollbar is currently visible.
     scrollbar_visible: bool,
+    /// Pen-down tracking for drag-on-content scrolling.
+    /// Holds `(start_y, scroll_offset_at_start_pixels)`.
+    content_drag_start: Option<(i16, i32)>,
+    /// True once the in-progress pen gesture has crossed the drag threshold
+    /// and is being treated as a scroll. Used so the parent app can suppress
+    /// click handling for drag gestures.
+    content_drag_active: bool,
 }
 
 impl ScrollableView {
@@ -561,8 +577,15 @@ impl ScrollableView {
             content_height,
             scrollbar: Scrollbar::new(scrollbar_area, viewport_ratio),
             scrollbar_visible,
+            content_drag_start: None,
+            content_drag_active: false,
         }
     }
+
+    /// Pixel distance a pen must travel before drag-on-content scrolling
+    /// activates. Below this, the gesture is treated as a click on the
+    /// underlying content.
+    pub const DRAG_THRESHOLD: i32 = 4;
 
     /// Resize the scroll view area (e.g., when keyboard appears/disappears).
     pub fn resize(&mut self, new_area: Rectangle) -> ScrollbarOutput {
@@ -681,21 +704,88 @@ impl ScrollableView {
         }
     }
 
-    /// Handle pen/touch events. Returns true if the event was consumed.
+    /// Handle pen/touch events.
+    ///
+    /// On pen-down inside the scrollbar, the existing scrollbar widget
+    /// handles the press. On pen-down inside the content, we record the
+    /// start position so a subsequent drag past [`Self::DRAG_THRESHOLD`]
+    /// scrolls the content (touch-style). The scrollbar's own thumb-drag
+    /// is unaffected.
     pub fn handle_pen_event(&mut self, down: bool, move_: bool, up: bool, x: i16, y: i16) -> ScrollbarOutput {
         if !self.scrollbar_visible {
             return ScrollbarOutput::default();
         }
 
+        let on_scrollbar = self.scrollbar.contains_point(x, y);
+
         if down {
-            self.scrollbar.pen_down(x, y)
+            if on_scrollbar {
+                self.scrollbar.pen_down(x, y)
+            } else {
+                self.content_drag_start = Some((y, self.scroll_offset()));
+                self.content_drag_active = false;
+                ScrollbarOutput::default()
+            }
         } else if move_ {
-            self.scrollbar.pen_move(x, y)
+            if let Some((start_y, start_offset)) = self.content_drag_start {
+                let dy = (start_y as i32) - (y as i32);
+                if !self.content_drag_active && dy.abs() >= Self::DRAG_THRESHOLD {
+                    self.content_drag_active = true;
+                }
+                if self.content_drag_active {
+                    self.set_scroll_offset_pixels(start_offset + dy)
+                } else {
+                    ScrollbarOutput::default()
+                }
+            } else {
+                self.scrollbar.pen_move(x, y)
+            }
         } else if up {
-            self.scrollbar.pen_up()
+            let was_drag = self.content_drag_active;
+            self.content_drag_start = None;
+            self.content_drag_active = false;
+            if was_drag {
+                ScrollbarOutput {
+                    dirty: Some(self.area),
+                    position: self.scrollbar.position(),
+                    position_changed: false,
+                }
+            } else {
+                self.scrollbar.pen_up()
+            }
         } else {
             ScrollbarOutput::default()
         }
+    }
+
+    /// Handle a scroll-wheel / two-finger-swipe delta in pixels.
+    /// Positive `dy` scrolls the content down (reveals content below).
+    pub fn handle_wheel(&mut self, dy: i16) -> ScrollbarOutput {
+        if !self.scrollbar_visible || dy == 0 {
+            return ScrollbarOutput::default();
+        }
+        let cur = self.scroll_offset();
+        self.set_scroll_offset_pixels(cur + dy as i32)
+    }
+
+    /// Whether the in-progress pen gesture is being treated as a scroll
+    /// drag rather than a click. Apps may consult this to suppress click
+    /// handling on the same pen-down/up pair.
+    pub fn is_drag_scrolling(&self) -> bool {
+        self.content_drag_active
+    }
+
+    fn set_scroll_offset_pixels(&mut self, offset: i32) -> ScrollbarOutput {
+        if self.content_height <= self.area.size.height {
+            return ScrollbarOutput::default();
+        }
+        let max_scroll = (self.content_height - self.area.size.height) as f32;
+        if max_scroll <= 0.0 {
+            return ScrollbarOutput::default();
+        }
+        let clamped = (offset as f32).clamp(0.0, max_scroll);
+        let new_pos = clamped / max_scroll;
+        self.scrollbar.set_position(new_pos)
     }
 
     /// Handle keyboard events for accessibility.
@@ -730,5 +820,76 @@ impl ScrollableView {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_view() -> ScrollableView {
+        let area = Rectangle::new(Point::new(0, 0), Size::new(240, 200));
+        ScrollableView::new(area, 800)
+    }
+
+    #[test]
+    fn wheel_scrolls_content_down() {
+        let mut v = make_view();
+        assert_eq!(v.scroll_offset(), 0);
+        let out = v.handle_wheel(50);
+        assert!(out.position_changed);
+        assert_eq!(v.scroll_offset(), 50);
+    }
+
+    #[test]
+    fn wheel_clamps_to_extents() {
+        let mut v = make_view();
+        v.handle_wheel(10_000);
+        assert_eq!(v.scroll_offset(), (800 - 200) as i32);
+        v.handle_wheel(-10_000);
+        assert_eq!(v.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn wheel_no_op_when_unscrollable() {
+        let area = Rectangle::new(Point::new(0, 0), Size::new(240, 200));
+        let mut v = ScrollableView::new(area, 100);
+        let out = v.handle_wheel(50);
+        assert!(!out.position_changed);
+        assert_eq!(v.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn drag_on_content_scrolls_after_threshold() {
+        let mut v = make_view();
+        v.handle_pen_event(true, false, false, 100, 100);
+        // Move 2px — below threshold, no scroll yet.
+        v.handle_pen_event(false, true, false, 100, 98);
+        assert_eq!(v.scroll_offset(), 0);
+        assert!(!v.is_drag_scrolling());
+        // Move another 8px — past threshold, scroll engages.
+        v.handle_pen_event(false, true, false, 100, 90);
+        assert!(v.is_drag_scrolling());
+        assert_eq!(v.scroll_offset(), 10);
+    }
+
+    #[test]
+    fn drag_releases_clean_state() {
+        let mut v = make_view();
+        v.handle_pen_event(true, false, false, 100, 100);
+        v.handle_pen_event(false, true, false, 100, 50);
+        assert!(v.is_drag_scrolling());
+        v.handle_pen_event(false, false, true, 100, 50);
+        assert!(!v.is_drag_scrolling());
+    }
+
+    #[test]
+    fn pen_down_on_scrollbar_uses_scrollbar_path() {
+        let mut v = make_view();
+        // Scrollbar lives on the right edge. Hit it.
+        let sb_x = 240 - 8;
+        v.handle_pen_event(true, false, false, sb_x, 100);
+        // No content drag was started.
+        assert!(v.content_drag_start.is_none());
     }
 }

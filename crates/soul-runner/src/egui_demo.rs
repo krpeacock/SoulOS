@@ -42,6 +42,9 @@ pub struct EguiDemo {
     state: DemoState,
     scroll_view: ScrollableView,
     scroll_offset: i32,
+    /// True if the last pen-down landed on the scrollbar — suppresses
+    /// the click-to-tap fallback on pen-up.
+    pen_down_was_on_scrollbar: bool,
 }
 
 impl EguiDemo {
@@ -64,6 +67,7 @@ impl EguiDemo {
             state: DemoState::default(),
             scroll_view: ScrollableView::new(scroll_area, Self::CONTENT_HEIGHT),
             scroll_offset: 0,
+            pen_down_was_on_scrollbar: false,
         }
     }
     
@@ -317,24 +321,17 @@ impl App for EguiDemo {
             }
             
             Event::PenDown { x, y } => {
-                // Check if scrollbar was hit
                 let scroll_output = self.scroll_view.handle_pen_event(true, false, false, x, y);
                 if let Some(dirty) = scroll_output.dirty {
                     ctx.invalidate(dirty);
                 }
                 if scroll_output.position_changed {
                     self.scroll_offset = self.scroll_view.scroll_offset();
-                    // Invalidate the entire content area when scrolling
                     ctx.invalidate(self.scroll_view.content_area());
                 }
-                
-                // If not scrollbar, handle component interaction
-                if !self.scroll_view.scrollbar_contains_point(x, y) {
-                    self.handle_component_tap(x, y);
-                    ctx.invalidate_all();
-                }
+                self.pen_down_was_on_scrollbar = self.scroll_view.scrollbar_contains_point(x, y);
             }
-            
+
             Event::PenMove { x, y } => {
                 let scroll_output = self.scroll_view.handle_pen_event(false, true, false, x, y);
                 if let Some(dirty) = scroll_output.dirty {
@@ -342,19 +339,34 @@ impl App for EguiDemo {
                 }
                 if scroll_output.position_changed {
                     self.scroll_offset = self.scroll_view.scroll_offset();
-                    // Invalidate the entire content area when scrolling
                     ctx.invalidate(self.scroll_view.content_area());
                 }
             }
-            
+
             Event::PenUp { x, y } => {
+                let was_drag = self.scroll_view.is_drag_scrolling();
                 let scroll_output = self.scroll_view.handle_pen_event(false, false, true, x, y);
                 if let Some(dirty) = scroll_output.dirty {
                     ctx.invalidate(dirty);
                 }
                 if scroll_output.position_changed {
                     self.scroll_offset = self.scroll_view.scroll_offset();
-                    // Invalidate the entire content area when scrolling
+                    ctx.invalidate(self.scroll_view.content_area());
+                }
+                if !was_drag && !self.pen_down_was_on_scrollbar {
+                    self.handle_component_tap(x, y);
+                    ctx.invalidate_all();
+                }
+                self.pen_down_was_on_scrollbar = false;
+            }
+
+            Event::Wheel { dy, .. } => {
+                let scroll_output = self.scroll_view.handle_wheel(dy);
+                if let Some(dirty) = scroll_output.dirty {
+                    ctx.invalidate(dirty);
+                }
+                if scroll_output.position_changed {
+                    self.scroll_offset = self.scroll_view.scroll_offset();
                     ctx.invalidate(self.scroll_view.content_area());
                 }
             }

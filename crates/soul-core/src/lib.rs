@@ -153,6 +153,9 @@ pub enum Event {
     PenMove { x: i16, y: i16 },
     /// Stylus/finger lifted; `(x, y)` is the final coordinate.
     PenUp { x: i16, y: i16 },
+    /// Scroll-wheel or two-finger swipe. Pixel-equivalent deltas;
+    /// positive `dy` scrolls down (reveals content below).
+    Wheel { dx: i16, dy: i16 },
     /// A hard button (e.g., [`HardButton::Home`]) was pressed.
     ButtonDown(HardButton),
     /// A hard button was released.
@@ -322,6 +325,7 @@ fn translate(input: InputEvent) -> Option<Event> {
         InputEvent::StylusDown { x, y } => Some(Event::PenDown { x, y }),
         InputEvent::StylusMove { x, y } => Some(Event::PenMove { x, y }),
         InputEvent::StylusUp { x, y } => Some(Event::PenUp { x, y }),
+        InputEvent::Wheel { dx, dy } => Some(Event::Wheel { dx, dy }),
         InputEvent::ButtonDown(HardButton::Menu) => Some(Event::Menu),
         InputEvent::ButtonUp(HardButton::Menu) => None,
         InputEvent::ButtonDown(b) => Some(Event::ButtonDown(b)),

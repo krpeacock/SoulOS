@@ -21,8 +21,8 @@ use embedded_graphics::{
 use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
 use wasm_bindgen::{prelude::*, Clamped, JsCast};
 use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement, ImageData, KeyboardEvent,
-    MouseEvent,
+    AddEventListenerOptions, CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement,
+    ImageData, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent,
 };
 
 use soul_core::{SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -92,19 +92,27 @@ pub struct WebPlatform {
     _on_down: Closure<dyn FnMut(MouseEvent)>,
     _on_move: Closure<dyn FnMut(MouseEvent)>,
     _on_up: Closure<dyn FnMut(MouseEvent)>,
+    _on_touchstart: Closure<dyn FnMut(TouchEvent)>,
+    _on_touchmove: Closure<dyn FnMut(TouchEvent)>,
+    _on_touchend: Closure<dyn FnMut(TouchEvent)>,
+    _on_wheel: Closure<dyn FnMut(WheelEvent)>,
     _on_keydown: Closure<dyn FnMut(KeyboardEvent)>,
     _on_keyup: Closure<dyn FnMut(KeyboardEvent)>,
     /// Catches characters from the mobile virtual keyboard. The
     /// browser delivers IME-composed characters via `input` events on
     /// a focused text field rather than `keydown`, so we keep a hidden
     /// `<input>` in the DOM and forward its value to the queue.
+    /// It is only focused when an app explicitly requests text input,
+    /// so taps on non-text widgets don't summon the OS keyboard.
     _hidden_input: HtmlInputElement,
     _on_input: Closure<dyn FnMut(web_sys::Event)>,
-    /// Focuses `_hidden_input` on canvas tap so the OS shows its
-    /// soft keyboard.
-    _on_canvas_focus: Closure<dyn FnMut(web_sys::Event)>,
     start_ms: f64,
     _pointer_down: Rc<RefCell<bool>>,
+    /// True between touchstart and touchend on the canvas. Used to
+    /// suppress the synthesized mouse events that browsers fire after
+    /// touch sequences, so a tap doesn't dispatch as both a touch and
+    /// a mouse stylus.
+    _touch_active: Rc<RefCell<bool>>,
 }
 
 impl WebPlatform {
@@ -133,14 +141,21 @@ impl WebPlatform {
         let rgba = vec![0u8; (VIRT_W * VIRT_H * 4) as usize];
         let queue: Rc<RefCell<VecDeque<InputEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
         let pointer_down: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let touch_active: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-        let on_down = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Down)?;
-        let on_move = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Move)?;
-        let on_up = mouse_listener(&canvas, &queue, &pointer_down, MouseKind::Up)?;
+        let on_down = mouse_listener(&canvas, &queue, &pointer_down, &touch_active, MouseKind::Down)?;
+        let on_move = mouse_listener(&canvas, &queue, &pointer_down, &touch_active, MouseKind::Move)?;
+        let on_up = mouse_listener(&canvas, &queue, &pointer_down, &touch_active, MouseKind::Up)?;
 
-        // Hidden off-screen text field: focused on canvas tap so the OS
-        // virtual keyboard appears. Its `input` event delivers chars that
-        // mobile IMEs bypass `keydown` for.
+        let on_touchstart = touch_listener(&canvas, &queue, &touch_active, TouchKind::Start)?;
+        let on_touchmove = touch_listener(&canvas, &queue, &touch_active, TouchKind::Move)?;
+        let on_touchend = touch_listener(&canvas, &queue, &touch_active, TouchKind::End)?;
+
+        let on_wheel = wheel_listener(&canvas, &queue)?;
+
+        // Hidden off-screen text field. Apps explicitly focus it when
+        // text input is wanted; otherwise it stays out of the way so
+        // taps on non-text widgets don't summon the OS keyboard.
         let hidden_input: HtmlInputElement = document
             .create_element("input")?
             .dyn_into()?;
@@ -158,7 +173,6 @@ impl WebPlatform {
         let on_keydown = keyboard_listener(&window, &queue, KeyKind::Down)?;
         let on_keyup = keyboard_listener(&window, &queue, KeyKind::Up)?;
         let on_input = input_listener(&hidden_input, &queue)?;
-        let on_canvas_focus = focus_listener(&canvas, &hidden_input)?;
 
         let start_ms = window
             .performance()
@@ -174,13 +188,17 @@ impl WebPlatform {
             _on_down: on_down,
             _on_move: on_move,
             _on_up: on_up,
+            _on_touchstart: on_touchstart,
+            _on_touchmove: on_touchmove,
+            _on_touchend: on_touchend,
+            _on_wheel: on_wheel,
             _on_keydown: on_keydown,
             _on_keyup: on_keyup,
             _hidden_input: hidden_input,
             _on_input: on_input,
-            _on_canvas_focus: on_canvas_focus,
             start_ms,
             _pointer_down: pointer_down,
+            _touch_active: touch_active,
         })
     }
 }
@@ -251,13 +269,21 @@ fn mouse_listener(
     canvas: &HtmlCanvasElement,
     queue: &Rc<RefCell<VecDeque<InputEvent>>>,
     pointer_down: &Rc<RefCell<bool>>,
+    touch_active: &Rc<RefCell<bool>>,
     kind: MouseKind,
 ) -> Result<Closure<dyn FnMut(MouseEvent)>, JsValue> {
     let queue = queue.clone();
     let pointer_down = pointer_down.clone();
+    let touch_active = touch_active.clone();
     let target_canvas = canvas.clone();
 
     let closure = Closure::wrap(Box::new(move |event: MouseEvent| {
+        // Browsers fire synthetic mouse events after touch sequences;
+        // skip them so a tap doesn't double-dispatch.
+        if *touch_active.borrow() {
+            return;
+        }
+
         let rect = target_canvas.get_bounding_client_rect();
         // CSS pixels → canvas-pixel coordinates. The backing store is
         // VIRT_W×VIRT_H regardless of CSS-displayed size, so we scale.
@@ -294,6 +320,123 @@ fn mouse_listener(
         MouseKind::Up => "mouseup",
     };
     canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
+    Ok(closure)
+}
+
+// ── Touch ────────────────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone)]
+enum TouchKind {
+    Start,
+    Move,
+    End,
+}
+
+fn touch_listener(
+    canvas: &HtmlCanvasElement,
+    queue: &Rc<RefCell<VecDeque<InputEvent>>>,
+    touch_active: &Rc<RefCell<bool>>,
+    kind: TouchKind,
+) -> Result<Closure<dyn FnMut(TouchEvent)>, JsValue> {
+    let queue = queue.clone();
+    let touch_active = touch_active.clone();
+    let target_canvas = canvas.clone();
+
+    let closure = Closure::wrap(Box::new(move |event: TouchEvent| {
+        // Stop the browser from interpreting the gesture (page scroll,
+        // pinch-zoom, double-tap zoom) so all touches reach the app.
+        // The CSS `touch-action: none` covers most browsers, but
+        // prevent_default is the belt-and-braces guarantee.
+        event.prevent_default();
+
+        // For touchend the active touches list is the *remaining* ones,
+        // so use changed_touches to read the lifted finger's coordinates.
+        let touches = match kind {
+            TouchKind::Start | TouchKind::Move => event.touches(),
+            TouchKind::End => event.changed_touches(),
+        };
+        let touch = match touches.item(0) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let rect = target_canvas.get_bounding_client_rect();
+        let scale_x = (target_canvas.width() as f64) / rect.width().max(1.0);
+        let scale_y = (target_canvas.height() as f64) / rect.height().max(1.0);
+        let cx = ((touch.client_x() as f64 - rect.left()) * scale_x).round() as i32;
+        let cy = ((touch.client_y() as f64 - rect.top()) * scale_y).round() as i32;
+        let x = cx.clamp(0, VIRT_W as i32 - 1) as i16;
+        let y = cy.clamp(0, VIRT_H as i32 - 1) as i16;
+
+        let mut q = queue.borrow_mut();
+        match kind {
+            TouchKind::Start => {
+                *touch_active.borrow_mut() = true;
+                q.push_back(InputEvent::StylusDown { x, y });
+            }
+            TouchKind::Move => {
+                q.push_back(InputEvent::StylusMove { x, y });
+            }
+            TouchKind::End => {
+                q.push_back(InputEvent::StylusUp { x, y });
+                // Only clear the suppression flag once the last finger lifts.
+                if event.touches().length() == 0 {
+                    *touch_active.borrow_mut() = false;
+                }
+            }
+        }
+    }) as Box<dyn FnMut(TouchEvent)>);
+
+    let event_name = match kind {
+        TouchKind::Start => "touchstart",
+        TouchKind::Move => "touchmove",
+        TouchKind::End => "touchend",
+    };
+    // Modern browsers default touch listeners to passive, which makes
+    // prevent_default a no-op. Force non-passive so the gesture can be
+    // claimed for in-app scrolling.
+    let opts = AddEventListenerOptions::new();
+    opts.set_passive(false);
+    canvas.add_event_listener_with_callback_and_add_event_listener_options(
+        event_name,
+        closure.as_ref().unchecked_ref(),
+        &opts,
+    )?;
+    Ok(closure)
+}
+
+// ── Wheel ────────────────────────────────────────────────────────────────────
+
+fn wheel_listener(
+    canvas: &HtmlCanvasElement,
+    queue: &Rc<RefCell<VecDeque<InputEvent>>>,
+) -> Result<Closure<dyn FnMut(WheelEvent)>, JsValue> {
+    let queue = queue.clone();
+    let closure = Closure::wrap(Box::new(move |event: WheelEvent| {
+        // Stop the browser from also scrolling the surrounding page.
+        event.prevent_default();
+
+        // delta_mode: 0=pixel, 1=line, 2=page. Convert lines/pages to
+        // a sensible pixel-equivalent so apps don't have to care.
+        let mult: f64 = match event.delta_mode() {
+            1 => 16.0,
+            2 => VIRT_H as f64,
+            _ => 1.0,
+        };
+        let dx = (event.delta_x() * mult) as i16;
+        let dy = (event.delta_y() * mult) as i16;
+        if dx != 0 || dy != 0 {
+            queue.borrow_mut().push_back(InputEvent::Wheel { dx, dy });
+        }
+    }) as Box<dyn FnMut(WheelEvent)>);
+    // Wheel is also passive by default in modern browsers.
+    let opts = AddEventListenerOptions::new();
+    opts.set_passive(false);
+    canvas.add_event_listener_with_callback_and_add_event_listener_options(
+        "wheel",
+        closure.as_ref().unchecked_ref(),
+        &opts,
+    )?;
     Ok(closure)
 }
 
@@ -374,23 +517,6 @@ fn input_listener(
         }
     }) as Box<dyn FnMut(web_sys::Event)>);
     input.add_event_listener_with_callback("input", closure.as_ref().unchecked_ref())?;
-    Ok(closure)
-}
-
-/// Register mousedown + touchstart on the canvas to keep the hidden
-/// input focused, which is what tells the OS to display its virtual
-/// keyboard on mobile devices.
-fn focus_listener(
-    canvas: &HtmlCanvasElement,
-    hidden_input: &HtmlInputElement,
-) -> Result<Closure<dyn FnMut(web_sys::Event)>, JsValue> {
-    let input_ref = hidden_input.clone();
-    let closure = Closure::wrap(Box::new(move |_ev: web_sys::Event| {
-        let _ = input_ref.focus();
-    }) as Box<dyn FnMut(web_sys::Event)>);
-    let fn_ref: &js_sys::Function = closure.as_ref().unchecked_ref();
-    canvas.add_event_listener_with_callback("mousedown", fn_ref)?;
-    canvas.add_event_listener_with_callback("touchstart", fn_ref)?;
     Ok(closure)
 }
 

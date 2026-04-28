@@ -161,6 +161,7 @@ fn translate(input: InputEvent) -> Option<Event> {
         InputEvent::StylusDown { x, y } => Some(Event::PenDown { x, y }),
         InputEvent::StylusMove { x, y } => Some(Event::PenMove { x, y }),
         InputEvent::StylusUp { x, y } => Some(Event::PenUp { x, y }),
+        InputEvent::Wheel { dx, dy } => Some(Event::Wheel { dx, dy }),
         InputEvent::ButtonDown(b) => Some(Event::ButtonDown(b)),
         InputEvent::ButtonUp(b) => Some(Event::ButtonUp(b)),
         InputEvent::Key(k) => Some(Event::Key(k)),
