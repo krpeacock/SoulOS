@@ -41,9 +41,9 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
-    text::{Baseline, Text},
 };
 
+use crate::emoji;
 use crate::palette::{BLACK, GRAY, WHITE};
 use soul_core::a11y::{Accessible, AccessibleNode};
 
@@ -245,8 +245,7 @@ impl TextInput {
         if self.buffer.is_empty() && !self.placeholder.is_empty() {
             let style = MonoTextStyle::new(&FONT_6X10, GRAY);
             let visible: String = self.placeholder.chars().take(max_chars).collect();
-            Text::with_baseline(&visible, Point::new(inner_x, inner_y), style, Baseline::Top)
-                .draw(canvas)?;
+            emoji::draw_text(canvas, &visible, Point::new(inner_x, inner_y), style)?;
         } else {
             // Horizontal scroll so the caret is visible.
             let cursor_char = self.buffer[..self.cursor].chars().count();
@@ -267,8 +266,7 @@ impl TextInput {
                 .unwrap_or(self.buffer.len());
             let visible = &self.buffer[start_byte..end_byte];
             let style = MonoTextStyle::new(&FONT_6X10, BLACK);
-            Text::with_baseline(visible, Point::new(inner_x, inner_y), style, Baseline::Top)
-                .draw(canvas)?;
+            emoji::draw_text(canvas, visible, Point::new(inner_x, inner_y), style)?;
             // Caret.
             let caret_col = (cursor_char - scroll) as i32;
             let caret_x = inner_x + caret_col * CHAR_W;

@@ -55,9 +55,9 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, Rectangle},
-    text::{Baseline, Text},
 };
 
+use crate::emoji;
 use crate::palette::{BLACK, WHITE};
 
 const CHAR_W: i32 = 5;
@@ -467,13 +467,12 @@ impl TextArea {
                 break;
             }
             let text = &self.buffer[line.start..line.end];
-            Text::with_baseline(
+            emoji::draw_text(
+                canvas,
                 text,
                 Point::new(self.area.top_left.x + TEXT_PAD, y),
                 black_style,
-                Baseline::Top,
-            )
-            .draw(canvas)?;
+            )?;
         }
 
         // Pass 2: invert selected spans.
@@ -505,13 +504,12 @@ impl TextArea {
                 );
                 rect.into_styled(PrimitiveStyle::with_fill(BLACK)).draw(canvas)?;
                 let selected_text = &self.buffer[ls..le];
-                Text::with_baseline(
+                emoji::draw_text(
+                    canvas,
                     selected_text,
                     Point::new(self.area.top_left.x + TEXT_PAD + s_chars * CHAR_W, y),
                     white_style,
-                    Baseline::Top,
-                )
-                .draw(canvas)?;
+                )?;
             }
         } else if let Some(p) = self.caret_position(self.cursor) {
             if p.y + LINE_H <= max_y {

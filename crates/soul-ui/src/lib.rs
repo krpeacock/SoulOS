@@ -78,6 +78,7 @@ pub mod egui_integration;
 pub mod egui_layout;
 pub mod egui_scroll;
 pub mod egui_widgets;
+pub mod emoji;
 pub mod form;
 pub mod keyboard;
 pub mod pagination;
