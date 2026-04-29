@@ -41,9 +41,9 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
-    text::{Baseline, Text},
 };
 
+use crate::emoji;
 use crate::palette::{BLACK, GRAY, WHITE};
 use soul_core::a11y::{Accessible, AccessibleNode};
 
@@ -140,15 +140,8 @@ impl TextInput {
     /// pen-up (tap to focus) or pen-down (immediate feedback).
     pub fn pen_released(&mut self, x: i16, _y: i16) -> Option<Rectangle> {
         let inner_x = (x as i32 - self.area.top_left.x - INPUT_PAD).max(0);
-        let char_idx = (inner_x / CHAR_W) as usize;
-        let char_count = self.buffer.chars().count();
-        let clamped = char_idx.min(char_count);
-        let byte = self
-            .buffer
-            .char_indices()
-            .nth(clamped)
-            .map(|(i, _)| i)
-            .unwrap_or(self.buffer.len());
+        let target_cell = inner_x / CHAR_W;
+        let byte = byte_at_cell(&self.buffer, target_cell);
         if byte != self.cursor {
             self.cursor = byte;
             Some(self.area)
@@ -240,37 +233,42 @@ impl TextInput {
 
         let inner_x = self.area.top_left.x + INPUT_PAD;
         let inner_y = self.area.top_left.y + (self.area.size.height as i32 - FONT_H) / 2;
-        let max_chars = ((self.area.size.width as i32 - INPUT_PAD * 2) / CHAR_W).max(1) as usize;
+        let max_cells = ((self.area.size.width as i32 - INPUT_PAD * 2) / CHAR_W).max(1);
 
         if self.buffer.is_empty() && !self.placeholder.is_empty() {
             let style = MonoTextStyle::new(&FONT_6X10, GRAY);
-            let visible: String = self.placeholder.chars().take(max_chars).collect();
-            Text::with_baseline(&visible, Point::new(inner_x, inner_y), style, Baseline::Top)
-                .draw(canvas)?;
+            let mut visible = String::new();
+            let mut cells = 0;
+            for c in self.placeholder.chars() {
+                let w = emoji::cell_width(c);
+                if cells + w > max_cells {
+                    break;
+                }
+                visible.push(c);
+                cells += w;
+            }
+            emoji::draw_text(canvas, &visible, Point::new(inner_x, inner_y), style)?;
         } else {
-            // Horizontal scroll so the caret is visible.
-            let cursor_char = self.buffer[..self.cursor].chars().count();
-            let total_chars = self.buffer.chars().count();
-            let scroll = cursor_char.saturating_sub(max_chars - 1);
-            let end = (scroll + max_chars).min(total_chars);
-            let start_byte = self
-                .buffer
-                .char_indices()
-                .nth(scroll)
-                .map(|(i, _)| i)
-                .unwrap_or(self.buffer.len());
-            let end_byte = self
-                .buffer
-                .char_indices()
-                .nth(end)
-                .map(|(i, _)| i)
-                .unwrap_or(self.buffer.len());
-            let visible = &self.buffer[start_byte..end_byte];
+            // Horizontal scroll so the caret is visible. Track in cells.
+            let cursor_cell = emoji::cells_in(&self.buffer[..self.cursor]);
+            let scroll_cells = (cursor_cell - (max_cells - 1)).max(0);
+            let start_byte = byte_at_cell(&self.buffer, scroll_cells);
+            // Take chars from start_byte until we run out of cell budget.
+            let mut visible_end = start_byte;
+            let mut cells = 0;
+            for (b, c) in self.buffer[start_byte..].char_indices() {
+                let w = emoji::cell_width(c);
+                if cells + w > max_cells {
+                    break;
+                }
+                visible_end = start_byte + b + c.len_utf8();
+                cells += w;
+            }
+            let visible = &self.buffer[start_byte..visible_end];
             let style = MonoTextStyle::new(&FONT_6X10, BLACK);
-            Text::with_baseline(visible, Point::new(inner_x, inner_y), style, Baseline::Top)
-                .draw(canvas)?;
-            // Caret.
-            let caret_col = (cursor_char - scroll) as i32;
+            emoji::draw_text(canvas, visible, Point::new(inner_x, inner_y), style)?;
+            // Caret in cells from the visible region's left edge.
+            let caret_col = cursor_cell - scroll_cells;
             let caret_x = inner_x + caret_col * CHAR_W;
             EgLine::new(
                 Point::new(caret_x, inner_y),
@@ -281,6 +279,19 @@ impl TextInput {
         }
         Ok(())
     }
+}
+
+/// Walk `s` accumulating cell widths and return the byte offset of
+/// the first char whose start lands at or past `target_cells`.
+fn byte_at_cell(s: &str, target_cells: i32) -> usize {
+    let mut cells = 0;
+    for (b, c) in s.char_indices() {
+        if cells >= target_cells {
+            return b;
+        }
+        cells += emoji::cell_width(c);
+    }
+    s.len()
 }
 
 impl Accessible for TextInput {

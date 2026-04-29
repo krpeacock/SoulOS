@@ -55,9 +55,9 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, Rectangle},
-    text::{Baseline, Text},
 };
 
+use crate::emoji;
 use crate::palette::{BLACK, WHITE};
 
 const CHAR_W: i32 = 5;
@@ -356,7 +356,7 @@ impl TextArea {
         None
     }
 
-    /// Move the cursor to the same column on the previous visual line.
+    /// Move the cursor to the same visual column on the previous line.
     pub fn cursor_up(&mut self) -> Option<Rectangle> {
         self.anchor = None;
         let line_idx = self.cursor_line_idx();
@@ -364,21 +364,14 @@ impl TextArea {
             let col = self.cursor_col_in_line(line_idx);
             let prev = self.layout[line_idx - 1];
             let line_text = &self.buffer[prev.start..prev.end];
-            let char_count = line_text.chars().count();
-            let target_col = col.min(char_count);
-            let byte_off = line_text
-                .char_indices()
-                .nth(target_col)
-                .map(|(i, _)| i)
-                .unwrap_or(line_text.len());
-            self.cursor = prev.start + byte_off;
+            self.cursor = prev.start + byte_at_cell(line_text, col);
             self.ensure_cursor_visible();
             return Some(self.area);
         }
         None
     }
 
-    /// Move the cursor to the same column on the next visual line.
+    /// Move the cursor to the same visual column on the next line.
     pub fn cursor_down(&mut self) -> Option<Rectangle> {
         self.anchor = None;
         let line_idx = self.cursor_line_idx();
@@ -386,14 +379,7 @@ impl TextArea {
             let col = self.cursor_col_in_line(line_idx);
             let next = self.layout[line_idx + 1];
             let line_text = &self.buffer[next.start..next.end];
-            let char_count = line_text.chars().count();
-            let target_col = col.min(char_count);
-            let byte_off = line_text
-                .char_indices()
-                .nth(target_col)
-                .map(|(i, _)| i)
-                .unwrap_or(line_text.len());
-            self.cursor = next.start + byte_off;
+            self.cursor = next.start + byte_at_cell(line_text, col);
             self.ensure_cursor_visible();
             return Some(self.area);
         }
@@ -408,17 +394,9 @@ impl TextArea {
         if new_line == line_idx {
             return None;
         }
-        // Move cursor to the same column on new_line.
         let col = self.cursor_col_in_line(line_idx);
         let vl = self.layout[new_line];
-        let line_text = &self.buffer[vl.start..vl.end];
-        let char_count = line_text.chars().count();
-        let byte_off = line_text
-            .char_indices()
-            .nth(col.min(char_count))
-            .map(|(i, _)| i)
-            .unwrap_or(line_text.len());
-        self.cursor = vl.start + byte_off;
+        self.cursor = vl.start + byte_at_cell(&self.buffer[vl.start..vl.end], col);
         self.ensure_cursor_visible();
         Some(self.area)
     }
@@ -433,14 +411,7 @@ impl TextArea {
         }
         let col = self.cursor_col_in_line(line_idx);
         let vl = self.layout[new_line];
-        let line_text = &self.buffer[vl.start..vl.end];
-        let char_count = line_text.chars().count();
-        let byte_off = line_text
-            .char_indices()
-            .nth(col.min(char_count))
-            .map(|(i, _)| i)
-            .unwrap_or(line_text.len());
-        self.cursor = vl.start + byte_off;
+        self.cursor = vl.start + byte_at_cell(&self.buffer[vl.start..vl.end], col);
         self.ensure_cursor_visible();
         Some(self.area)
     }
@@ -467,13 +438,12 @@ impl TextArea {
                 break;
             }
             let text = &self.buffer[line.start..line.end];
-            Text::with_baseline(
+            emoji::draw_text(
+                canvas,
                 text,
                 Point::new(self.area.top_left.x + TEXT_PAD, y),
                 black_style,
-                Baseline::Top,
-            )
-            .draw(canvas)?;
+            )?;
         }
 
         // Pass 2: invert selected spans.
@@ -497,21 +467,20 @@ impl TextArea {
                 if y + LINE_H > max_y {
                     break;
                 }
-                let s_chars = self.buffer[line.start..ls].chars().count() as i32;
-                let e_chars = self.buffer[line.start..le].chars().count() as i32;
+                let s_cells = emoji::cells_in(&self.buffer[line.start..ls]);
+                let e_cells = emoji::cells_in(&self.buffer[line.start..le]);
                 let rect = Rectangle::new(
-                    Point::new(self.area.top_left.x + TEXT_PAD + s_chars * CHAR_W, y),
-                    Size::new(((e_chars - s_chars) * CHAR_W) as u32, LINE_H as u32),
+                    Point::new(self.area.top_left.x + TEXT_PAD + s_cells * CHAR_W, y),
+                    Size::new(((e_cells - s_cells) * CHAR_W) as u32, LINE_H as u32),
                 );
                 rect.into_styled(PrimitiveStyle::with_fill(BLACK)).draw(canvas)?;
                 let selected_text = &self.buffer[ls..le];
-                Text::with_baseline(
+                emoji::draw_text(
+                    canvas,
                     selected_text,
-                    Point::new(self.area.top_left.x + TEXT_PAD + s_chars * CHAR_W, y),
+                    Point::new(self.area.top_left.x + TEXT_PAD + s_cells * CHAR_W, y),
                     white_style,
-                    Baseline::Top,
-                )
-                .draw(canvas)?;
+                )?;
             }
         } else if let Some(p) = self.caret_position(self.cursor) {
             if p.y + LINE_H <= max_y {
@@ -525,12 +494,12 @@ impl TextArea {
 
     // --- internals -----------------------------------------------------
 
-    fn chars_per_line(&self) -> usize {
-        ((self.area.size.width as i32 - TEXT_PAD * 2) / CHAR_W).max(1) as usize
+    fn cells_per_line(&self) -> i32 {
+        ((self.area.size.width as i32 - TEXT_PAD * 2) / CHAR_W).max(1)
     }
 
     fn recompute_layout(&mut self) {
-        self.layout = compute_layout(&self.buffer, self.chars_per_line());
+        self.layout = compute_layout(&self.buffer, self.cells_per_line());
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -555,16 +524,8 @@ impl TextArea {
             .min(self.layout.len() - 1);
         let line = self.layout[line_idx];
         let x_rel = (x as i32 - self.area.top_left.x - TEXT_PAD).max(0);
-        let char_in_line = (x_rel / CHAR_W) as usize;
-        let line_text = &self.buffer[line.start..line.end];
-        let line_char_count = line_text.chars().count();
-        let char_in_line = char_in_line.min(line_char_count);
-        let byte_offset = line_text
-            .char_indices()
-            .nth(char_in_line)
-            .map(|(i, _)| i)
-            .unwrap_or(line_text.len());
-        line.start + byte_offset
+        let target_cell = x_rel / CHAR_W;
+        line.start + byte_at_cell(&self.buffer[line.start..line.end], target_cell)
     }
 
     /// Returns the screen position of the cursor's leading edge, or
@@ -580,8 +541,8 @@ impl TextArea {
                 if row >= max_row {
                     return None; // scrolled below view
                 }
-                let char_offset = self.buffer[line.start..cursor].chars().count() as i32;
-                let x = self.area.top_left.x + TEXT_PAD + char_offset * CHAR_W;
+                let cell_offset = emoji::cells_in(&self.buffer[line.start..cursor]);
+                let x = self.area.top_left.x + TEXT_PAD + cell_offset * CHAR_W;
                 let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
                 return Some(Point::new(x, y));
             }
@@ -604,12 +565,12 @@ impl TextArea {
             .unwrap_or(self.layout.len().saturating_sub(1))
     }
 
-    /// Column (char index within the line) of the cursor.
-    fn cursor_col_in_line(&self, line_idx: usize) -> usize {
+    /// Visual column of the cursor in cells (not char count). Used for
+    /// vertical navigation so the cursor lands at the same pixel x on
+    /// the adjacent line, not the same char index.
+    fn cursor_col_in_line(&self, line_idx: usize) -> i32 {
         let vl = self.layout[line_idx];
-        self.buffer[vl.start..self.cursor.min(vl.end)]
-            .chars()
-            .count()
+        emoji::cells_in(&self.buffer[vl.start..self.cursor.min(vl.end)])
     }
 
     /// Adjust `scroll_line` so the cursor's visual line is visible.
@@ -624,13 +585,14 @@ impl TextArea {
     }
 }
 
-/// Word-wrap `buffer` into visual lines of at most `chars_per_line`
-/// characters each. Break at spaces where possible; break mid-word
-/// only when a single word is wider than one line.
-fn compute_layout(buffer: &str, chars_per_line: usize) -> Vec<VisualLine> {
+/// Word-wrap `buffer` into visual lines of at most `cells_per_line`
+/// cells each. Break at spaces where possible; break mid-word only
+/// when a single word is wider than one line. Emoji count as
+/// [`emoji::EMOJI_CELL_SPAN`] cells.
+fn compute_layout(buffer: &str, cells_per_line: i32) -> Vec<VisualLine> {
     let mut lines = Vec::new();
     let mut line_start = 0usize;
-    let mut cur_count = 0usize;
+    let mut cur_cells: i32 = 0;
     let mut last_break: Option<usize> = None;
 
     let mut i = 0;
@@ -645,24 +607,29 @@ fn compute_layout(buffer: &str, chars_per_line: usize) -> Vec<VisualLine> {
             });
             i += c_len;
             line_start = i;
-            cur_count = 0;
+            cur_cells = 0;
             last_break = None;
             continue;
         }
 
-        if cur_count >= chars_per_line {
+        let c_cells = emoji::cell_width(c);
+        // If the line already has content and adding this char would
+        // push past the budget, break first. The `cur_cells > 0`
+        // guard prevents infinite looping when a single glyph is
+        // wider than the entire line.
+        if cur_cells > 0 && cur_cells + c_cells > cells_per_line {
             let break_at = last_break.unwrap_or(i);
             lines.push(VisualLine {
                 start: line_start,
                 end: break_at,
             });
             line_start = break_at;
-            cur_count = buffer[line_start..i].chars().count();
+            cur_cells = emoji::cells_in(&buffer[line_start..i]);
             last_break = None;
             continue;
         }
 
-        cur_count += 1;
+        cur_cells += c_cells;
         if c == ' ' {
             last_break = Some(i + c_len);
         }
@@ -673,6 +640,21 @@ fn compute_layout(buffer: &str, chars_per_line: usize) -> Vec<VisualLine> {
         end: buffer.len(),
     });
     lines
+}
+
+/// Walk `s` accumulating cell widths and return the byte offset of
+/// the first char whose start lands at or past `target_cells`. If
+/// `target_cells` falls inside a multi-cell glyph, the offset of
+/// that glyph is returned (caret rests *before* it).
+fn byte_at_cell(s: &str, target_cells: i32) -> usize {
+    let mut cells = 0;
+    for (b, c) in s.char_indices() {
+        if cells >= target_cells {
+            return b;
+        }
+        cells += emoji::cell_width(c);
+    }
+    s.len()
 }
 
 /// Expand `pos` to the surrounding word's `[start, end)` byte range.

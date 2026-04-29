@@ -57,9 +57,9 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
     primitives::{PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
-    text::{Baseline, Text},
 };
 
+use crate::emoji;
 use crate::palette::{BLACK, GRAY, WHITE};
 
 /// Total keyboard height in pixels. Apps sizing a text area above the
@@ -92,8 +92,11 @@ enum Key {
     Shift,
     /// Switches to the symbols/numbers layer.
     Numbers,
-    /// (Symbols layer only.) Switches back to lowercase letters.
+    /// (Symbols/Emoji layer only.) Switches back to lowercase letters.
     Letters,
+    /// Switches to the emoji layer. Available from every layer's
+    /// bottom row so emoji are one tap from any input mode.
+    Emoji,
 }
 
 /// Which set of keycaps the keyboard is currently displaying.
@@ -105,6 +108,8 @@ pub enum Layer {
     Upper,
     /// Digits `0–9`, common punctuation, and symbols.
     Symbols,
+    /// Paper-style emoji glyphs from [`crate::emoji`].
+    Emoji,
 }
 
 /// A user-facing key press produced by the keyboard when the stylus
@@ -177,8 +182,9 @@ const L_ROW2: &[Kd] = &[
 ];
 const L_ROW3: &[Kd] = &[
     (Key::Numbers, "123", 2),
+    (Key::Emoji, "\u{263A}", 1),
     (Key::Char(','), ",", 1),
-    (Key::Space, "space", 4),
+    (Key::Space, "space", 3),
     (Key::Char('.'), ".", 1),
     (Key::Return, "ret", 2),
 ];
@@ -219,8 +225,9 @@ const U_ROW2: &[Kd] = &[
 ];
 const U_ROW3: &[Kd] = &[
     (Key::Numbers, "123", 2),
+    (Key::Emoji, "\u{263A}", 1),
     (Key::Char(','), ",", 1),
-    (Key::Space, "space", 4),
+    (Key::Space, "space", 3),
     (Key::Char('.'), ".", 1),
     (Key::Return, "ret", 2),
 ];
@@ -260,6 +267,38 @@ const S_ROW2: &[Kd] = &[
     (Key::Backspace, "del", 2),
 ];
 const S_ROW3: &[Kd] = &[
+    (Key::Letters, "ABC", 2),
+    (Key::Char(','), ",", 1),
+    (Key::Space, "space", 4),
+    (Key::Char('.'), ".", 1),
+    (Key::Return, "ret", 2),
+];
+
+const E_ROW0: &[Kd] = &[
+    (Key::Char('\u{2665}'), "\u{2665}", 1),
+    (Key::Char('\u{2605}'), "\u{2605}", 1),
+    (Key::Char('\u{263A}'), "\u{263A}", 1),
+    (Key::Char('\u{2639}'), "\u{2639}", 1),
+    (Key::Char('\u{2713}'), "\u{2713}", 1),
+    (Key::Char('\u{2717}'), "\u{2717}", 1),
+    (Key::Char('\u{2610}'), "\u{2610}", 1),
+    (Key::Char('\u{2611}'), "\u{2611}", 1),
+    (Key::Char('\u{2600}'), "\u{2600}", 1),
+    (Key::Char('\u{266A}'), "\u{266A}", 1),
+];
+const E_ROW1: &[Kd] = &[
+    (Key::Char('\u{26A0}'), "\u{26A0}", 1),
+    (Key::Char('\u{2709}'), "\u{2709}", 1),
+    (Key::Char('\u{2602}'), "\u{2602}", 1),
+    (Key::Char('\u{2601}'), "\u{2601}", 1),
+    (Key::Char('\u{2302}'), "\u{2302}", 1),
+    (Key::Char('\u{260E}'), "\u{260E}", 1),
+    (Key::Char('\u{2699}'), "\u{2699}", 1),
+    (Key::Char('\u{26A1}'), "\u{26A1}", 1),
+    (Key::Backspace, "del", 2),
+];
+const E_ROW2: &[Kd] = &[];
+const E_ROW3: &[Kd] = &[
     (Key::Letters, "ABC", 2),
     (Key::Char(','), ",", 1),
     (Key::Space, "space", 4),
@@ -359,6 +398,7 @@ impl Keyboard {
                             Layer::Lower => Layer::Upper,
                             Layer::Upper => Layer::Lower,
                             Layer::Symbols => Layer::Symbols,
+                            Layer::Emoji => Layer::Emoji,
                         };
                         dirty = Some(merge(dirty, self.bounds()));
                     }
@@ -368,6 +408,10 @@ impl Keyboard {
                     }
                     Key::Letters => {
                         self.layer = Layer::Lower;
+                        dirty = Some(merge(dirty, self.bounds()));
+                    }
+                    Key::Emoji => {
+                        self.layer = Layer::Emoji;
                         dirty = Some(merge(dirty, self.bounds()));
                     }
                 }
@@ -424,6 +468,7 @@ impl Keyboard {
             Layer::Lower => [L_ROW0, L_ROW1, L_ROW2, L_ROW3],
             Layer::Upper => [U_ROW0, U_ROW1, U_ROW2, U_ROW3],
             Layer::Symbols => [S_ROW0, S_ROW1, S_ROW2, S_ROW3],
+            Layer::Emoji => [E_ROW0, E_ROW1, E_ROW2, E_ROW3],
         }
     }
 
@@ -473,6 +518,25 @@ where
     RoundedRectangle::with_equal_corners(rect, Size::new(2, 2))
         .into_styled(style)
         .draw(canvas)?;
+    // A single-emoji keycap renders the bitmap at near-native size
+    // inside the keycap, instead of squeezing it into a 12×10 text
+    // cell. Other labels (letters, "ret", "del", "ABC") flow through
+    // the normal monospace path.
+    let mut chars = label.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if emoji::is_emoji(c) {
+            let pad = 3;
+            let inner = Rectangle::new(
+                rect.top_left + Point::new(pad, pad),
+                Size::new(
+                    (rect.size.width as i32 - pad * 2).max(0) as u32,
+                    (rect.size.height as i32 - pad * 2).max(0) as u32,
+                ),
+            );
+            emoji::draw_glyph_in_rect(canvas, c, inner, text_color)?;
+            return Ok(());
+        }
+    }
     let label_w = label.chars().count() as i32 * FONT_W;
     let pos = rect.top_left
         + Point::new(
@@ -480,7 +544,7 @@ where
             (rect.size.height as i32 - FONT_H) / 2,
         );
     let text_style = MonoTextStyle::new(&FONT_6X10, text_color);
-    Text::with_baseline(label, pos, text_style, Baseline::Top).draw(canvas)?;
+    emoji::draw_text(canvas, label, pos, text_style)?;
     Ok(())
 }
 
