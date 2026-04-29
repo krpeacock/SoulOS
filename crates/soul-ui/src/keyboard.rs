@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::cmp::min;
 
 const EMOJI_GRID_COLS: usize = 10;
-const EMOJI_GRID_ROWS: usize = 4; // visible rows
+const EMOJI_GRID_ROWS: usize = 3; // 3 rows of emoji; bottom row is the control strip
 const EMOJI_CELL_SIZE: u32 = 24;
 // On-screen keyboard widget.
 //
@@ -118,6 +118,10 @@ enum Key {
     /// Switches to the emoji layer. Available from every layer's
     /// bottom row so emoji are one tap from any input mode.
     Emoji,
+    /// Scroll the emoji grid back by one page.
+    EmojiUp,
+    /// Scroll the emoji grid forward by one page.
+    EmojiDown,
 }
 
 /// Which set of keycaps the keyboard is currently displaying.
@@ -410,6 +414,16 @@ impl Keyboard {
                         self.layer = Layer::Emoji;
                         dirty = Some(merge(dirty, self.bounds()));
                     }
+                    Key::EmojiUp => {
+                        let per_page = EMOJI_GRID_COLS * EMOJI_GRID_ROWS;
+                        self.emoji_scroll = self.emoji_scroll.saturating_sub(per_page);
+                        dirty = Some(merge(dirty, self.bounds()));
+                    }
+                    Key::EmojiDown => {
+                        let per_page = EMOJI_GRID_COLS * EMOJI_GRID_ROWS;
+                        self.emoji_scroll += per_page;
+                        dirty = Some(merge(dirty, self.bounds()));
+                    }
                 }
             }
         }
@@ -441,6 +455,7 @@ impl Keyboard {
 
         if self.layer == Layer::Emoji {
             let page = self.emoji_grid_page();
+            let highlight = self.highlighted.map(|(k, _)| k);
             for (i, entry) in page.iter().enumerate() {
                 let col = i % EMOJI_GRID_COLS;
                 let row = i / EMOJI_GRID_COLS;
@@ -449,8 +464,26 @@ impl Keyboard {
                 let rect = Rectangle::new(Point::new(x, y), Size::new(EMOJI_CELL_SIZE, EMOJI_CELL_SIZE));
                 let mut buf = [0u8; 4];
                 let s = entry.codepoint.encode_utf8(&mut buf);
-                key_cap(canvas, rect, s, false)?;
+                let pressed = Some(Key::Char(entry.codepoint)) == highlight;
+                key_cap(canvas, rect, s, pressed)?;
             }
+            // Control strip: [ABC 2-wide] [^ 1-wide] [v 1-wide] [spacer 6-wide]
+            let ctrl_y = self.top_y + (EMOJI_GRID_ROWS as i32) * (EMOJI_CELL_SIZE as i32);
+            let abc_rect = Rectangle::new(
+                Point::new(1, ctrl_y + 1),
+                Size::new(KEY_CELL_W * 2 - 2, KEY_ROW_H - 2),
+            );
+            key_cap(canvas, abc_rect, "ABC", Some(Key::Letters) == highlight)?;
+            let up_rect = Rectangle::new(
+                Point::new(KEY_CELL_W as i32 * 2 + 1, ctrl_y + 1),
+                Size::new(KEY_CELL_W - 2, KEY_ROW_H - 2),
+            );
+            key_cap(canvas, up_rect, "^", Some(Key::EmojiUp) == highlight)?;
+            let dn_rect = Rectangle::new(
+                Point::new(KEY_CELL_W as i32 * 3 + 1, ctrl_y + 1),
+                Size::new(KEY_CELL_W - 2, KEY_ROW_H - 2),
+            );
+            key_cap(canvas, dn_rect, "v", Some(Key::EmojiDown) == highlight)?;
             return Ok(());
         }
         let rows = self.rows();
@@ -485,14 +518,30 @@ impl Keyboard {
 
     fn hit_at(&self, x: i16, y: i16) -> Option<(Key, Rectangle)> {
         if self.layer == Layer::Emoji {
-            // Emoji grid hit test
             let x = x as i32;
-            let y = y as i32 - self.top_y;
-            if x < 0 || y < 0 {
+            let y_rel = y as i32 - self.top_y;
+            if x < 0 || y_rel < 0 || y_rel >= KEYBOARD_HEIGHT as i32 {
                 return None;
             }
+            let grid_h = (EMOJI_GRID_ROWS as i32) * (EMOJI_CELL_SIZE as i32);
+            if y_rel >= grid_h {
+                // Control strip row.
+                let ctrl_y = self.top_y + grid_h;
+                if x < KEY_CELL_W as i32 * 2 {
+                    let r = Rectangle::new(Point::new(1, ctrl_y + 1), Size::new(KEY_CELL_W * 2 - 2, KEY_ROW_H - 2));
+                    return Some((Key::Letters, r));
+                } else if x < KEY_CELL_W as i32 * 3 {
+                    let r = Rectangle::new(Point::new(KEY_CELL_W as i32 * 2 + 1, ctrl_y + 1), Size::new(KEY_CELL_W - 2, KEY_ROW_H - 2));
+                    return Some((Key::EmojiUp, r));
+                } else if x < KEY_CELL_W as i32 * 4 {
+                    let r = Rectangle::new(Point::new(KEY_CELL_W as i32 * 3 + 1, ctrl_y + 1), Size::new(KEY_CELL_W - 2, KEY_ROW_H - 2));
+                    return Some((Key::EmojiDown, r));
+                }
+                return None;
+            }
+            // Emoji grid.
             let col = (x / EMOJI_CELL_SIZE as i32) as usize;
-            let row = (y / EMOJI_CELL_SIZE as i32) as usize;
+            let row = (y_rel / EMOJI_CELL_SIZE as i32) as usize;
             if col >= EMOJI_GRID_COLS || row >= EMOJI_GRID_ROWS {
                 return None;
             }
@@ -560,7 +609,7 @@ where
     let mut chars = label.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         if emoji::is_emoji(c) {
-            let pad = 3;
+            let pad = 1;
             let inner = Rectangle::new(
                 rect.top_left + Point::new(pad, pad),
                 Size::new(

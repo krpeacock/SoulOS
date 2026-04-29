@@ -43,7 +43,7 @@ for entry in emoji_entries:
     stem = find_openmoji_stem(entry['hexcode'])
     emoji_index[entry['hexcode']] = f'{stem}.png' if stem else None
 
-with open('assets/emoji/meta/emoji_index.json', 'w', encoding='utf-8') as f:
+with open('assets/emoji/meta/openmoji_index.json', 'w', encoding='utf-8') as f:
     json.dump(emoji_index, f, ensure_ascii=False, indent=2)
 
     
