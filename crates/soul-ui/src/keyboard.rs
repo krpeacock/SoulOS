@@ -518,6 +518,25 @@ where
     RoundedRectangle::with_equal_corners(rect, Size::new(2, 2))
         .into_styled(style)
         .draw(canvas)?;
+    // A single-emoji keycap renders the bitmap at near-native size
+    // inside the keycap, instead of squeezing it into a 12×10 text
+    // cell. Other labels (letters, "ret", "del", "ABC") flow through
+    // the normal monospace path.
+    let mut chars = label.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if emoji::is_emoji(c) {
+            let pad = 3;
+            let inner = Rectangle::new(
+                rect.top_left + Point::new(pad, pad),
+                Size::new(
+                    (rect.size.width as i32 - pad * 2).max(0) as u32,
+                    (rect.size.height as i32 - pad * 2).max(0) as u32,
+                ),
+            );
+            emoji::draw_glyph_in_rect(canvas, c, inner, text_color)?;
+            return Ok(());
+        }
+    }
     let label_w = label.chars().count() as i32 * FONT_W;
     let pos = rect.top_left
         + Point::new(
