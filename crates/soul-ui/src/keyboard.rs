@@ -1,56 +1,77 @@
-//! On-screen keyboard widget.
-//!
-//! [`Keyboard`] is a stateful widget that renders a QWERTY-style
-//! soft keyboard and consumes stylus/pointer events from the SoulOS
-//! runtime. It manages its own layer state ([`Layer::Lower`],
-//! [`Layer::Upper`], [`Layer::Symbols`]) and produces [`TypedKey`]
-//! events for its owning app to interpret.
-//!
-//! # Lifecycle
-//!
-//! The app owns the [`Keyboard`] in its state and forwards pen
-//! events to the widget. The widget returns [`Rectangle`]s the app
-//! should feed to `Ctx::invalidate` so the dirty-rect runtime
-//! repaints exactly what changed:
-//!
-//! ```ignore
-//! use soul_ui::{Keyboard, TypedKey};
-//!
-//! struct MyApp { keyboard: Keyboard, buffer: String }
-//!
-//! impl soul_core::App for MyApp {
-//!     fn handle(&mut self, event: soul_core::Event, ctx: &mut soul_core::Ctx<'_>) {
-//!         match event {
-//!             soul_core::Event::PenDown { x, y }
-//!             | soul_core::Event::PenMove { x, y } => {
-//!                 if let Some(r) = self.keyboard.pen_moved(x, y) {
-//!                     ctx.invalidate(r);
-//!                 }
-//!             }
-//!             soul_core::Event::PenUp { x, y } => {
-//!                 let out = self.keyboard.pen_released(x, y);
-//!                 if let Some(r) = out.dirty { ctx.invalidate(r); }
-//!                 match out.typed {
-//!                     Some(TypedKey::Char(c)) => self.buffer.push(c),
-//!                     Some(TypedKey::Backspace) => { self.buffer.pop(); }
-//!                     Some(TypedKey::Enter) => self.buffer.push('\n'),
-//!                     None => {}
-//!                 }
-//!             }
-//!             _ => {}
-//!         }
-//!     }
-//!     /* fn draw(...) { self.keyboard.draw(canvas); } */
-//! #    fn draw<D: embedded_graphics::draw_target::DrawTarget<Color = embedded_graphics::pixelcolor::Gray8>>(&mut self, _c: &mut D) {}
-//! }
-//! ```
-//!
-//! # Layers
-//!
-//! The keyboard starts in [`Layer::Lower`]. Tapping `sh` toggles to
-//! [`Layer::Upper`]; tapping `123` switches to [`Layer::Symbols`],
-//! where an `ABC` key returns to lowercase. Apps can query the
-//! current layer with [`Keyboard::layer`] but should not need to.
+impl Keyboard {
+    fn emoji_grid_page(&self) -> Vec<&'static EmojiEntry> {
+        let mut filtered: Vec<&'static EmojiEntry> = emoji::EMOJI_LIST
+            .iter()
+            .filter(|e| self.emoji_search.is_empty() || e.name.contains(self.emoji_search.as_str()))
+            .collect();
+        filtered.sort_by_key(|e| e.codepoint);
+        let total = filtered.len();
+        let per_page = EMOJI_GRID_COLS * EMOJI_GRID_ROWS;
+        let max_scroll = total.saturating_sub(per_page);
+        let scroll = min(self.emoji_scroll, max_scroll);
+        filtered[scroll..min(scroll + per_page, total)].to_vec()
+    }
+}
+use crate::emoji::EmojiEntry;
+use alloc::vec::Vec;
+use core::cmp::min;
+
+const EMOJI_GRID_COLS: usize = 10;
+const EMOJI_GRID_ROWS: usize = 4; // visible rows
+const EMOJI_CELL_SIZE: u32 = 24;
+// On-screen keyboard widget.
+//
+// [`Keyboard`] is a stateful widget that renders a QWERTY-style
+// soft keyboard and consumes stylus/pointer events from the SoulOS
+// runtime. It manages its own layer state ([`Layer::Lower`],
+// [`Layer::Upper`], [`Layer::Symbols`]) and produces [`TypedKey`]
+// events for its owning app to interpret.
+//
+// # Lifecycle
+//
+// The app owns the [`Keyboard`] in its state and forwards pen
+// events to the widget. The widget returns [`Rectangle`]s the app
+// should feed to `Ctx::invalidate` so the dirty-rect runtime
+// repaints exactly what changed:
+//
+// ```ignore
+// use soul_ui::{Keyboard, TypedKey};
+//
+// struct MyApp { keyboard: Keyboard, buffer: String }
+//
+// impl soul_core::App for MyApp {
+//     fn handle(&mut self, event: soul_core::Event, ctx: &mut soul_core::Ctx<'_>) {
+//         match event {
+//             soul_core::Event::PenDown { x, y }
+//             | soul_core::Event::PenMove { x, y } => {
+//                 if let Some(r) = self.keyboard.pen_moved(x, y) {
+//                     ctx.invalidate(r);
+//                 }
+//             }
+//             soul_core::Event::PenUp { x, y } => {
+//                 let out = self.keyboard.pen_released(x, y);
+//                 if let Some(r) = out.dirty { ctx.invalidate(r); }
+//                 match out.typed {
+//                     Some(TypedKey::Char(c)) => self.buffer.push(c),
+//                     Some(TypedKey::Backspace) => { self.buffer.pop(); }
+//                     Some(TypedKey::Enter) => self.buffer.push('\n'),
+//                     None => {}
+//                 }
+//             }
+//             _ => {}
+//         }
+//     }
+//     /* fn draw(...) { self.keyboard.draw(canvas); } */
+// #    fn draw<D: embedded_graphics::draw_target::DrawTarget<Color = embedded_graphics::pixelcolor::Gray8>>(&mut self, _c: &mut D) {}
+// }
+// ```
+//
+// # Layers
+//
+// The keyboard starts in [`Layer::Lower`]. Tapping `sh` toggles to
+// [`Layer::Upper`]; tapping `123` switches to [`Layer::Symbols`],
+// where an `ABC` key returns to lowercase. Apps can query the
+// current layer with [`Keyboard::layer`] but should not need to.
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -182,7 +203,7 @@ const L_ROW2: &[Kd] = &[
 ];
 const L_ROW3: &[Kd] = &[
     (Key::Numbers, "123", 2),
-    (Key::Emoji, "\u{263A}", 1),
+    (Key::Emoji, "\u{1F642}", 1), // 🙂
     (Key::Char(','), ",", 1),
     (Key::Space, "space", 3),
     (Key::Char('.'), ".", 1),
@@ -274,39 +295,10 @@ const S_ROW3: &[Kd] = &[
     (Key::Return, "ret", 2),
 ];
 
-const E_ROW0: &[Kd] = &[
-    (Key::Char('\u{2665}'), "\u{2665}", 1),
-    (Key::Char('\u{2605}'), "\u{2605}", 1),
-    (Key::Char('\u{263A}'), "\u{263A}", 1),
-    (Key::Char('\u{2639}'), "\u{2639}", 1),
-    (Key::Char('\u{2713}'), "\u{2713}", 1),
-    (Key::Char('\u{2717}'), "\u{2717}", 1),
-    (Key::Char('\u{2610}'), "\u{2610}", 1),
-    (Key::Char('\u{2611}'), "\u{2611}", 1),
-    (Key::Char('\u{2600}'), "\u{2600}", 1),
-    (Key::Char('\u{266A}'), "\u{266A}", 1),
-];
-const E_ROW1: &[Kd] = &[
-    (Key::Char('\u{26A0}'), "\u{26A0}", 1),
-    (Key::Char('\u{2709}'), "\u{2709}", 1),
-    (Key::Char('\u{2602}'), "\u{2602}", 1),
-    (Key::Char('\u{2601}'), "\u{2601}", 1),
-    (Key::Char('\u{2302}'), "\u{2302}", 1),
-    (Key::Char('\u{260E}'), "\u{260E}", 1),
-    (Key::Char('\u{2699}'), "\u{2699}", 1),
-    (Key::Char('\u{26A1}'), "\u{26A1}", 1),
-    (Key::Backspace, "del", 2),
-];
-const E_ROW2: &[Kd] = &[];
-const E_ROW3: &[Kd] = &[
-    (Key::Letters, "ABC", 2),
-    (Key::Char(','), ",", 1),
-    (Key::Space, "space", 4),
-    (Key::Char('.'), ".", 1),
-    (Key::Return, "ret", 2),
-];
 
-const ROW_INDENTS: [i32; 4] = [0, 12, 0, 0];
+// --- Dynamic emoji grid state ---
+use alloc::string::String;
+
 
 /// A stateful on-screen keyboard.
 ///
@@ -318,6 +310,8 @@ pub struct Keyboard {
     top_y: i32,
     layer: Layer,
     highlighted: Option<(Key, Rectangle)>,
+    emoji_scroll: usize, // first visible emoji row
+    emoji_search: String, // search query
 }
 
 impl Keyboard {
@@ -329,6 +323,8 @@ impl Keyboard {
             top_y,
             layer: Layer::Lower,
             highlighted: None,
+            emoji_scroll: 0,
+            emoji_search: String::new(),
         }
     }
 
@@ -443,20 +439,34 @@ impl Keyboard {
         .into_styled(bg)
         .draw(canvas)?;
 
+        if self.layer == Layer::Emoji {
+            let page = self.emoji_grid_page();
+            for (i, entry) in page.iter().enumerate() {
+                let col = i % EMOJI_GRID_COLS;
+                let row = i / EMOJI_GRID_COLS;
+                let x = col as i32 * EMOJI_CELL_SIZE as i32;
+                let y = self.top_y + row as i32 * EMOJI_CELL_SIZE as i32;
+                let rect = Rectangle::new(Point::new(x, y), Size::new(EMOJI_CELL_SIZE, EMOJI_CELL_SIZE));
+                let mut buf = [0u8; 4];
+                let s = entry.codepoint.encode_utf8(&mut buf);
+                key_cap(canvas, rect, s, false)?;
+            }
+            return Ok(());
+        }
         let rows = self.rows();
         let highlight = self.highlighted.map(|(k, _)| k);
         let shift_active = self.layer == Layer::Upper;
-
         for (row_i, row) in rows.iter().enumerate() {
             let y = self.top_y + (row_i as i32) * KEY_ROW_H as i32;
-            let mut x = ROW_INDENTS[row_i];
+            let mut x = 0;
             for kd in row.iter() {
                 let w = kd.2 as u32 * KEY_CELL_W;
                 let rect =
                     Rectangle::new(Point::new(x + 1, y + 1), Size::new(w - 2, KEY_ROW_H - 2));
                 let pressed =
                     Some(kd.0) == highlight || (matches!(kd.0, Key::Shift) && shift_active);
-                key_cap(canvas, rect, kd.1, pressed)?;
+                let label = if kd.0 == Key::Emoji { "\u{1F642}" } else { kd.1 };
+                key_cap(canvas, rect, label, pressed)?;
                 x += w as i32;
             }
         }
@@ -468,11 +478,36 @@ impl Keyboard {
             Layer::Lower => [L_ROW0, L_ROW1, L_ROW2, L_ROW3],
             Layer::Upper => [U_ROW0, U_ROW1, U_ROW2, U_ROW3],
             Layer::Symbols => [S_ROW0, S_ROW1, S_ROW2, S_ROW3],
-            Layer::Emoji => [E_ROW0, E_ROW1, E_ROW2, E_ROW3],
+            // Emoji layer uses a dynamic grid; callers guard against this branch.
+            Layer::Emoji => unreachable!("rows() called for emoji layer"),
         }
     }
 
     fn hit_at(&self, x: i16, y: i16) -> Option<(Key, Rectangle)> {
+        if self.layer == Layer::Emoji {
+            // Emoji grid hit test
+            let x = x as i32;
+            let y = y as i32 - self.top_y;
+            if x < 0 || y < 0 {
+                return None;
+            }
+            let col = (x / EMOJI_CELL_SIZE as i32) as usize;
+            let row = (y / EMOJI_CELL_SIZE as i32) as usize;
+            if col >= EMOJI_GRID_COLS || row >= EMOJI_GRID_ROWS {
+                return None;
+            }
+            let idx = row * EMOJI_GRID_COLS + col;
+            let page = self.emoji_grid_page();
+            if idx < page.len() {
+                let rect = Rectangle::new(
+                    Point::new(col as i32 * EMOJI_CELL_SIZE as i32, self.top_y + row as i32 * EMOJI_CELL_SIZE as i32),
+                    Size::new(EMOJI_CELL_SIZE, EMOJI_CELL_SIZE),
+                );
+                return Some((Key::Char(page[idx].codepoint), rect));
+            }
+            return None;
+        }
+        // Default: legacy rows
         let y_rel = y as i32 - self.top_y;
         if y_rel < 0 || y_rel >= KEYBOARD_HEIGHT as i32 {
             return None;
@@ -482,7 +517,7 @@ impl Keyboard {
             return None;
         }
         let rows = self.rows();
-        let mut x_cur = ROW_INDENTS[row_i];
+        let mut x_cur = 0;
         for kd in rows[row_i].iter() {
             let w = kd.2 as i32 * KEY_CELL_W as i32;
             if (x as i32) >= x_cur && (x as i32) < x_cur + w {

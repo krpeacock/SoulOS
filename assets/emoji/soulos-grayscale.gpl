@@ -1,0 +1,12 @@
+GIMP Palette
+Name: SoulOS 8-color Grayscale
+Columns: 8
+#
+  0  0  0	Black
+ 36 36 36	Gray1
+ 72 72 72	Gray2
+109 109 109	Gray3
+146 146 146	Gray4
+182 182 182	Gray5
+219 219 219	Gray6
+255 255 255	White

@@ -5,5 +5,5 @@ Cargo.lock
 .soulos/
 dist/
 
-assets/emoji
+assets/emoji/raw
 debug.keystore
