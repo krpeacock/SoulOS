@@ -2,8 +2,15 @@
 // Each entry is (codepoint, 576-byte grayscale palette-index data).
 include!(concat!(env!("OUT_DIR"), "/raw_emoji.rs"));
 
+// Openmoji 24×24 assets downsampled from 72×72 PNGs at build time.
+include!(concat!(env!("OUT_DIR"), "/png_emoji.rs"));
+
 fn lookup_raw(c: char) -> Option<&'static [u8; 576]> {
-    RAW_EMOJI.iter().find(|(k, _)| *k == c).map(|(_, d)| *d)
+    RAW_EMOJI
+        .iter()
+        .find(|(k, _)| *k == c)
+        .map(|(_, d)| *d)
+        .or_else(|| PNG_EMOJI.iter().find(|(k, _)| *k == c).map(|(_, d)| *d))
 }
 
 /// An entry in the built-in emoji list shown on the emoji keyboard layer.
