@@ -66,6 +66,10 @@ impl DrawTarget for MiniFbDisplay {
     }
 }
 
+// Each logical pixel is rendered as a PIXEL_SCALE×PIXEL_SCALE block in the
+// physical window, giving 4x total pixel density vs the 240×320 virtual canvas.
+const PIXEL_SCALE: u32 = 4;
+
 // ── Platform ─────────────────────────────────────────────────────────────────
 
 pub struct HostedPlatform {
@@ -79,17 +83,21 @@ pub struct HostedPlatform {
     prev_mouse_pos: Option<(f32, f32)>,
     /// Keys held on the previous pump — used to generate ButtonDown/Up events.
     prev_keys: Vec<Key>,
+    /// Physical pixel buffer at PIXEL_SCALE× the logical resolution.
+    phys_buffer: Vec<u32>,
 }
 
 impl HostedPlatform {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let display = MiniFbDisplay::new(width, height);
+        let phys_w = (width * PIXEL_SCALE) as usize;
+        let phys_h = (height * PIXEL_SCALE) as usize;
         let window = Window::new(
             title,
-            width as usize,
-            height as usize,
+            phys_w,
+            phys_h,
             WindowOptions {
-                scale: Scale::X2,
+                scale: Scale::X1,
                 ..Default::default()
             },
         )
@@ -103,6 +111,7 @@ impl HostedPlatform {
             prev_mouse_down: false,
             prev_mouse_pos: None,
             prev_keys: Vec::new(),
+            phys_buffer: vec![0x00FF_FFFFu32; phys_w * phys_h],
         }
     }
 
@@ -117,9 +126,10 @@ impl HostedPlatform {
         }
 
         // ── Mouse ─────────────────────────────────────────────────────────────
-        // minifb returns coordinates already in buffer space (divided by scale).
+        // Window is PIXEL_SCALE× the logical buffer; convert to logical coords.
         let mouse_down = self.window.get_mouse_down(MouseButton::Left);
-        let mouse_pos  = self.window.get_mouse_pos(MouseMode::Discard);
+        let mouse_pos  = self.window.get_mouse_pos(MouseMode::Discard)
+            .map(|(mx, my)| (mx / PIXEL_SCALE as f32, my / PIXEL_SCALE as f32));
 
         match (mouse_pos, mouse_down, self.prev_mouse_down) {
             (Some((mx, my)), true, false) => {
@@ -215,9 +225,20 @@ impl Platform for HostedPlatform {
     }
 
     fn flush(&mut self) {
-        let w = self.display.width as usize;
-        let h = self.display.height as usize;
-        let _ = self.window.update_with_buffer(&self.display.buffer, w, h);
+        let lw = self.display.width;
+        let lh = self.display.height;
+        let pw = lw * PIXEL_SCALE;
+        for y in 0..lh {
+            for x in 0..lw {
+                let src = self.display.buffer[(y * lw + x) as usize];
+                for dy in 0..PIXEL_SCALE {
+                    for dx in 0..PIXEL_SCALE {
+                        self.phys_buffer[((y * PIXEL_SCALE + dy) * pw + (x * PIXEL_SCALE + dx)) as usize] = src;
+                    }
+                }
+            }
+        }
+        let _ = self.window.update_with_buffer(&self.phys_buffer, pw as usize, (lh * PIXEL_SCALE) as usize);
         self.pump();
     }
 
