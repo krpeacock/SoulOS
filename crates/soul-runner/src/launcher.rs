@@ -17,6 +17,7 @@ use embedded_graphics::{
 };
 use soul_core::{App, Ctx, Event, HardButton, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
+use soul_db::{Database, CATEGORY_UNFILED};
 use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H};
 
 use crate::assets;
@@ -27,7 +28,7 @@ const ICON_CELL: u32 = 32;
 const LABEL_FONT_W: i32 = 6;
 const LABEL_FONT_H: i32 = 10;
 const ICON_LABEL_GAP: i32 = 1;
-const LAUNCHER_COLS: i32 = 4;
+const LAUNCHER_COLS: i32 = 6;
 const LAUNCHER_ROWS: i32 = 6;
 const LAUNCHER_H_GAP: i32 = 4;
 const LAUNCHER_V_GAP: i32 = 3;
@@ -45,10 +46,12 @@ struct AppEntry {
 
 pub struct Launcher {
     apps: Vec<AppEntry>,
+    order: Vec<usize>, // indices into apps, representing user order
     touched: Option<usize>,
-    /// When true the Launcher was opened by another app via `Request { action: "pick_app" }`.
-    /// Tapping an app returns `SendResult` instead of launching it.
+    drag_from: Option<usize>,
+    drag_to: Option<usize>,
     picker_mode: bool,
+    db: Option<Database>,
 }
 
 impl Launcher {
@@ -56,10 +59,15 @@ impl Launcher {
     pub const NAME: &'static str = "Launcher";
 
     pub fn new() -> Self {
+        let db = Database::new("launcher");
         Self {
             apps: vec![],
+            order: vec![],
             touched: None,
+            drag_from: None,
+            drag_to: None,
             picker_mode: false,
+            db: Some(db),
         }
     }
 
@@ -78,6 +86,40 @@ impl Launcher {
                 }
             })
             .collect();
+        // Try to load order from DB
+        if let Some(db) = &self.db {
+            if let Some(rec) = db.iter().next() {
+                // Order is stored as Vec<u8> of indices
+                let order: Vec<usize> = rec.data.chunks(4)
+                    .filter_map(|b| if b.len() == 4 {
+                        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                    } else { None })
+                    .collect();
+                // Only use if valid
+                if order.len() == self.apps.len() && order.iter().all(|&i| i < self.apps.len()) {
+                    self.order = order;
+                } else {
+                    self.order = (0..self.apps.len()).collect();
+                }
+            } else {
+                self.order = (0..self.apps.len()).collect();
+            }
+        } else {
+            self.order = (0..self.apps.len()).collect();
+        }
+    }
+
+    fn save_order(&mut self) {
+        if let Some(db) = &mut self.db {
+            // Remove all previous records (only one order record is expected)
+            let ids: Vec<u32> = db.iter().map(|r| r.id).collect();
+            for id in ids { db.delete(id); }
+            let mut data = Vec::with_capacity(self.order.len() * 4);
+            for &i in &self.order {
+                data.extend_from_slice(&(i as u32).to_le_bytes());
+            }
+            db.insert(CATEGORY_UNFILED, data);
+        }
     }
 
     // --- Layout helpers -------------------------------------------------
@@ -108,7 +150,7 @@ impl Launcher {
     }
 
     fn find_hit(&self, x: i16, y: i16) -> Option<usize> {
-        (0..self.apps.len()).find(|&i| hit_test(&Self::tile_rect(i), x, y))
+        (0..self.order.len()).find(|&i| hit_test(&Self::tile_rect(i), x, y))
     }
 
     fn set_touched(&mut self, new: Option<usize>, ctx: &mut Ctx<'_>) {
@@ -135,7 +177,8 @@ impl Launcher {
     }
 
     fn activate_display_idx(&mut self, display_idx: usize) -> Option<SystemRequest> {
-        let entry = self.apps.get(display_idx)?;
+        let idx = *self.order.get(display_idx)?;
+        let entry = self.apps.get(idx)?;
         if self.picker_mode {
             self.picker_mode = false;
             Some(SystemRequest::SendResult {
@@ -273,15 +316,44 @@ impl Launcher {
                 ctx.invalidate_all();
                 None
             }
-            Event::PenDown { x, y } | Event::PenMove { x, y } => {
+            Event::PenDown { x, y } => {
                 let hit = self.find_hit(x, y);
                 self.set_touched(hit, ctx);
+                self.drag_from = hit;
+                self.drag_to = hit;
+                None
+            }
+            Event::PenMove { x, y } => {
+                if self.drag_from.is_some() {
+                    let hit = self.find_hit(x, y);
+                    if hit != self.drag_to {
+                        self.drag_to = hit;
+                        ctx.invalidate_all();
+                    }
+                }
                 None
             }
             Event::PenUp { x, y } => {
-                let hit = self.find_hit(x, y);
-                let was = self.touched;
+                let drag_from = self.drag_from;
+                let drag_to = self.drag_to;
+                let was = self.touched; // capture before clearing
                 self.set_touched(None, ctx);
+                self.drag_from = None;
+                self.drag_to = None;
+                if let (Some(from), Some(to)) = (drag_from, drag_to) {
+                    if from != to {
+                        // Move tile in order
+                        let mut new_order = self.order.clone();
+                        let idx = new_order.remove(from);
+                        new_order.insert(to, idx);
+                        self.order = new_order;
+                        self.save_order();
+                        ctx.invalidate_all();
+                        return None;
+                    }
+                }
+                // If not a drag, treat as tap
+                let hit = self.find_hit(x, y);
                 if hit.is_some() && hit == was {
                     hit.and_then(|i| self.activate_display_idx(i))
                 } else {
@@ -334,13 +406,16 @@ impl Launcher {
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, title);
         let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);
 
-        for (display_idx, entry) in self.apps.iter().enumerate() {
+        for (display_idx, &app_idx) in self.order.iter().enumerate() {
+            let entry = &self.apps[app_idx];
             let icon_r = Self::icon_rect(display_idx);
             let pressed = self.touched == Some(display_idx);
+            let dragging = self.drag_from == Some(display_idx);
+            let drag_target = self.drag_to == Some(display_idx) && self.drag_from != self.drag_to;
             let expected = (ICON_CELL * ICON_CELL) as usize;
 
             if entry.icon.len() == expected {
-                if pressed {
+                if pressed || dragging {
                     let inv: Vec<u8> = entry.icon.iter().map(|&p| 255 - p).collect();
                     let raw = ImageRaw::<Gray8>::new(&inv, ICON_CELL);
                     let _ = Image::new(&raw, icon_r.top_left).draw(canvas);
@@ -350,7 +425,14 @@ impl Launcher {
                 }
             } else {
                 // Light gray so blank tiles are visible against the white background.
-                let _ = canvas.fill_solid(&icon_r, Gray8::new(if pressed { 128 } else { 210 }));
+                let _ = canvas.fill_solid(&icon_r, Gray8::new(if pressed || dragging { 128 } else { 210 }));
+            }
+
+            // Draw drag target highlight
+            if drag_target {
+                use embedded_graphics::Pixel;
+                let border = Rectangle::new(icon_r.top_left, icon_r.size);
+                let _ = canvas.draw_iter(border.points().map(|p| Pixel(p, Gray8::new(0))));
             }
 
             let lbl = Self::label_text(&entry.name);
