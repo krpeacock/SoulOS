@@ -133,3 +133,16 @@ The core four crates must remain `no_std`. That is non-negotiable.
 ## Tooling preference
 
 Use the rust-analyzer LSP tool for type-checking and diagnostics instead of running `cargo build`. Only run `cargo build` or `cargo check` when you need to verify a full compilation (e.g., checking for linker errors or confirming a build succeeds end-to-end).
+
+## Working agreement
+
+How the agent collaborates on this codebase. Five rules, all grep-able or behavioral — no new files, no ceremony.
+
+- **Reformulate as a testable goal first.** Before writing code, restate the task as a success criterion: "fix the bug" → "write a test that reproduces it, then make it pass." Define the check before the change.
+- **Use grep-able markers when communicating, not silence:**
+  - `NOTICED BUT NOT TOUCHING: <file:line> — <description>` — out-of-scope rot. Surfaces it without fixing it.
+  - `RISK: <description>` — when a request will cause measurable harm (data loss, regression, architectural debt). Pushback is required, not optional.
+  - `CONTRADICTION: <file:line> vs <file:line>` — when existing artifacts disagree mid-task. STOP and report; do not silently pick a side.
+- **Three-cycle stop rule.** After 3 full fix-verify cycles on the same failure, STOP and report the blocker, current diagnosis, attempts (with evidence), and recommendation. Do not loop silently.
+- **Re-diagnose on signal change.** When a recurring failure changes its observable signature (different error, different stack trace, different exit code), the previous hypothesis is invalidated. Re-diagnose from scratch. Pattern-matching on "same step failed" is the most common multi-session debugging error.
+- **Reminders are failure signals.** If the user reminds the agent of a rule it should have been following unprompted, treat it as a governance lapse — re-read this file and increase rigor for the rest of the session.
