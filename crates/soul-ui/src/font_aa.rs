@@ -19,37 +19,68 @@ use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Gray8, prelude::*};
 use fontdue::{Font, FontSettings};
 use once_cell::race::OnceBox;
 
-static FONT: OnceBox<Font> = OnceBox::new();
-
-const FONT_DATA: &[u8] =
-    include_bytes!("../assets/fonts/LiberationSans-Regular.ttf");
-
-fn get_font() -> &'static Font {
-    FONT.get_or_init(|| {
-        Box::new(
-            Font::from_bytes(FONT_DATA, FontSettings::default())
-                .expect("bundled Liberation Sans is valid"),
-        )
-    })
+/// The three system typefaces available for text rendering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FontFace {
+    /// Liberation Sans — the default proportional sans-serif face.
+    Sans,
+    /// Liberation Serif — a proportional serif face for reading.
+    Serif,
+    /// Liberation Mono — a fixed-width face for code or alignment.
+    Mono,
 }
 
-/// Draw `text` anti-aliased, with the **top of the cap-height** at `(x, y)`.
+static SANS: OnceBox<Font> = OnceBox::new();
+static SERIF: OnceBox<Font> = OnceBox::new();
+static MONO: OnceBox<Font> = OnceBox::new();
+
+const SANS_DATA: &[u8] =
+    include_bytes!("../assets/fonts/LiberationSans-Regular.ttf");
+const SERIF_DATA: &[u8] =
+    include_bytes!("../assets/fonts/LiberationSerif-Regular.ttf");
+const MONO_DATA: &[u8] =
+    include_bytes!("../assets/fonts/LiberationMono-Regular.ttf");
+
+/// Borrow the lazily-initialised `Font` for a given face.
+pub fn get_font_for(face: FontFace) -> &'static Font {
+    match face {
+        FontFace::Sans => SANS.get_or_init(|| {
+            Box::new(
+                Font::from_bytes(SANS_DATA, FontSettings::default())
+                    .expect("bundled Liberation Sans is valid"),
+            )
+        }),
+        FontFace::Serif => SERIF.get_or_init(|| {
+            Box::new(
+                Font::from_bytes(SERIF_DATA, FontSettings::default())
+                    .expect("bundled Liberation Serif is valid"),
+            )
+        }),
+        FontFace::Mono => MONO.get_or_init(|| {
+            Box::new(
+                Font::from_bytes(MONO_DATA, FontSettings::default())
+                    .expect("bundled Liberation Mono is valid"),
+            )
+        }),
+    }
+}
+
+/// Draw `text` anti-aliased with an explicit face, **top of cap-height** at `(x, y)`.
 ///
-/// `size_px` is the font size in logical pixels (roughly the cap-height).
-/// `luma = 0` draws black text; `luma = 255` draws white text.
-pub fn draw_text<D>(
+/// `size_px` is the font size in logical pixels. `luma = 0` → black; `luma = 255` → white.
+pub fn draw_text_face<D>(
     canvas: &mut D,
     text: &str,
     x: i32,
     y: i32,
     size_px: f32,
     luma: u8,
+    face: FontFace,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Gray8>,
 {
-    let font = get_font();
-    // Determine cap-height from 'H' so we can top-align consistently.
+    let font = get_font_for(face);
     let cap_h = {
         let (m, _) = font.rasterize('H', size_px);
         m.height as i32
@@ -59,8 +90,6 @@ where
     let mut cursor_x = x as f32;
     for c in text.chars() {
         let (metrics, bitmap) = font.rasterize(c, size_px);
-        // glyph top in screen-y (down = positive):
-        //   baseline_y − (height + ymin)  because ymin is from baseline to glyph bottom
         let glyph_top = baseline_y - (metrics.height as i32 + metrics.ymin);
         let glyph_left = cursor_x as i32 + metrics.xmin;
 
@@ -72,7 +101,6 @@ where
                 }
                 let a = coverage as u32;
                 let fg = luma as u32;
-                // Blend against white (255): full coverage → luma, none → 255.
                 let blended = ((fg * a + 255 * (255 - a)) / 255) as u8;
                 Pixel(
                     Point::new(glyph_left + col as i32, glyph_top + row as i32),
@@ -86,16 +114,44 @@ where
     Ok(())
 }
 
-/// Return the pixel width of `text` rendered at `size_px` logical pixels.
-pub fn text_width(text: &str, size_px: f32) -> i32 {
-    let font = get_font();
+/// Draw `text` anti-aliased in Sans (existing callers unchanged).
+pub fn draw_text<D>(
+    canvas: &mut D,
+    text: &str,
+    x: i32,
+    y: i32,
+    size_px: f32,
+    luma: u8,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Gray8>,
+{
+    draw_text_face(canvas, text, x, y, size_px, luma, FontFace::Sans)
+}
+
+/// Pixel-advance width of a single character with the given face.
+pub fn char_advance(c: char, size_px: f32, face: FontFace) -> f32 {
+    get_font_for(face).rasterize(c, size_px).0.advance_width
+}
+
+/// Return the pixel width of `text` rendered at `size_px` with the given face.
+pub fn text_width_face(text: &str, size_px: f32, face: FontFace) -> i32 {
     text.chars()
-        .map(|c| font.rasterize(c, size_px).0.advance_width as i32)
+        .map(|c| char_advance(c, size_px, face) as i32)
         .sum()
 }
 
-/// The approximate cap-height of the font at `size_px` logical pixels.
+/// Return the pixel width of `text` rendered at `size_px` in Sans.
+pub fn text_width(text: &str, size_px: f32) -> i32 {
+    text_width_face(text, size_px, FontFace::Sans)
+}
+
+/// The approximate cap-height of the given face at `size_px` logical pixels.
+pub fn cap_height_face(size_px: f32, face: FontFace) -> i32 {
+    get_font_for(face).rasterize('H', size_px).0.height as i32
+}
+
+/// The approximate cap-height of Sans at `size_px` logical pixels.
 pub fn cap_height(size_px: f32) -> i32 {
-    let font = get_font();
-    font.rasterize('H', size_px).0.height as i32
+    cap_height_face(size_px, FontFace::Sans)
 }
