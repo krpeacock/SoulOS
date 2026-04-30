@@ -108,6 +108,7 @@ pub mod prelude {
     pub use crate::primitives::{button, clear, hit_test, label, title_bar, TITLE_BAR_H};
     pub use crate::scrollbar::{Scrollbar, ScrollbarOutput, ScrollableView};
     pub use crate::selecttext::SelectableText;
+    pub use crate::font_aa::FontFace;
     pub use crate::textarea::{TextArea, TextAreaOutput};
     pub use crate::textinput::{TextInput, TextInputOutput};
 }

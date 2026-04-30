@@ -16,6 +16,8 @@
 //!   by visual line).
 //! - Selection-aware editing: typing while a selection is active
 //!   replaces it.
+//! - Font-face switching: call [`TextArea::set_face`] to change
+//!   the rendered typeface without touching the text buffer.
 //!
 //! # Ownership model
 //!
@@ -51,18 +53,18 @@ use alloc::vec::Vec;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    mono_font::{ascii::FONT_5X8, MonoTextStyle},
     pixelcolor::Gray8,
     prelude::*,
     primitives::{Line as EgLine, PrimitiveStyle, Rectangle},
 };
 
 use crate::emoji;
+use crate::font_aa::{self, FontFace};
 use crate::palette::{BLACK, WHITE};
 
-const CHAR_W: i32 = 5;
-const LINE_H: i32 = 10;
 const TEXT_PAD: i32 = 4;
+/// Body text size used in the notes textarea (logical pixels).
+pub const BODY_FONT_SIZE: f32 = 11.0;
 
 /// Time (ms) a motionless press must persist before it becomes a
 /// long-press and selects the word under the pointer.
@@ -118,13 +120,13 @@ pub struct TextArea {
     layout: Vec<VisualLine>,
     press: Option<Press>,
     /// Index of the first visual line shown at the top of the widget.
-    /// Adjusted automatically whenever the cursor moves out of view.
     scroll_line: usize,
+    face: FontFace,
+    font_size: f32,
 }
 
 impl TextArea {
-    /// Create an empty text area bound to `area` in virtual-screen
-    /// coordinates.
+    /// Create an empty text area bound to `area` in virtual-screen coordinates.
     pub fn new(area: Rectangle) -> Self {
         let mut this = Self {
             area,
@@ -134,6 +136,8 @@ impl TextArea {
             layout: Vec::new(),
             press: None,
             scroll_line: 0,
+            face: FontFace::Sans,
+            font_size: BODY_FONT_SIZE,
         };
         this.recompute_layout();
         this
@@ -165,6 +169,12 @@ impl TextArea {
         self.scroll_line = 0;
         self.recompute_layout();
         Some(self.area)
+    }
+
+    /// Switch the rendered typeface. Reflows the layout immediately.
+    pub fn set_face(&mut self, face: FontFace) {
+        self.face = face;
+        self.recompute_layout();
     }
 
     /// The widget's bounding rectangle.
@@ -246,10 +256,6 @@ impl TextArea {
 
     /// Check whether a motionless press has aged into a long-press;
     /// if so, expand the selection to the word under the pointer.
-    /// Call this on every [`Tick`] event so long-press fires even
-    /// without further input.
-    ///
-    /// [`Tick`]: soul-core's `Event::Tick` in the app's main loop.
     pub fn tick(&mut self, now_ms: u64) -> Option<Rectangle> {
         if let Some(press) = self.press.as_mut() {
             if !press.moved
@@ -270,8 +276,7 @@ impl TextArea {
 
     // --- editing -------------------------------------------------------
 
-    /// Insert a single character at the cursor. Replaces any active
-    /// selection.
+    /// Insert a single character at the cursor. Replaces any active selection.
     pub fn insert_char(&mut self, c: char) -> TextAreaOutput {
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
@@ -292,8 +297,7 @@ impl TextArea {
         }
     }
 
-    /// Delete the selection if any, otherwise the character left of
-    /// the cursor.
+    /// Delete the selection if any, otherwise the character left of the cursor.
     pub fn backspace(&mut self) -> TextAreaOutput {
         if self.delete_selection() {
             self.recompute_layout();
@@ -361,10 +365,10 @@ impl TextArea {
         self.anchor = None;
         let line_idx = self.cursor_line_idx();
         if line_idx > 0 {
-            let col = self.cursor_col_in_line(line_idx);
+            let col_px = self.cursor_col_px(line_idx);
             let prev = self.layout[line_idx - 1];
             let line_text = &self.buffer[prev.start..prev.end];
-            self.cursor = prev.start + byte_at_cell(line_text, col);
+            self.cursor = prev.start + byte_at_px(line_text, col_px, self.face, self.font_size);
             self.ensure_cursor_visible();
             return Some(self.area);
         }
@@ -376,10 +380,10 @@ impl TextArea {
         self.anchor = None;
         let line_idx = self.cursor_line_idx();
         if line_idx + 1 < self.layout.len() {
-            let col = self.cursor_col_in_line(line_idx);
+            let col_px = self.cursor_col_px(line_idx);
             let next = self.layout[line_idx + 1];
             let line_text = &self.buffer[next.start..next.end];
-            self.cursor = next.start + byte_at_cell(line_text, col);
+            self.cursor = next.start + byte_at_px(line_text, col_px, self.face, self.font_size);
             self.ensure_cursor_visible();
             return Some(self.area);
         }
@@ -394,9 +398,9 @@ impl TextArea {
         if new_line == line_idx {
             return None;
         }
-        let col = self.cursor_col_in_line(line_idx);
+        let col_px = self.cursor_col_px(line_idx);
         let vl = self.layout[new_line];
-        self.cursor = vl.start + byte_at_cell(&self.buffer[vl.start..vl.end], col);
+        self.cursor = vl.start + byte_at_px(&self.buffer[vl.start..vl.end], col_px, self.face, self.font_size);
         self.ensure_cursor_visible();
         Some(self.area)
     }
@@ -409,9 +413,9 @@ impl TextArea {
         if new_line == line_idx {
             return None;
         }
-        let col = self.cursor_col_in_line(line_idx);
+        let col_px = self.cursor_col_px(line_idx);
         let vl = self.layout[new_line];
-        self.cursor = vl.start + byte_at_cell(&self.buffer[vl.start..vl.end], col);
+        self.cursor = vl.start + byte_at_px(&self.buffer[vl.start..vl.end], col_px, self.face, self.font_size);
         self.ensure_cursor_visible();
         Some(self.area)
     }
@@ -423,27 +427,21 @@ impl TextArea {
     where
         D: DrawTarget<Color = Gray8>,
     {
-        let black_style = MonoTextStyle::new(&FONT_5X8, BLACK);
-        let white_style = MonoTextStyle::new(&FONT_5X8, WHITE);
+        let line_h = self.line_height();
         let max_y = self.area.top_left.y + self.area.size.height as i32;
 
-        // Pass 1: paint visible lines in black.
+        // Pass 1: paint visible lines.
         for (idx, line) in self.layout.iter().enumerate() {
             if idx < self.scroll_line {
                 continue;
             }
             let row = (idx - self.scroll_line) as i32;
-            let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
-            if y + LINE_H > max_y {
+            let y = self.area.top_left.y + TEXT_PAD + row * line_h;
+            if y + line_h > max_y {
                 break;
             }
             let text = &self.buffer[line.start..line.end];
-            emoji::draw_text(
-                canvas,
-                text,
-                Point::new(self.area.top_left.x + TEXT_PAD, y),
-                black_style,
-            )?;
+            draw_line_text(canvas, text, self.area.top_left.x + TEXT_PAD, y, self.font_size, 0, self.face, line_h)?;
         }
 
         // Pass 2: invert selected spans.
@@ -463,28 +461,23 @@ impl TextArea {
                     continue;
                 }
                 let row = (idx - self.scroll_line) as i32;
-                let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
-                if y + LINE_H > max_y {
+                let y = self.area.top_left.y + TEXT_PAD + row * line_h;
+                if y + line_h > max_y {
                     break;
                 }
-                let s_cells = emoji::cells_in(&self.buffer[line.start..ls]);
-                let e_cells = emoji::cells_in(&self.buffer[line.start..le]);
+                let s_px = text_px_width(&self.buffer[line.start..ls], self.face, self.font_size);
+                let e_px = text_px_width(&self.buffer[line.start..le], self.face, self.font_size);
                 let rect = Rectangle::new(
-                    Point::new(self.area.top_left.x + TEXT_PAD + s_cells * CHAR_W, y),
-                    Size::new(((e_cells - s_cells) * CHAR_W) as u32, LINE_H as u32),
+                    Point::new(self.area.top_left.x + TEXT_PAD + s_px, y),
+                    Size::new((e_px - s_px).max(1) as u32, line_h as u32),
                 );
                 rect.into_styled(PrimitiveStyle::with_fill(BLACK)).draw(canvas)?;
                 let selected_text = &self.buffer[ls..le];
-                emoji::draw_text(
-                    canvas,
-                    selected_text,
-                    Point::new(self.area.top_left.x + TEXT_PAD + s_cells * CHAR_W, y),
-                    white_style,
-                )?;
+                draw_line_text(canvas, selected_text, self.area.top_left.x + TEXT_PAD + s_px, y, self.font_size, 255, self.face, line_h)?;
             }
         } else if let Some(p) = self.caret_position(self.cursor) {
-            if p.y + LINE_H <= max_y {
-                EgLine::new(Point::new(p.x, p.y), Point::new(p.x, p.y + LINE_H))
+            if p.y + line_h <= max_y {
+                EgLine::new(Point::new(p.x, p.y), Point::new(p.x, p.y + line_h))
                     .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
                     .draw(canvas)?;
             }
@@ -494,12 +487,16 @@ impl TextArea {
 
     // --- internals -----------------------------------------------------
 
-    fn cells_per_line(&self) -> i32 {
-        ((self.area.size.width as i32 - TEXT_PAD * 2) / CHAR_W).max(1)
+    fn line_height(&self) -> i32 {
+        font_aa::cap_height_face(self.font_size, self.face) + 4
+    }
+
+    fn max_line_px(&self) -> f32 {
+        (self.area.size.width as i32 - TEXT_PAD * 2) as f32
     }
 
     fn recompute_layout(&mut self) {
-        self.layout = compute_layout(&self.buffer, self.cells_per_line());
+        self.layout = compute_layout(&self.buffer, self.max_line_px(), self.face, self.font_size);
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -518,32 +515,40 @@ impl TextArea {
         if self.layout.is_empty() {
             return 0;
         }
+        let line_h = self.line_height();
         let y_rel = (y as i32 - self.area.top_left.y - TEXT_PAD).max(0);
-        // Offset by scroll_line so tapping the top row hits layout[scroll_line].
-        let line_idx = (self.scroll_line + (y_rel / LINE_H) as usize)
+        let line_idx = (self.scroll_line + (y_rel / line_h) as usize)
             .min(self.layout.len() - 1);
         let line = self.layout[line_idx];
-        let x_rel = (x as i32 - self.area.top_left.x - TEXT_PAD).max(0);
-        let target_cell = x_rel / CHAR_W;
-        line.start + byte_at_cell(&self.buffer[line.start..line.end], target_cell)
+        let target_x = (x as i32 - self.area.top_left.x - TEXT_PAD).max(0) as f32;
+
+        let line_text = &self.buffer[line.start..line.end];
+        let mut cum_x = 0.0f32;
+        for (byte_off, c) in line_text.char_indices() {
+            let cw = char_px(c, self.face, self.font_size);
+            if target_x < cum_x + cw * 0.5 {
+                return line.start + byte_off;
+            }
+            cum_x += cw;
+        }
+        line.end
     }
 
-    /// Returns the screen position of the cursor's leading edge, or
-    /// `None` when the cursor is scrolled out of the visible area.
     fn caret_position(&self, cursor: usize) -> Option<Point> {
+        let line_h = self.line_height();
         for (idx, line) in self.layout.iter().enumerate() {
             if cursor >= line.start && cursor <= line.end {
                 if idx < self.scroll_line {
-                    return None; // scrolled above view
+                    return None;
                 }
                 let row = (idx - self.scroll_line) as i32;
                 let max_row = self.visible_lines() as i32;
                 if row >= max_row {
-                    return None; // scrolled below view
+                    return None;
                 }
-                let cell_offset = emoji::cells_in(&self.buffer[line.start..cursor]);
-                let x = self.area.top_left.x + TEXT_PAD + cell_offset * CHAR_W;
-                let y = self.area.top_left.y + TEXT_PAD + row * LINE_H;
+                let x_off = text_px_width(&self.buffer[line.start..cursor], self.face, self.font_size);
+                let x = self.area.top_left.x + TEXT_PAD + x_off;
+                let y = self.area.top_left.y + TEXT_PAD + row * line_h;
                 return Some(Point::new(x, y));
             }
         }
@@ -552,12 +557,11 @@ impl TextArea {
 
     // --- scroll helpers ------------------------------------------------
 
-    /// How many text rows fit in the visible area.
     fn visible_lines(&self) -> usize {
-        ((self.area.size.height as i32 - TEXT_PAD) / LINE_H).max(1) as usize
+        let line_h = self.line_height();
+        ((self.area.size.height as i32 - TEXT_PAD) / line_h).max(1) as usize
     }
 
-    /// Visual-line index (into `self.layout`) that contains the cursor.
     fn cursor_line_idx(&self) -> usize {
         self.layout
             .iter()
@@ -565,15 +569,16 @@ impl TextArea {
             .unwrap_or(self.layout.len().saturating_sub(1))
     }
 
-    /// Visual column of the cursor in cells (not char count). Used for
-    /// vertical navigation so the cursor lands at the same pixel x on
-    /// the adjacent line, not the same char index.
-    fn cursor_col_in_line(&self, line_idx: usize) -> i32 {
+    /// Pixel x of the cursor within its visual line (used for up/down nav).
+    fn cursor_col_px(&self, line_idx: usize) -> f32 {
         let vl = self.layout[line_idx];
-        emoji::cells_in(&self.buffer[vl.start..self.cursor.min(vl.end)])
+        let end = self.cursor.min(vl.end);
+        self.buffer[vl.start..end]
+            .chars()
+            .map(|c| char_px(c, self.face, self.font_size))
+            .sum()
     }
 
-    /// Adjust `scroll_line` so the cursor's visual line is visible.
     fn ensure_cursor_visible(&mut self) {
         let line_idx = self.cursor_line_idx();
         let vis = self.visible_lines();
@@ -585,14 +590,83 @@ impl TextArea {
     }
 }
 
-/// Word-wrap `buffer` into visual lines of at most `cells_per_line`
-/// cells each. Break at spaces where possible; break mid-word only
-/// when a single word is wider than one line. Emoji count as
-/// [`emoji::EMOJI_CELL_SPAN`] cells.
-fn compute_layout(buffer: &str, cells_per_line: i32) -> Vec<VisualLine> {
+// --- free helpers (no_std, no heap) ------------------------------------
+
+/// Pixel advance width of a single character (emoji get a square slot).
+fn char_px(c: char, face: FontFace, size_px: f32) -> f32 {
+    if emoji::is_emoji(c) {
+        // Emoji are rendered as a square whose side equals the line height.
+        (font_aa::cap_height_face(size_px, face) + 4) as f32
+    } else {
+        font_aa::char_advance(c, size_px, face)
+    }
+}
+
+/// Integer pixel width of a string slice.
+fn text_px_width(s: &str, face: FontFace, size_px: f32) -> i32 {
+    s.chars().map(|c| char_px(c, face, size_px) as i32).sum()
+}
+
+/// Draw a line of text, handling emoji glyphs inline.
+fn draw_line_text<D>(
+    canvas: &mut D,
+    text: &str,
+    x: i32,
+    y: i32,
+    size_px: f32,
+    luma: u8,
+    face: FontFace,
+    line_h: i32,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Gray8>,
+{
+    let font = font_aa::get_font_for(face);
+    let cap_h = font.rasterize('H', size_px).0.height as i32;
+    let baseline_y = y + cap_h;
+    let mut cursor_x = x as f32;
+
+    for c in text.chars() {
+        if emoji::is_emoji(c) {
+            let slot = line_h as u32;
+            let rect = Rectangle::new(
+                Point::new(cursor_x as i32, y),
+                Size::new(slot, slot),
+            );
+            let _ = emoji::draw_glyph_in_rect(canvas, c, rect, WHITE)?;
+            cursor_x += slot as f32;
+        } else {
+            let (metrics, bitmap) = font.rasterize(c, size_px);
+            let glyph_top = baseline_y - (metrics.height as i32 + metrics.ymin);
+            let glyph_left = cursor_x as i32 + metrics.xmin;
+            for row in 0..metrics.height {
+                for col in 0..metrics.width {
+                    let coverage = bitmap[row * metrics.width + col];
+                    if coverage == 0 {
+                        continue;
+                    }
+                    let a = coverage as u32;
+                    let fg = luma as u32;
+                    let blended = ((fg * a + 255 * (255 - a)) / 255) as u8;
+                    Pixel(
+                        Point::new(glyph_left + col as i32, glyph_top + row as i32),
+                        Gray8::new(blended),
+                    )
+                    .draw(canvas)?;
+                }
+            }
+            cursor_x += metrics.advance_width;
+        }
+    }
+    Ok(())
+}
+
+/// Word-wrap `buffer` into visual lines that fit within `max_px` pixels
+/// for the given face and size.
+fn compute_layout(buffer: &str, max_px: f32, face: FontFace, size_px: f32) -> Vec<VisualLine> {
     let mut lines = Vec::new();
     let mut line_start = 0usize;
-    let mut cur_cells: i32 = 0;
+    let mut cur_px: f32 = 0.0;
     let mut last_break: Option<usize> = None;
 
     let mut i = 0;
@@ -601,65 +675,53 @@ fn compute_layout(buffer: &str, cells_per_line: i32) -> Vec<VisualLine> {
         let c_len = c.len_utf8();
 
         if c == '\n' {
-            lines.push(VisualLine {
-                start: line_start,
-                end: i,
-            });
+            lines.push(VisualLine { start: line_start, end: i });
             i += c_len;
             line_start = i;
-            cur_cells = 0;
+            cur_px = 0.0;
             last_break = None;
             continue;
         }
 
-        let c_cells = emoji::cell_width(c);
-        // If the line already has content and adding this char would
-        // push past the budget, break first. The `cur_cells > 0`
-        // guard prevents infinite looping when a single glyph is
-        // wider than the entire line.
-        if cur_cells > 0 && cur_cells + c_cells > cells_per_line {
+        let cw = char_px(c, face, size_px);
+
+        if cur_px > 0.0 && cur_px + cw > max_px {
             let break_at = last_break.unwrap_or(i);
-            lines.push(VisualLine {
-                start: line_start,
-                end: break_at,
-            });
+            lines.push(VisualLine { start: line_start, end: break_at });
             line_start = break_at;
-            cur_cells = emoji::cells_in(&buffer[line_start..i]);
+            // Recompute width of what we kept on the new line.
+            cur_px = buffer[line_start..i]
+                .chars()
+                .map(|ch| char_px(ch, face, size_px))
+                .sum();
             last_break = None;
             continue;
         }
 
-        cur_cells += c_cells;
+        cur_px += cw;
         if c == ' ' {
             last_break = Some(i + c_len);
         }
         i += c_len;
     }
-    lines.push(VisualLine {
-        start: line_start,
-        end: buffer.len(),
-    });
+    lines.push(VisualLine { start: line_start, end: buffer.len() });
     lines
 }
 
-/// Walk `s` accumulating cell widths and return the byte offset of
-/// the first char whose start lands at or past `target_cells`. If
-/// `target_cells` falls inside a multi-cell glyph, the offset of
-/// that glyph is returned (caret rests *before* it).
-fn byte_at_cell(s: &str, target_cells: i32) -> usize {
-    let mut cells = 0;
+/// Walk `s`, accumulating pixel widths, and return the byte offset of
+/// the first character whose left edge is at or past `target_px`.
+fn byte_at_px(s: &str, target_px: f32, face: FontFace, size_px: f32) -> usize {
+    let mut px = 0.0f32;
     for (b, c) in s.char_indices() {
-        if cells >= target_cells {
+        if px >= target_px {
             return b;
         }
-        cells += emoji::cell_width(c);
+        px += char_px(c, face, size_px);
     }
     s.len()
 }
 
 /// Expand `pos` to the surrounding word's `[start, end)` byte range.
-/// A word is a run of alphanumerics or underscores. Returns
-/// `(pos, pos)` when `pos` is on a non-word character.
 fn word_range(buffer: &str, pos: usize) -> (usize, usize) {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let pos = pos.min(buffer.len());

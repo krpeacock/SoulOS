@@ -15,6 +15,7 @@ use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
 use soul_db::Database;
 use soul_ui::Form;
 use soul_ui::TextInput;
+use soul_ui::font_aa::FontFace;
 use soul_ui::{Keyboard, TextArea, TypedKey, KEYBOARD_HEIGHT, TITLE_BAR_H};
 
 /// Object-safe drawing trait to bridge Rhai and DrawTarget.
@@ -450,6 +451,14 @@ impl ScriptedApp {
         engine.register_fn("cursor_down",  |area: &mut TextArea| { let _ = area.cursor_down(); });
         engine.register_fn("page_up",      |area: &mut TextArea| { let _ = area.page_up(); });
         engine.register_fn("page_down",    |area: &mut TextArea| { let _ = area.page_down(); });
+        engine.register_fn("set_font", |area: &mut TextArea, name: String| {
+            let face = match name.to_lowercase().as_str() {
+                "serif" => FontFace::Serif,
+                "mono"  => FontFace::Mono,
+                _       => FontFace::Sans,
+            };
+            area.set_face(face);
+        });
 
         // Register Keyboard type
         engine.register_type_with_name::<Keyboard>("Keyboard");

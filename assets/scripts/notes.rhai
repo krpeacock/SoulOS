@@ -9,13 +9,21 @@ let app_handles = ["open_script"];
 let area = new_text_area(0, 15, 240, 190);
 let kb   = new_keyboard();
 let active_id    = 0;
-let exchange_mode = false;  // true when opened via open_script exchange
+let pref_id      = 0;   // DB record that stores font preference (category 1)
+let exchange_mode = false;
 let menu_open    = false;
+let current_font = "sans";  // "sans" | "serif" | "mono"
+
+fn apply_font() {
+    area.set_font(current_font);
+}
 
 fn on_event(event) {
     if event.type == "AppStart" {
         exchange_mode = false;
         menu_open = false;
+
+        // Load or create the main note (category 0).
         let ids = db_get_ids_in_category(0);
         if ids.len() == 0 {
             active_id = db_insert(0, to_bytes("welcome to soulos rhai notes."));
@@ -23,6 +31,16 @@ fn on_event(event) {
             active_id = ids[0];
         }
         area.set_text(to_string(db_get_data(active_id)));
+
+        // Load font preference (category 1).
+        let pref_ids = db_get_ids_in_category(1);
+        if pref_ids.len() == 0 {
+            pref_id = db_insert(1, to_bytes("sans"));
+        } else {
+            pref_id = pref_ids[0];
+            current_font = to_string(db_get_data(pref_id));
+        }
+        apply_font();
         invalidate_all();
     }
 
@@ -72,7 +90,6 @@ fn on_event(event) {
     }
 
     if event.type == "PenDown" {
-        // EGUI handles its own PenDown events if consumed
         if event.y >= 205 {
             handle_pen(kb, event.x, event.y, true);
         } else {
@@ -119,23 +136,21 @@ fn on_draw() {
     } else {
         title_bar("Notes");
     }
-    
-    // Draw manual components
+
     draw_text_area(area);
     draw_keyboard(kb);
 
     // Overlay EGUI menu if open
     if menu_open {
         egui_begin();
-        // Position menu near top
-        egui_scroll_area("menu_scroll", 100, |ui| {
+        egui_scroll_area("menu_scroll", 140, |ui| {
             egui_group(ui, "Notes Menu", |ui| {
                 egui_vertical_layout(ui, |ui| {
                     if egui_button(ui, "Save") {
                         db_update(active_id, to_bytes(area.get_text()));
                         menu_open = false;
                     }
-                    
+
                     let done_label = if exchange_mode { "Done ▶" } else { "Done" };
                     if egui_button(ui, done_label) {
                         if exchange_mode {
@@ -146,7 +161,31 @@ fn on_draw() {
                         }
                         menu_open = false;
                     }
-                    
+
+                    // Font switcher — three choices mirroring the system typefaces.
+                    let sans_label  = if current_font == "sans"  { "✓ Sans"  } else { "  Sans"  };
+                    let serif_label = if current_font == "serif" { "✓ Serif" } else { "  Serif" };
+                    let mono_label  = if current_font == "mono"  { "✓ Mono"  } else { "  Mono"  };
+
+                    if egui_button(ui, sans_label) {
+                        current_font = "sans";
+                        apply_font();
+                        db_update(pref_id, to_bytes(current_font));
+                        menu_open = false;
+                    }
+                    if egui_button(ui, serif_label) {
+                        current_font = "serif";
+                        apply_font();
+                        db_update(pref_id, to_bytes(current_font));
+                        menu_open = false;
+                    }
+                    if egui_button(ui, mono_label) {
+                        current_font = "mono";
+                        apply_font();
+                        db_update(pref_id, to_bytes(current_font));
+                        menu_open = false;
+                    }
+
                     if egui_button(ui, "Close Menu") {
                         menu_open = false;
                     }
