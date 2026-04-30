@@ -175,6 +175,7 @@ impl TextArea {
     pub fn set_face(&mut self, face: FontFace) {
         self.face = face;
         self.recompute_layout();
+        self.ensure_cursor_visible();
     }
 
     /// The widget's bounding rectangle.
@@ -604,7 +605,7 @@ fn char_px(c: char, face: FontFace, size_px: f32) -> f32 {
 
 /// Integer pixel width of a string slice.
 fn text_px_width(s: &str, face: FontFace, size_px: f32) -> i32 {
-    s.chars().map(|c| char_px(c, face, size_px) as i32).sum()
+    s.chars().map(|c| char_px(c, face, size_px)).sum::<f32>() as i32
 }
 
 /// Draw a line of text, handling emoji glyphs inline.
