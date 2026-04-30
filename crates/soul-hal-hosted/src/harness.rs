@@ -354,17 +354,18 @@ impl<A: soul_core::App> Harness<A> {
         &self.platform.speech_log
     }
 
-    /// Get a single pixel's grayscale value at the given coordinates.
+    /// Get a single pixel's grayscale value at the given logical coordinates.
     /// Returns Gray8::new(0) for out-of-bounds coordinates.
     pub fn pixel(&self, x: i16, y: i16) -> embedded_graphics::pixelcolor::Gray8 {
         use embedded_graphics::pixelcolor::Gray8;
-        if x < 0 || y < 0 || x as u32 >= self.platform.display.width || y as u32 >= self.platform.display.height {
+        use crate::PIXEL_SCALE;
+        let d = &self.platform.display;
+        if x < 0 || y < 0 || x as u32 >= d.width || y as u32 >= d.height {
             return Gray8::new(0);
         }
-        let idx = (y as u32 * self.platform.display.width + x as u32) as usize;
-        let pixel = self.platform.display.buffer[idx];
-        // Extract the red channel (grayscale is stored as 0x00RRGGBB where R==G==B)
-        let luma = (pixel & 0xFF) as u8;
+        // Sample the top-left physical pixel of the logical pixel's block.
+        let idx = (y as u32 * PIXEL_SCALE * d.phys_width() + x as u32 * PIXEL_SCALE) as usize;
+        let luma = (d.buffer[idx] & 0xFF) as u8;
         Gray8::new(luma)
     }
 
@@ -376,16 +377,10 @@ impl<A: soul_core::App> Harness<A> {
         use std::fs::File;
         use std::io::BufWriter;
 
+        // Save at logical resolution (sampling top-left of each physical block).
+        let gray_buffer = self.framebuffer_as_grayscale_bytes();
         let width = self.platform.display.width;
         let height = self.platform.display.height;
-        
-        // Convert from RGB u32 buffer to grayscale u8 buffer
-        let mut gray_buffer = Vec::with_capacity((width * height) as usize);
-        for pixel in &self.platform.display.buffer {
-            // Extract red channel (since R==G==B for grayscale)
-            let luma = (pixel & 0xFF) as u8;
-            gray_buffer.push(luma);
-        }
 
         let file = File::create(path)?;
         let ref mut w = BufWriter::new(file);
@@ -451,10 +446,16 @@ impl<A: soul_core::App> Harness<A> {
     }
 
     fn framebuffer_as_grayscale_bytes(&self) -> Vec<u8> {
-        self.platform.display.buffer
-            .iter()
-            .map(|&pixel| (pixel & 0xFF) as u8)
-            .collect()
+        use crate::PIXEL_SCALE;
+        let d = &self.platform.display;
+        let pw = d.phys_width();
+        // Sample the top-left physical pixel of each logical pixel block.
+        (0..d.height).flat_map(|y| {
+            (0..d.width).map(move |x| {
+                let idx = (y * PIXEL_SCALE * pw + x * PIXEL_SCALE) as usize;
+                (d.buffer[idx] & 0xFF) as u8
+            })
+        }).collect()
     }
 
     fn load_png_as_grayscale_bytes(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {

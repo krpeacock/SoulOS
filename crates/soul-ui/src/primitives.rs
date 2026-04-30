@@ -16,21 +16,24 @@
 //! [`embedded-graphics`]: https://crates.io/crates/embedded-graphics
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::Gray8,
     prelude::*,
     primitives::{PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
-    text::{Baseline, Text},
 };
 
-use crate::palette::{BLACK, WHITE};
+use crate::{font_aa, palette::{BLACK, WHITE}};
 
 /// Height of the standard SoulOS title bar in pixels, including its
 /// bottom edge. App content should begin at this Y coordinate.
 pub const TITLE_BAR_H: u32 = 15;
 
+// Font size in logical pixels, tuned to fit the 15-px title bar and
+// button heights used throughout the UI.
+const LABEL_SIZE: f32 = 9.0;
+// Fixed-cell width used only for legacy hit-test/centering callers that
+// haven't yet switched to font_aa::text_width.  Keep at 6 so any
+// existing layout arithmetic stays correct.
 const FONT_W: i32 = 6;
-const FONT_H: i32 = 10;
 
 /// Fill the rectangle `(0, 0) – (width, height)` with [`WHITE`].
 ///
@@ -61,8 +64,7 @@ where
     Rectangle::new(Point::zero(), Size::new(width, TITLE_BAR_H))
         .into_styled(bar)
         .draw(target)?;
-    let text_style = MonoTextStyle::new(&FONT_6X10, WHITE);
-    Text::with_baseline(title, Point::new(4, 2), text_style, Baseline::Top).draw(target)?;
+    font_aa::draw_text(target, title, 4, 2, LABEL_SIZE, 255)?;
     Ok(())
 }
 
@@ -80,11 +82,7 @@ pub fn button<D>(
 where
     D: DrawTarget<Color = Gray8>,
 {
-    let (fill, text_color) = if pressed {
-        (BLACK, WHITE)
-    } else {
-        (WHITE, BLACK)
-    };
+    let fill = if pressed { BLACK } else { WHITE };
     let style = PrimitiveStyleBuilder::new()
         .fill_color(fill)
         .stroke_color(BLACK)
@@ -93,14 +91,15 @@ where
     RoundedRectangle::with_equal_corners(rect, Size::new(4, 4))
         .into_styled(style)
         .draw(target)?;
-    let text_style = MonoTextStyle::new(&FONT_6X10, text_color);
-    let label_w = label.chars().count() as i32 * FONT_W;
+    let luma = if pressed { 255 } else { 0 };
+    let label_w = font_aa::text_width(label, LABEL_SIZE);
+    let label_h = font_aa::cap_height(LABEL_SIZE);
     let pos = rect.top_left
         + Point::new(
             (rect.size.width as i32 - label_w) / 2,
-            (rect.size.height as i32 - FONT_H) / 2,
+            (rect.size.height as i32 - label_h) / 2,
         );
-    Text::with_baseline(label, pos, text_style, Baseline::Top).draw(target)?;
+    font_aa::draw_text(target, label, pos.x, pos.y, LABEL_SIZE, luma)?;
     Ok(())
 }
 
@@ -113,8 +112,7 @@ pub fn label<D>(target: &mut D, at: Point, text: &str) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Gray8>,
 {
-    let style = MonoTextStyle::new(&FONT_6X10, BLACK);
-    Text::with_baseline(text, at, style, Baseline::Top).draw(target)?;
+    font_aa::draw_text(target, text, at.x, at.y, LABEL_SIZE, 0)?;
     Ok(())
 }
 

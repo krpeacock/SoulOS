@@ -1378,14 +1378,26 @@ fn scale_image_to_canvas(data: &[u8], src_w: usize, src_h: usize, dst_w: usize, 
     let offset_y = (dst_h - scaled_h) / 2;
     for dy in 0..scaled_h {
         for dx in 0..scaled_w {
-            let src_x = (dx as f32 / scale) as usize;
-            let src_y = (dy as f32 / scale) as usize;
-            if src_x < src_w && src_y < src_h {
-                let dst_x = offset_x + dx;
-                let dst_y = offset_y + dy;
-                if dst_x < dst_w && dst_y < dst_h {
-                    result[dst_y * dst_w + dst_x] = data[src_y * src_w + src_x];
-                }
+            let src_xf = dx as f32 / scale;
+            let src_yf = dy as f32 / scale;
+            let x0 = src_xf as usize;
+            let y0 = src_yf as usize;
+            let x1 = (x0 + 1).min(src_w - 1);
+            let y1 = (y0 + 1).min(src_h - 1);
+            let fx = src_xf - x0 as f32;
+            let fy = src_yf - y0 as f32;
+            let v00 = data[y0 * src_w + x0] as f32;
+            let v10 = data[y0 * src_w + x1] as f32;
+            let v01 = data[y1 * src_w + x0] as f32;
+            let v11 = data[y1 * src_w + x1] as f32;
+            let v = v00 * (1.0 - fx) * (1.0 - fy)
+                  + v10 * fx * (1.0 - fy)
+                  + v01 * (1.0 - fx) * fy
+                  + v11 * fx * fy;
+            let dst_x = offset_x + dx;
+            let dst_y = offset_y + dy;
+            if dst_x < dst_w && dst_y < dst_h {
+                result[dst_y * dst_w + dst_x] = v as u8;
             }
         }
     }
