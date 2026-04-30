@@ -21,29 +21,55 @@ pub use harness::{SettleTimeout, Harness, HeadlessPlatform, VirtualClock};
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 
+/// Each logical pixel is rendered as a PIXEL_SCALE×PIXEL_SCALE block so
+/// the physical window has 4× the pixel density of the 240×320 virtual canvas.
+/// Exported so callers that need physical dimensions can compute them.
+pub const PIXEL_SCALE: u32 = 4;
+
 /// A `DrawTarget<Color = Gray8>` backed by a `Vec<u32>` pixel buffer.
-/// Pixels are stored as `0x00RRGGBB` where R == G == B == luma.
+///
+/// `width` / `height` are the *logical* dimensions (240×320) reported by
+/// `size()` — all embedded-graphics drawing and app layout happens in this
+/// space.  `buffer` is *physical*: each logical pixel occupies a
+/// `PIXEL_SCALE×PIXEL_SCALE` block, so `buffer.len() == width * PIXEL_SCALE *
+/// height * PIXEL_SCALE`.  `draw_iter` writes every block atomically, which
+/// means callers that know about physical pixels can also write individual
+/// `buffer` entries for sub-logical-pixel rendering.
 #[derive(Clone)]
 pub struct MiniFbDisplay {
     pub width: u32,
     pub height: u32,
-    /// Raw pixel buffer handed directly to minifb's `update_with_buffer`.
+    /// Physical pixel buffer: row-major, stride = `width * PIXEL_SCALE`.
+    /// Format: `0x00RRGGBB` where R == G == B == luma.
     pub buffer: Vec<u32>,
 }
 
 impl MiniFbDisplay {
     pub fn new(width: u32, height: u32) -> Self {
+        let phys = (width * PIXEL_SCALE * height * PIXEL_SCALE) as usize;
         Self {
             width,
             height,
-            buffer: vec![0x00FF_FFFFu32; (width * height) as usize],
+            buffer: vec![0x00FF_FFFFu32; phys],
         }
+    }
+
+    /// Physical width in pixels (= `width * PIXEL_SCALE`).
+    #[inline]
+    pub fn phys_width(&self) -> u32 {
+        self.width * PIXEL_SCALE
+    }
+
+    /// Physical height in pixels (= `height * PIXEL_SCALE`).
+    #[inline]
+    pub fn phys_height(&self) -> u32 {
+        self.height * PIXEL_SCALE
     }
 }
 
 impl OriginDimensions for MiniFbDisplay {
     fn size(&self) -> Size {
-        Size::new(self.width, self.height)
+        Size::new(self.width, self.height) // logical — apps draw here
     }
 }
 
@@ -55,20 +81,23 @@ impl DrawTarget for MiniFbDisplay {
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
+        let phys_stride = self.phys_width();
         for Pixel(Point { x, y }, color) in pixels {
             if x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height {
-                let idx = (y as u32 * self.width + x as u32) as usize;
+                let px = x as u32 * PIXEL_SCALE;
+                let py = y as u32 * PIXEL_SCALE;
                 let l = color.luma() as u32;
-                self.buffer[idx] = (l << 16) | (l << 8) | l;
+                let pv = (l << 16) | (l << 8) | l;
+                for dy in 0..PIXEL_SCALE {
+                    for dx in 0..PIXEL_SCALE {
+                        self.buffer[((py + dy) * phys_stride + (px + dx)) as usize] = pv;
+                    }
+                }
             }
         }
         Ok(())
     }
 }
-
-// Each logical pixel is rendered as a PIXEL_SCALE×PIXEL_SCALE block in the
-// physical window, giving 4x total pixel density vs the 240×320 virtual canvas.
-const PIXEL_SCALE: u32 = 4;
 
 // ── Platform ─────────────────────────────────────────────────────────────────
 
@@ -83,15 +112,13 @@ pub struct HostedPlatform {
     prev_mouse_pos: Option<(f32, f32)>,
     /// Keys held on the previous pump — used to generate ButtonDown/Up events.
     prev_keys: Vec<Key>,
-    /// Physical pixel buffer at PIXEL_SCALE× the logical resolution.
-    phys_buffer: Vec<u32>,
 }
 
 impl HostedPlatform {
     pub fn new(title: &str, width: u32, height: u32) -> Self {
         let display = MiniFbDisplay::new(width, height);
-        let phys_w = (width * PIXEL_SCALE) as usize;
-        let phys_h = (height * PIXEL_SCALE) as usize;
+        let phys_w = display.phys_width() as usize;
+        let phys_h = display.phys_height() as usize;
         let window = Window::new(
             title,
             phys_w,
@@ -111,7 +138,6 @@ impl HostedPlatform {
             prev_mouse_down: false,
             prev_mouse_pos: None,
             prev_keys: Vec::new(),
-            phys_buffer: vec![0x00FF_FFFFu32; phys_w * phys_h],
         }
     }
 
@@ -225,20 +251,9 @@ impl Platform for HostedPlatform {
     }
 
     fn flush(&mut self) {
-        let lw = self.display.width;
-        let lh = self.display.height;
-        let pw = lw * PIXEL_SCALE;
-        for y in 0..lh {
-            for x in 0..lw {
-                let src = self.display.buffer[(y * lw + x) as usize];
-                for dy in 0..PIXEL_SCALE {
-                    for dx in 0..PIXEL_SCALE {
-                        self.phys_buffer[((y * PIXEL_SCALE + dy) * pw + (x * PIXEL_SCALE + dx)) as usize] = src;
-                    }
-                }
-            }
-        }
-        let _ = self.window.update_with_buffer(&self.phys_buffer, pw as usize, (lh * PIXEL_SCALE) as usize);
+        let pw = self.display.phys_width() as usize;
+        let ph = self.display.phys_height() as usize;
+        let _ = self.window.update_with_buffer(&self.display.buffer, pw, ph);
         self.pump();
     }
 
