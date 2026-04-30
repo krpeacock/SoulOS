@@ -74,6 +74,7 @@ extern crate alloc;
 
 pub mod builder;
 pub mod egui_bridge;
+pub mod font_aa;
 pub mod egui_integration;
 pub mod egui_layout;
 pub mod egui_scroll;

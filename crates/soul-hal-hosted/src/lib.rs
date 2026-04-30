@@ -2,6 +2,7 @@
 //! Provides a window, a Gray8 framebuffer, and keyboard/mouse input.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use embedded_graphics::{
@@ -65,6 +66,67 @@ impl MiniFbDisplay {
     pub fn phys_height(&self) -> u32 {
         self.height * PIXEL_SCALE
     }
+
+    /// Render `text` with true sub-pixel anti-aliasing by writing individual
+    /// physical pixels directly into `self.buffer`.
+    ///
+    /// `(x, y)` are **logical** coordinates (top of cap-height).  Internally
+    /// the glyph is rasterized at `size_px * PIXEL_SCALE` physical pixels so
+    /// every fontdue coverage value lands in exactly one entry of the physical
+    /// buffer — no 4×4 block expansion.  The result is visibly sharper than
+    /// the gray-AA path in `soul_ui::font_aa` which still operates at logical
+    /// resolution.
+    ///
+    /// `luma = 0` → black text; `luma = 255` → white text.
+    pub fn draw_text_aa_phys(&mut self, x: i32, y: i32, text: &str, size_px: f32, luma: u8) {
+        let font = phys_font();
+        let phys_size = size_px * PIXEL_SCALE as f32;
+        let cap_h = font.rasterize('H', phys_size).0.height as i32;
+        let baseline_y = y * PIXEL_SCALE as i32 + cap_h;
+        let stride = self.phys_width() as i32;
+        let phys_w = self.phys_width() as i32;
+        let phys_h = self.phys_height() as i32;
+
+        let mut cursor_x = (x * PIXEL_SCALE as i32) as f32;
+        for c in text.chars() {
+            let (metrics, bitmap) = font.rasterize(c, phys_size);
+            let glyph_left = cursor_x as i32 + metrics.xmin;
+            let glyph_top  = baseline_y - (metrics.height as i32 + metrics.ymin);
+
+            for row in 0..metrics.height as i32 {
+                for col in 0..metrics.width as i32 {
+                    let coverage = bitmap[(row * metrics.width as i32 + col) as usize];
+                    if coverage == 0 {
+                        continue;
+                    }
+                    let px = glyph_left + col;
+                    let py = glyph_top  + row;
+                    if px < 0 || py < 0 || px >= phys_w || py >= phys_h {
+                        continue;
+                    }
+                    let a  = coverage as u32;
+                    let fg = luma as u32;
+                    let blended = ((fg * a + 255 * (255 - a)) / 255) as u8;
+                    let v = blended as u32;
+                    self.buffer[(py * stride + px) as usize] = (v << 16) | (v << 8) | v;
+                }
+            }
+            cursor_x += metrics.advance_width;
+        }
+    }
+}
+
+static PHYS_FONT: OnceLock<fontdue::Font> = OnceLock::new();
+
+fn phys_font() -> &'static fontdue::Font {
+    PHYS_FONT.get_or_init(|| {
+        // Re-use the same Liberation Sans bytes that soul-ui bundles.
+        // We embed them here too so soul-hal-hosted has no dependency on soul-ui.
+        static FONT_DATA: &[u8] =
+            include_bytes!("../../soul-ui/assets/fonts/LiberationSans-Regular.ttf");
+        fontdue::Font::from_bytes(FONT_DATA, fontdue::FontSettings::default())
+            .expect("bundled font is valid")
+    })
 }
 
 impl OriginDimensions for MiniFbDisplay {
