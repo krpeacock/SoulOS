@@ -2004,8 +2004,13 @@ impl App for ScriptedApp {
             ACTIVE_RHAI_AST = Some(&self.ast as *const AST);
             ACTIVE_EGUI_BRIDGE = Some(&mut self.egui_bridge as *mut soul_ui::EguiRhaiBridge);
 
-            // Run EGUI frame and capture output
-            let egui_output = self.egui_bridge.run(|_ui| {
+            // Run EGUI frame and capture output.
+            // Give EGUI the full app area below the title bar so layout is correct.
+            let egui_screen_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(0.0, TITLE_BAR_H as f32),
+                egui::Vec2::new(SCREEN_WIDTH as f32, APP_HEIGHT as f32 - TITLE_BAR_H as f32),
+            );
+            let egui_output = self.egui_bridge.run(egui_screen_rect, |_ui| {
                 // Execute on_draw and capture any errors for std environments to log
                 if let Err(e) = self
                     .engine

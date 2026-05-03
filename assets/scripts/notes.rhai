@@ -14,6 +14,7 @@ let current_font  = "sans";  // "sans" | "serif" | "mono"
 let exchange_mode = false;
 let menu_open     = false;
 let menu_touch    = -1;  // button index currently highlighted, -1 = none
+let list_page     = 0;   // current page in list view (12 rows/page)
 
 // Text editor and soft keyboard (created once, reused across notes).
 // Keyboard sits at y = APP_HEIGHT(304) − KB_HEIGHT(96) = 208.
@@ -22,6 +23,10 @@ let kb   = new_keyboard();
 const KB_Y = 208;
 
 // --- Helpers ---
+
+fn hit(px, py, bx, by, bw, bh) {
+    px >= bx && px < bx + bw && py >= by && py < by + bh
+}
 
 // Menu panel: 6 buttons at (12, 28+i*26), each 216×24.  2 px gap between buttons.
 // Returns 0–5 for a hit, -1 otherwise.
@@ -72,8 +77,15 @@ fn go_back() {
     menu_open = false;
     menu_touch = -1;
     active_id = -1;
+    list_page = 0;
     invalidate_all();
 }
+
+// List-view layout constants (rows of height LIST_ROW_H starting at LIST_TOP).
+const LIST_TOP    = 16;
+const LIST_ROW_H  = 22;
+const LIST_ROWS   = 12;
+const LIST_BTN_Y  = 282;  // "New" button at bottom
 
 // --- Events ---
 
@@ -119,6 +131,33 @@ fn on_event(event) {
     if event.type == "ButtonDown" {
         if event.button == "PageUp"   && mode == "edit" && !menu_open { area.page_up();   invalidate_all(); }
         if event.button == "PageDown" && mode == "edit" && !menu_open { area.page_down(); invalidate_all(); }
+
+        if mode == "list" {
+            let ids = db_get_ids_in_category(0);
+            let max_page = if ids.len() == 0 { 0 } else { (ids.len() - 1) / LIST_ROWS };
+            if event.button == "PageUp"   && list_page > 0        { list_page -= 1; invalidate_all(); }
+            if event.button == "PageDown" && list_page < max_page  { list_page += 1; invalidate_all(); }
+        }
+    }
+
+    if event.type == "PenUp" && mode == "list" {
+        let ids = db_get_ids_in_category(0);
+        // "New" button
+        if hit(event.x, event.y, 2, LIST_BTN_Y, 60, 20) {
+            new_note();
+        } else {
+            // Note rows
+            for i in 0..LIST_ROWS {
+                let idx = list_page * LIST_ROWS + i;
+                if idx >= ids.len() { break; }
+                let row_y = LIST_TOP + i * LIST_ROW_H;
+                if hit(event.x, event.y, 2, row_y, 236, LIST_ROW_H - 2) {
+                    open_note(ids[idx]);
+                    break;
+                }
+            }
+        }
+        invalidate_all();
     }
 
     // Physical keyboard → text area (edit mode only, not while menu is open).
@@ -135,7 +174,6 @@ fn on_event(event) {
         invalidate_all();
     }
 
-    // Pen events in list mode: EGUI consumes them (open_note called from on_draw closures).
     // Pen events in edit mode: routed to menu, keyboard, or text area.
     if mode == "edit" {
         if menu_open {
@@ -207,25 +245,20 @@ fn on_draw() {
     if mode == "list" {
         title_bar("Notes");
 
-        egui_begin();
-        egui_scroll_area("notes_list", 259, |ui| {
-            let ids = db_get_ids_in_category(0);
-            if ids.len() == 0 {
-                egui_label(ui, "No notes yet. Tap New to start.");
+        let ids = db_get_ids_in_category(0);
+        if ids.len() == 0 {
+            label(10, LIST_TOP + 4, "No notes yet. Tap New to start.");
+        } else {
+            for i in 0..LIST_ROWS {
+                let idx = list_page * LIST_ROWS + i;
+                if idx >= ids.len() { break; }
+                let row_y = LIST_TOP + i * LIST_ROW_H;
+                let txt = to_string(db_get_data(ids[idx]));
+                button(2, row_y, 236, LIST_ROW_H - 2, note_title(txt), false);
             }
-            for i in 0..ids.len() {
-                let id = ids[i];
-                let txt = to_string(db_get_data(id));
-                if egui_selectable_label(ui, false, note_title(txt)) {
-                    open_note(id);
-                }
-                egui_separator(ui);
-            }
-        });
-        egui_horizontal_layout((), |ui| {
-            if egui_button(ui, "New Note") { new_note(); }
-        });
-        egui_end();
+        }
+
+        button(2, LIST_BTN_Y, 60, 20, "New", false);
 
     } else {
         // Edit view.
