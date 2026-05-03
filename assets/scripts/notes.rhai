@@ -1,48 +1,93 @@
 // assets/scripts/notes.rhai
-// A simple Notes app.
+// Palm-style Memo app: list → edit, multiple notes, font switching.
 
 let app_id      = "com.soulos.notes";
 let app_name    = "Notes";
 let app_icon    = "notes";
 let app_handles = ["open_script"];
 
-let area = new_text_area(0, 15, 240, 190);
-let kb   = new_keyboard();
-let active_id     = 0;
+// "list" shows all notes; "edit" edits the selected note.
+let mode          = "list";
+let active_id     = -1;
 let pref_id       = 0;   // DB record that stores font preference (category 1)
+let current_font  = "sans";  // "sans" | "serif" | "mono"
 let exchange_mode = false;
 let menu_open     = false;
-let menu_touch    = -1;  // button index currently pressed, -1 = none
-let current_font  = "sans";  // "sans" | "serif" | "mono"
+let menu_touch    = -1;  // button index currently highlighted, -1 = none
 
-// Menu layout: 6 buttons inside a panel at (10, 25), each 24 px tall, 2 px gap.
-// Button x=12, w=216.  Button i has top edge at 28 + i*26.
-// Returns 0-5 when (x,y) hits a button, -1 otherwise.
+// Text editor and soft keyboard (created once, reused across notes).
+// Keyboard sits at y = APP_HEIGHT(304) − KB_HEIGHT(96) = 208.
+let area = new_text_area(0, 15, 240, 193);
+let kb   = new_keyboard();
+const KB_Y = 208;
+
+// --- Helpers ---
+
+// Menu panel: 6 buttons at (12, 28+i*26), each 216×24.  2 px gap between buttons.
+// Returns 0–5 for a hit, -1 otherwise.
 fn menu_btn_idx(x, y) {
     if x < 12 || x > 228 || y < 28 { return -1; }
     let i = (y - 28) / 26;
     if i < 0 || i >= 6 { return -1; }
-    if y >= 28 + i * 26 + 24 { return -1; }  // in the 2 px gap
+    if y >= 28 + i * 26 + 24 { return -1; }
     i
+}
+
+fn note_title(text) {
+    let nl = text.index_of("\n");
+    let first = if nl >= 0 { text.sub_string(0, nl) } else { text };
+    if first.len() == 0   { return "(empty)"; }
+    if first.len() > 34   { return first.sub_string(0, 34) + "..."; }
+    first
 }
 
 fn apply_font() {
     area.set_font(current_font);
 }
 
+fn save_current() {
+    if active_id >= 0 && !exchange_mode {
+        db_update(active_id, to_bytes(area.get_text()));
+    }
+}
+
+fn open_note(id) {
+    active_id = id;
+    area.set_text(to_string(db_get_data(id)));
+    apply_font();
+    mode = "edit";
+    menu_open = false;
+    menu_touch = -1;
+    invalidate_all();
+}
+
+fn new_note() {
+    let id = db_insert(0, to_bytes(""));
+    open_note(id);
+}
+
+fn go_back() {
+    save_current();
+    mode = "list";
+    menu_open = false;
+    menu_touch = -1;
+    active_id = -1;
+    invalidate_all();
+}
+
+// --- Events ---
+
 fn on_event(event) {
     if event.type == "AppStart" {
         exchange_mode = false;
         menu_open     = false;
         menu_touch    = -1;
+        mode          = "list";
 
         let ids = db_get_ids_in_category(0);
         if ids.len() == 0 {
-            active_id = db_insert(0, to_bytes("welcome to soulos rhai notes."));
-        } else {
-            active_id = ids[0];
+            db_insert(0, to_bytes("Welcome to Notes.\nTap a note to edit it, or tap New to write."));
         }
-        area.set_text(to_string(db_get_data(active_id)));
 
         let pref_ids = db_get_ids_in_category(1);
         if pref_ids.len() == 0 {
@@ -58,167 +103,160 @@ fn on_event(event) {
     if event.type == "Exchange" && event.action == "open_script" {
         exchange_mode = true;
         menu_open     = false;
+        menu_touch    = -1;
         area.set_text(event.payload.text);
+        apply_font();
+        mode = "edit";
         invalidate_all();
     }
 
-    if event.type == "Menu" {
+    if event.type == "Menu" && mode == "edit" {
         menu_open  = !menu_open;
         menu_touch = -1;
         invalidate_all();
     }
 
-    if event.type == "Key" {
-        if !menu_open {
-            if event.key == "Backspace" {
-                area.backspace();
-            } else if event.key == "Enter" {
-                area.enter();
-            } else if event.key == "ArrowLeft" {
-                area.cursor_left();
-            } else if event.key == "ArrowRight" {
-                area.cursor_right();
-            } else if event.key == "ArrowUp" {
-                area.cursor_up();
-            } else if event.key == "ArrowDown" {
-                area.cursor_down();
-            } else if event.key != "Other" {
-                area.insert_char(event.key);
-            }
-            if !exchange_mode {
-                db_update(active_id, to_bytes(area.get_text()));
-            }
-            invalidate_all();
-        }
-    }
-
     if event.type == "ButtonDown" {
-        if !menu_open {
-            if event.button == "PageUp" {
-                area.page_up();
-                invalidate_all();
-            } else if event.button == "PageDown" {
-                area.page_down();
+        if event.button == "PageUp"   && mode == "edit" && !menu_open { area.page_up();   invalidate_all(); }
+        if event.button == "PageDown" && mode == "edit" && !menu_open { area.page_down(); invalidate_all(); }
+    }
+
+    // Physical keyboard → text area (edit mode only, not while menu is open).
+    if event.type == "Key" && mode == "edit" && !menu_open {
+        let k = event.key;
+        if      k == "Backspace"  { area.backspace(); }
+        else if k == "Enter"      { area.enter(); }
+        else if k == "ArrowLeft"  { area.cursor_left(); }
+        else if k == "ArrowRight" { area.cursor_right(); }
+        else if k == "ArrowUp"    { area.cursor_up(); }
+        else if k == "ArrowDown"  { area.cursor_down(); }
+        else if k != "Other"      { area.insert_char(k); }
+        save_current();
+        invalidate_all();
+    }
+
+    // Pen events in list mode: EGUI consumes them (open_note called from on_draw closures).
+    // Pen events in edit mode: routed to menu, keyboard, or text area.
+    if mode == "edit" {
+        if menu_open {
+            if event.type == "PenDown" {
+                menu_touch = menu_btn_idx(event.x, event.y);
                 invalidate_all();
             }
-        }
-    }
-
-    if event.type == "PenDown" {
-        if menu_open {
-            menu_touch = menu_btn_idx(event.x, event.y);
-            invalidate_all();
-        } else if event.y >= 205 {
-            handle_pen(kb, event.x, event.y, true);
-            invalidate_all();
-        } else {
-            area.pen_down(event.x, event.y, event.now_ms);
-            invalidate_all();
-        }
-    }
-
-    if event.type == "PenMove" {
-        if menu_open {
-            let i = menu_btn_idx(event.x, event.y);
-            if i != menu_touch {
+            if event.type == "PenMove" {
+                let i = menu_btn_idx(event.x, event.y);
+                if i != menu_touch { menu_touch = -1; invalidate_all(); }
+            }
+            if event.type == "PenUp" {
+                let i = menu_btn_idx(event.x, event.y);
+                if i == menu_touch && i >= 0 {
+                    if !exchange_mode {
+                        if      i == 0 { save_current(); new_note(); }
+                        else if i == 1 {
+                            if active_id >= 0 { db_delete(active_id); }
+                            active_id = -1; mode = "list"; menu_open = false;
+                        }
+                        else if i == 2 { go_back(); }
+                        else if i == 3 { current_font = "sans";  apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                        else if i == 4 { current_font = "serif"; apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                        else if i == 5 { current_font = "mono";  apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                    } else {
+                        if      i == 0 { system_send_text_result("return_text", area.get_text()); exchange_mode = false; mode = "list"; menu_open = false; }
+                        else if i == 1 { exchange_mode = false; mode = "list"; menu_open = false; }
+                        else if i == 3 { current_font = "sans";  apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                        else if i == 4 { current_font = "serif"; apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                        else if i == 5 { current_font = "mono";  apply_font(); db_update(pref_id, to_bytes(current_font)); menu_open = false; }
+                    }
+                }
                 menu_touch = -1;
                 invalidate_all();
             }
-        } else if event.y >= 205 {
-            handle_pen(kb, event.x, event.y, true);
-            invalidate_all();
         } else {
-            area.pen_move(event.x, event.y);
-            invalidate_all();
-        }
-    }
-
-    if event.type == "PenUp" {
-        if menu_open {
-            let i = menu_btn_idx(event.x, event.y);
-            if i == menu_touch && i >= 0 {
-                if i == 0 {
-                    // Save
-                    db_update(active_id, to_bytes(area.get_text()));
-                    menu_open = false;
-                } else if i == 1 {
-                    // Done / Done ▶
-                    if exchange_mode {
-                        system_send_text_result("return_text", area.get_text());
-                        exchange_mode = false;
-                    } else {
-                        db_update(active_id, to_bytes(area.get_text()));
-                    }
-                    menu_open = false;
-                } else if i == 2 {
-                    current_font = "sans";
-                    apply_font();
-                    db_update(pref_id, to_bytes(current_font));
-                    menu_open = false;
-                } else if i == 3 {
-                    current_font = "serif";
-                    apply_font();
-                    db_update(pref_id, to_bytes(current_font));
-                    menu_open = false;
-                } else if i == 4 {
-                    current_font = "mono";
-                    apply_font();
-                    db_update(pref_id, to_bytes(current_font));
-                    menu_open = false;
-                } else if i == 5 {
-                    menu_open = false;
-                }
+            // Normal edit: route pen to soft keyboard or text area.
+            if event.type == "PenDown" {
+                if event.y >= KB_Y { handle_pen(kb, event.x, event.y, true); }
+                else               { area.pen_down(event.x, event.y, event.now_ms); }
+                invalidate_all();
             }
-            menu_touch = -1;
-            invalidate_all();
-        } else if event.y >= 205 {
-            let key = handle_pen(kb, event.x, event.y, false);
-            if key != "" {
-                if key == "Backspace" {
-                    area.backspace();
-                } else if key == "Enter" {
-                    area.enter();
+            if event.type == "PenMove" {
+                if event.y >= KB_Y { handle_pen(kb, event.x, event.y, true); }
+                else               { area.pen_move(event.x, event.y); }
+                invalidate_all();
+            }
+            if event.type == "PenUp" {
+                if event.y >= KB_Y {
+                    let key = handle_pen(kb, event.x, event.y, false);
+                    if      key == "Backspace" { area.backspace(); }
+                    else if key == "Enter"     { area.enter(); }
+                    else if key != ""          { area.insert_char(key); }
+                    save_current();
                 } else {
-                    area.insert_char(key);
+                    area.pen_up(event.x, event.y);
                 }
-                if !exchange_mode {
-                    db_update(active_id, to_bytes(area.get_text()));
-                }
+                invalidate_all();
             }
-            invalidate_all();
-        } else {
-            area.pen_up(event.x, event.y);
-            invalidate_all();
         }
     }
 }
 
+// --- Drawing ---
+
 fn on_draw() {
     clear();
-    if exchange_mode {
-        title_bar("Notes · Edit Script");
-    } else {
+
+    if mode == "list" {
         title_bar("Notes");
-    }
 
-    draw_text_area(area);
-    draw_keyboard(kb);
+        egui_begin();
+        egui_scroll_area("notes_list", 259, |ui| {
+            let ids = db_get_ids_in_category(0);
+            if ids.len() == 0 {
+                egui_label(ui, "No notes yet. Tap New to start.");
+            }
+            for i in 0..ids.len() {
+                let id = ids[i];
+                let txt = to_string(db_get_data(id));
+                if egui_selectable_label(ui, false, note_title(txt)) {
+                    open_note(id);
+                }
+                egui_separator(ui);
+            }
+        });
+        egui_horizontal_layout((), |ui| {
+            if egui_button(ui, "New Note") { new_note(); }
+        });
+        egui_end();
 
-    if menu_open {
-        // Opaque white panel with 1 px black border.
-        draw_rect(9, 24, 222, 160, 0);    // border (black)
-        draw_rect(10, 25, 220, 158, 255); // fill (white)
+    } else {
+        // Edit view.
+        let bar_label = if exchange_mode { "Notes · Script" } else { "Notes" };
+        title_bar(bar_label);
+        draw_text_area(area);
+        draw_keyboard(kb);
 
-        let done_lbl  = if exchange_mode { "Done >" } else { "Done" };
-        let sans_lbl  = if current_font == "sans"  { "> Sans"  } else { "  Sans"  };
-        let serif_lbl = if current_font == "serif" { "> Serif" } else { "  Serif" };
-        let mono_lbl  = if current_font == "mono"  { "> Mono"  } else { "  Mono"  };
+        if menu_open {
+            // Opaque white panel with 1 px black border.
+            draw_rect(9, 24, 222, 160, 0);    // border
+            draw_rect(10, 25, 220, 158, 255); // fill
 
-        button(12, 28 + 0 * 26, 216, 24, "Save",     menu_touch == 0);
-        button(12, 28 + 1 * 26, 216, 24, done_lbl,   menu_touch == 1);
-        button(12, 28 + 2 * 26, 216, 24, sans_lbl,   menu_touch == 2);
-        button(12, 28 + 3 * 26, 216, 24, serif_lbl,  menu_touch == 3);
-        button(12, 28 + 4 * 26, 216, 24, mono_lbl,   menu_touch == 4);
-        button(12, 28 + 5 * 26, 216, 24, "Close",    menu_touch == 5);
+            let sans_lbl  = if current_font == "sans"  { "> Sans"  } else { "  Sans"  };
+            let serif_lbl = if current_font == "serif" { "> Serif" } else { "  Serif" };
+            let mono_lbl  = if current_font == "mono"  { "> Mono"  } else { "  Mono"  };
+
+            if !exchange_mode {
+                button(12, 28 + 0 * 26, 216, 24, "New Note",  menu_touch == 0);
+                button(12, 28 + 1 * 26, 216, 24, "Delete",    menu_touch == 1);
+                button(12, 28 + 2 * 26, 216, 24, "< Back",    menu_touch == 2);
+                button(12, 28 + 3 * 26, 216, 24, sans_lbl,    menu_touch == 3);
+                button(12, 28 + 4 * 26, 216, 24, serif_lbl,   menu_touch == 4);
+                button(12, 28 + 5 * 26, 216, 24, mono_lbl,    menu_touch == 5);
+            } else {
+                button(12, 28 + 0 * 26, 216, 24, "Done >",    menu_touch == 0);
+                button(12, 28 + 1 * 26, 216, 24, "Cancel",    menu_touch == 1);
+                button(12, 28 + 3 * 26, 216, 24, sans_lbl,    menu_touch == 3);
+                button(12, 28 + 4 * 26, 216, 24, serif_lbl,   menu_touch == 4);
+                button(12, 28 + 5 * 26, 216, 24, mono_lbl,    menu_touch == 5);
+            }
+        }
     }
 }
