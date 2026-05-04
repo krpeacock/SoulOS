@@ -1752,6 +1752,7 @@ impl Paint {
     }
 
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        use soul_core::a11y::{A11yNode, A11yRole};
         let mut nodes = Vec::new();
         for (i, cell) in PALETTE_CELLS.iter().enumerate() {
             let label: String = if i == 12 {
@@ -1761,11 +1762,11 @@ impl Paint {
             } else {
                 continue;
             };
-            nodes.push(soul_core::a11y::A11yNode {
-                bounds: Self::tool_cell_rect(i),
+            nodes.push(A11yNode::new(
+                Self::tool_cell_rect(i),
                 label,
-                role: "button".into(),
-            });
+                A11yRole::Button,
+            ));
         }
         nodes
     }

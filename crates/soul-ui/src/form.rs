@@ -289,13 +289,163 @@ impl Form {
     }
 
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        use soul_core::a11y::{A11yNode, A11yRole, A11yState};
         self.components
             .iter()
-            .map(|c| soul_core::a11y::A11yNode {
-                bounds: c.bounds.to_eg_rect(),
-                label: c.a11y.label.clone(),
-                role: c.a11y.role.clone(),
+            .map(|c| {
+                let role = if c.a11y.role.is_empty() {
+                    role_from_component_type(c.type_)
+                } else {
+                    A11yRole::from_str(&c.a11y.role)
+                };
+                let label = if c.a11y.label.is_empty() {
+                    component_default_label(c).unwrap_or_else(|| c.id.clone())
+                } else {
+                    c.a11y.label.clone()
+                };
+                let mut node = A11yNode::new(c.bounds.to_eg_rect(), label, role);
+                if c.type_ == ComponentType::Checkbox {
+                    let checked = c
+                        .properties
+                        .get("checked")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    node = node.with_state(A11yState::checked(checked));
+                }
+                if let Some(value) = component_value(c) {
+                    if !value.is_empty() {
+                        node = node.with_value(value);
+                    }
+                }
+                node
             })
             .collect()
+    }
+}
+
+fn role_from_component_type(t: ComponentType) -> soul_core::a11y::A11yRole {
+    use soul_core::a11y::A11yRole;
+    match t {
+        ComponentType::Button => A11yRole::Button,
+        ComponentType::Label => A11yRole::Label,
+        ComponentType::TextInput => A11yRole::TextField,
+        ComponentType::TextArea => A11yRole::TextArea,
+        ComponentType::Canvas => A11yRole::Image,
+        ComponentType::Checkbox => A11yRole::Checkbox,
+    }
+}
+
+fn component_default_label(c: &Component) -> Option<String> {
+    let key = match c.type_ {
+        ComponentType::Button | ComponentType::Checkbox => "label",
+        ComponentType::Label => "text",
+        ComponentType::TextInput | ComponentType::TextArea => "placeholder",
+        ComponentType::Canvas => return None,
+    };
+    c.properties
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn component_value(c: &Component) -> Option<String> {
+    match c.type_ {
+        ComponentType::TextInput | ComponentType::TextArea | ComponentType::Label => c
+            .properties
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use soul_core::a11y::{A11yRole, A11yState};
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn comp(id: &str, type_: ComponentType, role: &str, label: &str) -> Component {
+        Component {
+            id: id.into(),
+            class: String::new(),
+            type_,
+            bounds: rect(0, 0, 10, 10),
+            properties: BTreeMap::new(),
+            a11y: A11yHints {
+                label: label.into(),
+                role: role.into(),
+            },
+            interactions: Vec::new(),
+            binding: None,
+        }
+    }
+
+    #[test]
+    fn checkbox_state_reflects_checked_property() {
+        let mut c = comp("c1", ComponentType::Checkbox, "checkbox", "Notify");
+        c.properties
+            .insert("checked".into(), Value::Bool(true));
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].role, A11yRole::Checkbox);
+        assert_eq!(nodes[0].state, A11yState::checked(true));
+    }
+
+    #[test]
+    fn checkbox_state_defaults_to_unchecked_when_absent() {
+        let c = comp("c1", ComponentType::Checkbox, "checkbox", "Notify");
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(nodes[0].state, A11yState::checked(false));
+    }
+
+    #[test]
+    fn text_input_value_carries_buffer_text() {
+        let mut c = comp("name", ComponentType::TextInput, "textbox", "Name");
+        c.properties.insert(
+            "text".into(),
+            Value::String("Alice".into()),
+        );
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(nodes[0].role, A11yRole::TextField);
+        assert_eq!(nodes[0].value.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn role_falls_back_to_component_type_when_hint_empty() {
+        let c = comp("b1", ComponentType::Button, "", "Save");
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(nodes[0].role, A11yRole::Button);
+    }
+
+    #[test]
+    fn unknown_role_string_lands_in_custom() {
+        let c = comp("x", ComponentType::Button, "toolbar", "Tools");
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(nodes[0].role, A11yRole::Custom("toolbar".into()));
     }
 }

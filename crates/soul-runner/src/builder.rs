@@ -732,34 +732,31 @@ impl App for MobileBuilder {
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        use soul_core::a11y::{A11yNode, A11yRole};
         match self.state {
             BuilderState::Home => HOME_MENU
                 .iter()
                 .enumerate()
-                .map(|(i, &label)| soul_core::a11y::A11yNode {
-                    bounds: Self::home_button_rect(i),
-                    label: label.to_string(),
-                    role: "button".into(),
+                .map(|(i, &label)| {
+                    A11yNode::new(Self::home_button_rect(i), label, A11yRole::Button)
                 })
                 .collect(),
             BuilderState::ResourcePicker => RESOURCE_MENU
                 .iter()
                 .enumerate()
-                .map(|(i, &label)| soul_core::a11y::A11yNode {
-                    bounds: Self::resource_button_rect(i),
-                    label: label.to_string(),
-                    role: "button".into(),
+                .map(|(i, &label)| {
+                    A11yNode::new(Self::resource_button_rect(i), label, A11yRole::Button)
                 })
                 .collect(),
             BuilderState::EditingForm => {
                 let mut nodes = self.form.a11y_nodes();
                 if self.menu_open {
                     for i in 0..FORM_MENU.len() {
-                        nodes.push(soul_core::a11y::A11yNode {
-                            bounds: Self::menu_item_rect(i),
-                            label: FORM_MENU[i].to_string(),
-                            role: "menuitem".into(),
-                        });
+                        nodes.push(A11yNode::new(
+                            Self::menu_item_rect(i),
+                            FORM_MENU[i],
+                            A11yRole::MenuItem,
+                        ));
                     }
                 }
                 nodes

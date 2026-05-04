@@ -7,7 +7,6 @@ members = [
     "crates/soul-db",
     "crates/soul-hal-hosted",
     "crates/soul-runner",
-    "crates/soul-a11y",
     "crates/soul-script",
     "crates/soul-hal-android",
     "crates/soul-runner-android",
@@ -24,7 +23,6 @@ default-members = [
     "crates/soul-db",
     "crates/soul-hal-hosted",
     "crates/soul-runner",
-    "crates/soul-a11y",
     "crates/soul-script",
 ]
 
@@ -43,7 +41,6 @@ soul-core = { path = "crates/soul-core" }
 soul-ui = { path = "crates/soul-ui" }
 soul-db = { path = "crates/soul-db" }
 soul-hal-hosted = { path = "crates/soul-hal-hosted" }
-soul-a11y = { path = "crates/soul-a11y" }
 
 [profile.release]
 lto = "thin"

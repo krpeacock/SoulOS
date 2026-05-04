@@ -495,11 +495,40 @@ impl<A: soul_core::App> Harness<A> {
             .find(|node| node.label.contains(needle))
     }
 
-    /// Find the first A11yNode with the given role and label.
-    pub fn find_role(&self, role: &str, label: &str) -> Option<soul_core::a11y::A11yNode> {
-        self.app.a11y_nodes()
+    /// Find the first A11yNode with the given role whose label contains
+    /// `label`.
+    pub fn find_role(
+        &self,
+        role: soul_core::a11y::A11yRole,
+        label: &str,
+    ) -> Option<soul_core::a11y::A11yNode> {
+        self.app
+            .a11y_nodes()
             .into_iter()
             .find(|node| node.role == role && node.label.contains(label))
+    }
+
+    /// Find the first A11yNode whose label contains `label` and whose
+    /// state matches `state` exactly.
+    pub fn find_state(
+        &self,
+        label: &str,
+        state: soul_core::a11y::A11yState,
+    ) -> Option<soul_core::a11y::A11yNode> {
+        self.app
+            .a11y_nodes()
+            .into_iter()
+            .find(|node| node.label.contains(label) && node.state == state)
+    }
+
+    /// Return the `value` of the first A11yNode whose label contains
+    /// `label`. Returns `None` if no node matched or if it had no value.
+    pub fn find_value(&self, label: &str) -> Option<String> {
+        self.app
+            .a11y_nodes()
+            .into_iter()
+            .find(|node| node.label.contains(label))
+            .and_then(|node| node.value)
     }
 
     /// Tap at the center of the given A11yNode's bounds.
@@ -639,17 +668,18 @@ mod tests {
         }
 
         fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+            use soul_core::a11y::{A11yNode, A11yRole};
             vec![
-                soul_core::a11y::A11yNode {
-                    bounds: Rectangle::new(Point::zero(), Size::new(SCREEN_WIDTH as u32, 16)),
-                    label: "Notes Test".to_string(),
-                    role: "heading".to_string(),
-                },
-                soul_core::a11y::A11yNode {
-                    bounds: Rectangle::new(Point::new(4, 30), Size::new(SCREEN_WIDTH as u32 - 8, 200)),
-                    label: format!("Text content: {}", self.text),
-                    role: "textbox".to_string(),
-                },
+                A11yNode::new(
+                    Rectangle::new(Point::zero(), Size::new(SCREEN_WIDTH as u32, 16)),
+                    "Notes Test",
+                    A11yRole::Heading,
+                ),
+                A11yNode::new(
+                    Rectangle::new(Point::new(4, 30), Size::new(SCREEN_WIDTH as u32 - 8, 200)),
+                    format!("Text content: {}", self.text),
+                    A11yRole::TextField,
+                ),
             ]
         }
     }
@@ -790,6 +820,7 @@ mod tests {
 
     #[test]
     fn harness_a11y_queries() {
+        use soul_core::a11y::A11yRole;
         let app = SimpleNotesApp::new();
         let mut harness = Harness::new(app);
 
@@ -805,26 +836,26 @@ mod tests {
         assert!(title_node.is_some());
         let title = title_node.unwrap();
         assert_eq!(title.label, "Notes Test");
-        assert_eq!(title.role, "heading");
+        assert_eq!(title.role, A11yRole::Heading);
 
         let content_node = harness.find_text("Welcome to test notes");
         assert!(content_node.is_some());
         let content = content_node.unwrap();
         assert!(content.label.contains("Welcome to test notes"));
-        assert_eq!(content.role, "textbox");
+        assert_eq!(content.role, A11yRole::TextField);
 
         // Test find_role() - find by role and label
-        let textbox = harness.find_role("textbox", "Welcome");
+        let textbox = harness.find_role(A11yRole::TextField, "Welcome");
         assert!(textbox.is_some());
-        assert_eq!(textbox.unwrap().role, "textbox");
+        assert_eq!(textbox.unwrap().role, A11yRole::TextField);
 
-        let heading = harness.find_role("heading", "Notes");
+        let heading = harness.find_role(A11yRole::Heading, "Notes");
         assert!(heading.is_some());
-        assert_eq!(heading.unwrap().role, "heading");
+        assert_eq!(heading.unwrap().role, A11yRole::Heading);
 
         // Test non-existent queries
         assert!(harness.find_text("NonExistent").is_none());
-        assert!(harness.find_role("button", "Missing").is_none());
+        assert!(harness.find_role(A11yRole::Button, "Missing").is_none());
     }
 
     #[test]
@@ -835,7 +866,9 @@ mod tests {
         harness.tick();
 
         // Find the textbox node and tap it
-        let textbox = harness.find_role("textbox", "Welcome").unwrap();
+        let textbox = harness
+            .find_role(soul_core::a11y::A11yRole::TextField, "Welcome")
+            .unwrap();
         
         // Record the center point for verification
         let _center = textbox.bounds.center();
@@ -887,7 +920,10 @@ mod tests {
         
         for node in &nodes {
             assert!(!node.label.is_empty(), "A11y node should have descriptive label");
-            assert!(!node.role.is_empty(), "A11y node should have semantic role");
+            assert!(
+                !node.role.as_str().is_empty(),
+                "A11y node should have semantic role"
+            );
             assert!(node.bounds.size.width > 0, "A11y node should have valid bounds");
             assert!(node.bounds.size.height > 0, "A11y node should have valid bounds");
         }

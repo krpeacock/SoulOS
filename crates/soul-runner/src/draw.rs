@@ -1247,36 +1247,33 @@ impl App for Draw {
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        use soul_core::a11y::{A11yNode, A11yRole};
         let mut nodes = self.ui_form.a11y_nodes();
         match &self.mode {
             Mode::Normal => {
                 if self.menu_open {
                     for (i, item) in MENU_ITEMS.iter().enumerate() {
-                        nodes.push(soul_core::a11y::A11yNode {
-                            bounds: Self::rect_menu_entry(i),
-                            label: item.to_string(),
-                            role: "menuitem".into(),
-                        });
+                        nodes.push(A11yNode::new(
+                            Self::rect_menu_entry(i),
+                            *item,
+                            A11yRole::MenuItem,
+                        ));
                     }
                 }
             }
-            Mode::NameInput(_) => {
-                nodes.push(soul_core::a11y::A11yNode {
-                    bounds: Self::rect_name_input(),
-                    label: "Canvas name input".into(),
-                    role: "textinput".into(),
-                });
+            Mode::NameInput(input) => {
+                nodes.push(input.a11y_node("Canvas name"));
             }
             Mode::Gallery { records, scroll, .. } => {
                 let visible = OPEN_VISIBLE.min(records.len().saturating_sub(*scroll));
                 for i in 0..visible {
                     let idx = *scroll + i;
                     if let Some((_, name)) = records.get(idx) {
-                        nodes.push(soul_core::a11y::A11yNode {
-                            bounds: Self::rect_gallery_row(i),
-                            label: name.clone(),
-                            role: "listitem".into(),
-                        });
+                        nodes.push(A11yNode::new(
+                            Self::rect_gallery_row(i),
+                            name.clone(),
+                            A11yRole::ListItem,
+                        ));
                     }
                 }
             }
