@@ -77,10 +77,13 @@ impl EguiRhaiBridge {
         }
     }
 
-    pub fn run(&self, content_fn: impl FnOnce(&mut Ui)) -> egui::FullOutput {
+    pub fn run(&self, screen_rect: egui::Rect, content_fn: impl FnOnce(&mut Ui)) -> egui::FullOutput {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
         let mut content_fn_opt = Some(content_fn);
-        self.context.run(Default::default(), |ctx| {
-            // Use Frame::none() to avoid drawing a background that would cover manual drawing
+        self.context.run(raw_input, |ctx| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
