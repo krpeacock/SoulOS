@@ -7,7 +7,7 @@ use embedded_graphics::{
     prelude::*,
     primitives::{PrimitiveStyle, Rectangle},
 };
-use soul_core::{App, Ctx, Event, KeyCode, APP_HEIGHT, SCREEN_WIDTH, a11y::A11yNode};
+use soul_core::{App, Ctx, Event, KeyCode, APP_HEIGHT, SCREEN_WIDTH, a11y::{A11yNode, A11yRole}};
 use soul_ui::{
     prelude::*,
     ScrollableView, TITLE_BAR_H,
@@ -437,26 +437,24 @@ impl App for EguiDemo {
     
     fn a11y_nodes(&self) -> Vec<A11yNode> {
         let mut nodes = Vec::new();
-        
-        // Add main content area
-        nodes.push(A11yNode {
-            bounds: self.scroll_view.content_area(),
-            label: "egui demo content".into(),
-            role: "main".into(),
-        });
-        
-        // Add scrollbar if visible
+
+        nodes.push(A11yNode::new(
+            self.scroll_view.content_area(),
+            "egui demo content",
+            A11yRole::Main,
+        ));
+
         if let Some(info) = self.scroll_view.accessibility_info() {
-            nodes.push(A11yNode {
-                bounds: Rectangle::new(
-                    Point::new(SCREEN_WIDTH as i32 - 16, TITLE_BAR_H as i32),
-                    Size::new(16, (APP_HEIGHT as u32) - TITLE_BAR_H),
-                ),
-                label: info,
-                role: "scrollbar".into(),
-            });
+            let bounds = Rectangle::new(
+                Point::new(SCREEN_WIDTH as i32 - 16, TITLE_BAR_H as i32),
+                Size::new(16, (APP_HEIGHT as u32) - TITLE_BAR_H),
+            );
+            let percent = format!("{:.0}%", self.scroll_view.scroll_position() * 100.0);
+            nodes.push(
+                A11yNode::new(bounds, info, A11yRole::ScrollBar).with_value(percent),
+            );
         }
-        
+
         nodes
     }
 }

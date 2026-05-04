@@ -640,36 +640,38 @@ impl Host {
     }
 
     fn active_a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        use soul_core::a11y::{A11yNode, A11yRole};
         let mut nodes = self.apps[self.active_idx()].a11y_nodes();
-        nodes.push(soul_core::a11y::A11yNode {
-            bounds: strip_home_rect(),
-            label: "Home".into(),
-            role: "system_button".into(),
-        });
-        nodes.push(soul_core::a11y::A11yNode {
-            bounds: strip_menu_rect(),
-            label: "Menu".into(),
-            role: "system_button".into(),
-        });
+        nodes.push(A11yNode::new(
+            strip_home_rect(),
+            "Home",
+            A11yRole::SystemButton,
+        ));
+        nodes.push(A11yNode::new(
+            strip_menu_rect(),
+            "Menu",
+            A11yRole::SystemButton,
+        ));
         nodes
     }
 
     fn speak_focused(&self, ctx: &mut Ctx<'_>) {
         if let Some(idx) = self.a11y_focus {
             if let Some(node) = self.active_a11y_nodes().get(idx) {
-                ctx.a11y.speak(&format!("{}, {}", node.label, node.role));
+                ctx.a11y.speak_node(node);
             }
         }
     }
 
     fn activate_focused(&mut self, ctx: &mut Ctx<'_>) {
+        use soul_core::a11y::A11yRole;
         if let Some(idx) = self.a11y_focus {
             let nodes = self.active_a11y_nodes();
             if let Some(node) = nodes.get(idx) {
                 let center = node.bounds.center();
                 let x = center.x as i16;
                 let y = center.y as i16;
-                if node.role == "system_button" {
+                if node.role == A11yRole::SystemButton {
                     if node.label == "Home" {
                         self.go_home(ctx);
                     } else if node.label == "Menu" {

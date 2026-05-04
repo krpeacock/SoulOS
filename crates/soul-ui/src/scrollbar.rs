@@ -821,6 +821,11 @@ impl ScrollableView {
             None
         }
     }
+
+    /// Current scroll position as a fraction in `0.0..=1.0`.
+    pub fn scroll_position(&self) -> f32 {
+        self.scrollbar.position()
+    }
 }
 
 #[cfg(test)]

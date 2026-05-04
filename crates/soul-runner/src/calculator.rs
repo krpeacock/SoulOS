@@ -7,7 +7,7 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
     text::{Baseline, Text},
 };
-use soul_core::{a11y::A11yNode, App, Ctx, Event, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
+use soul_core::{a11y::{A11yNode, A11yRole}, App, Ctx, Event, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
 use soul_ui::{hit_test, BLACK, WHITE};
 
 // ── Layout constants ─────────────────────────────────────────────────────────
@@ -383,11 +383,19 @@ impl App for Calculator {
     }
 
     fn a11y_nodes(&self) -> Vec<A11yNode> {
-        BTNS.iter().enumerate().map(|(i, (_, label))| A11yNode {
-            bounds: self.rects[i],
-            label: (*label).into(),
-            role: "button".into(),
-        }).collect()
+        let mut nodes = Vec::with_capacity(BTNS.len() + 1);
+        let display_rect = Rectangle::new(
+            Point::new(0, DISP_TOP),
+            Size::new(W as u32, DISP_H as u32),
+        );
+        nodes.push(
+            A11yNode::new(display_rect, "Display", A11yRole::Label)
+                .with_value(self.display.clone()),
+        );
+        for (i, (_, label)) in BTNS.iter().enumerate() {
+            nodes.push(A11yNode::new(self.rects[i], *label, A11yRole::Button));
+        }
+        nodes
     }
 }
 
@@ -529,5 +537,28 @@ mod tests {
         assert_eq!(fmt(-7.5),      "-7.5");
         assert_eq!(fmt(f64::INFINITY), "Error");
         assert_eq!(fmt(f64::NAN),      "Error");
+    }
+
+    #[test]
+    fn a11y_nodes_include_display_with_live_value() {
+        let mut c = calc();
+        digits(&mut c, "42");
+        let nodes = c.a11y_nodes();
+        let display = nodes
+            .iter()
+            .find(|n| n.role == A11yRole::Label && n.label == "Display")
+            .expect("Calculator should expose its display as an a11y node");
+        assert_eq!(display.value.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn a11y_nodes_include_every_button_as_button_role() {
+        let c = calc();
+        let nodes = c.a11y_nodes();
+        let button_count = nodes
+            .iter()
+            .filter(|n| n.role == A11yRole::Button)
+            .count();
+        assert_eq!(button_count, BTNS.len(), "every keypad button must be exposed");
     }
 }

@@ -34,7 +34,6 @@
 //! ```
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -45,7 +44,7 @@ use embedded_graphics::{
 
 use crate::emoji;
 use crate::palette::{BLACK, GRAY, WHITE};
-use soul_core::a11y::{Accessible, AccessibleNode};
+use soul_core::a11y::{A11yNode, A11yRole};
 
 const CHAR_W: i32 = 6;
 const FONT_H: i32 = 10;
@@ -294,13 +293,22 @@ fn byte_at_cell(s: &str, target_cells: i32) -> usize {
     s.len()
 }
 
-impl Accessible for TextInput {
-    fn a11y_nodes(&self, nodes: &mut Vec<AccessibleNode>) {
-        let text = if self.buffer.is_empty() {
-            self.placeholder.into()
+impl TextInput {
+    /// Build the accessibility node for this input.
+    ///
+    /// The host supplies `label` because the widget's `placeholder` is
+    /// hint text, not the field's name. The `value` carries the live
+    /// buffer when non-empty so a screen reader announces what the user
+    /// has typed (or the placeholder when the buffer is empty).
+    pub fn a11y_node(&self, label: &str) -> A11yNode {
+        let mut node = A11yNode::new(self.area, label, A11yRole::TextField);
+        if self.buffer.is_empty() {
+            if !self.placeholder.is_empty() {
+                node = node.with_value(self.placeholder);
+            }
         } else {
-            self.buffer.clone()
-        };
-        nodes.push(AccessibleNode { text });
+            node = node.with_value(self.buffer.clone());
+        }
+        node
     }
 }

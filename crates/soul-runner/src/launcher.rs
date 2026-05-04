@@ -445,7 +445,19 @@ impl Launcher {
     }
 
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
-        vec![]
+        use soul_core::a11y::{A11yNode, A11yRole};
+        self.order
+            .iter()
+            .enumerate()
+            .filter_map(|(display_idx, &app_idx)| {
+                let entry = self.apps.get(app_idx)?;
+                Some(A11yNode::new(
+                    Self::tile_rect(display_idx),
+                    entry.name.clone(),
+                    A11yRole::Button,
+                ))
+            })
+            .collect()
     }
 }
 
