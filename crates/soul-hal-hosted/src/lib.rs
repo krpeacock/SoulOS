@@ -21,6 +21,11 @@ pub use harness::{SettleTimeout, Harness, HeadlessPlatform, VirtualClock};
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 
+/// Each logical pixel is rendered as a PIXEL_SCALE×PIXEL_SCALE block so
+/// the physical window is PIXEL_SCALE× the 240×320 virtual canvas.
+/// Exported so callers that need physical dimensions can compute them.
+pub const PIXEL_SCALE: u32 = 2;
+
 /// A `DrawTarget<Color = Gray8>` backed by a `Vec<u32>` pixel buffer.
 /// Pixels are stored as `0x00RRGGBB` where R == G == B == luma.
 #[derive(Clone)]

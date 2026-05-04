@@ -166,6 +166,10 @@ const PAT_CELL_H: i32 = 20;
 /// Undo depth limit.
 const UNDO_DEPTH: usize = 16;
 
+/// Pixels per canvas pixel in fatbits mode — matches BITSIZE in fatbits.c.
+/// Supported values: 4 (compact) or 8 (classic MacPaint/PadPaint scale).
+const FAT_ZOOM: i32 = 8;
+
 // ---------------------------------------------------------------------------
 // Tool sprite sheet
 // ---------------------------------------------------------------------------
@@ -464,6 +468,53 @@ impl PixelRect {
 }
 
 // ---------------------------------------------------------------------------
+// Fatbits state
+// ---------------------------------------------------------------------------
+
+/// Mirrors the globals from fatbits.c: `fatBitRect`, `bitRect`, `pixWidth/Height`.
+///
+/// When active, the canvas display area shows an 8× (or 4×) magnified view of
+/// a small source region.  All tool operations go through coordinate translation
+/// so they remain unaware of fatbits — matching the original design intent.
+struct FatBitsState {
+    /// Canvas-local top-left of the source ("thin") region — equivalent to `bitRect`.
+    src_x: i32,
+    src_y: i32,
+    /// Width/height of the source region in canvas pixels (`pixWidth` / `pixHeight`).
+    src_w: i32,
+    src_h: i32,
+    /// Screen-space top-left of the expanded display area — equivalent to `fatBitRect.topLeft`.
+    fat_x: i32,
+    fat_y: i32,
+    /// Pixels per canvas pixel (BITSIZE in original; 4 or 8).
+    zoom: i32,
+}
+
+impl FatBitsState {
+    /// Map a screen point inside the fat display to canvas-local coordinates.
+    /// Direct port of `MakeFatPoint` from fatbits.c.
+    fn fat_to_canvas(&self, sx: i32, sy: i32) -> Option<(i32, i32)> {
+        let rx = sx - self.fat_x;
+        let ry = sy - self.fat_y;
+        if rx < 0 || ry < 0 || rx >= self.src_w * self.zoom || ry >= self.src_h * self.zoom {
+            return None;
+        }
+        Some((self.src_x + rx / self.zoom, self.src_y + ry / self.zoom))
+    }
+
+    /// Map a canvas-local point to the screen top-left of its fat block.
+    /// Direct port of `UnMakeFatPoint` from fatbits.c.
+    fn canvas_to_fat_block(&self, cx: i32, cy: i32) -> Option<(i32, i32)> {
+        let lx = cx - self.src_x;
+        let ly = cy - self.src_y;
+        if lx < 0 || ly < 0 || lx >= self.src_w || ly >= self.src_h {
+            return None;
+        }
+        Some((self.fat_x + lx * self.zoom, self.fat_y + ly * self.zoom))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Selection state
 // ---------------------------------------------------------------------------
 
@@ -530,6 +581,21 @@ pub struct Paint {
     touch: TouchTarget,
     menu_open: bool,
 
+    /// Fixed ink value for the current stroke.  Set by the Pen tool at pen_down:
+    /// white (255) when starting on a colored pixel (toggle-erase), otherwise the
+    /// pattern value at that point.  `None` for all other tools — they use
+    /// `pattern_value` per pixel as usual.
+    stroke_ink: Option<u8>,
+
+    /// Last raw screen position from PenDown/PenMove, used by the Scroll tool in
+    /// fatbits mode where canvas-coord tracking has a circular dependency with the
+    /// shifting viewport.
+    pen_screen: (i16, i16),
+
+    /// Active fatbits view; `None` when in normal mode.
+    /// Equivalent to the module-level globals in fatbits.c.
+    fatbits: Option<FatBitsState>,
+
     /// The paint_tools.pgm sprite sheet; `None` if the file is missing.
     tool_sheet: Option<ToolSheet>,
 }
@@ -569,12 +635,61 @@ impl Paint {
             ant_last_ms: 0,
             touch: TouchTarget::None,
             menu_open: false,
+            stroke_ink: None,
+            pen_screen: (0, 0),
+            fatbits: None,
             tool_sheet,
         }
     }
 
     pub fn persist(&mut self) {
         save_db(&self.db, &self.db_path, &self.pixels);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fatbits — SetFatBits / ClearFatBits / SetThinBitRect equivalents
+    // -----------------------------------------------------------------------
+
+    /// Enter fatbits mode centred on canvas-local point `(cx, cy)`.
+    /// Equivalent to `SetFatBits`: calculates source rect, stores state, triggers redraw.
+    fn set_fat_bits(&mut self, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
+        let zoom = FAT_ZOOM;
+        let cw = self.layout.canvas_w;
+        let ch = self.layout.canvas_h;
+        let src_w = (cw / zoom).max(1);
+        let src_h = (ch / zoom).max(1);
+        let sx = (cx - src_w / 2).clamp(0, (cw - src_w).max(0));
+        let sy = (cy - src_h / 2).clamp(0, (ch - src_h).max(0));
+        self.fatbits = Some(FatBitsState {
+            src_x: sx,
+            src_y: sy,
+            src_w,
+            src_h,
+            fat_x: self.layout.canvas_x,
+            fat_y: self.layout.canvas_y,
+            zoom,
+        });
+        ctx.invalidate(self.canvas_rect());
+    }
+
+    /// Reposition the source (thin) rectangle without changing the zoom or display area.
+    /// Equivalent to `SetThinBitRect` — used by scroll/pan within fatbits.
+    #[allow(dead_code)]
+    fn move_fat_bits(&mut self, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
+        let cw = self.layout.canvas_w;
+        let ch = self.layout.canvas_h;
+        if let Some(ref mut fb) = self.fatbits {
+            fb.src_x = (cx - fb.src_w / 2).clamp(0, (cw - fb.src_w).max(0));
+            fb.src_y = (cy - fb.src_h / 2).clamp(0, (ch - fb.src_h).max(0));
+        }
+        ctx.invalidate(self.canvas_rect());
+    }
+
+    /// Exit fatbits mode and restore the normal canvas view.
+    /// Equivalent to `ClearFatBits`.
+    fn clear_fat_bits(&mut self, ctx: &mut Ctx<'_>) {
+        self.fatbits = None;
+        ctx.invalidate(self.canvas_rect());
     }
 
     // -----------------------------------------------------------------------
@@ -607,7 +722,11 @@ impl Paint {
     }
 
     fn screen_to_canvas(&self, sx: i16, sy: i16) -> Option<(i32, i32)> {
-        let l = &self.layout;
+        // In fatbits mode route through MakeFatPoint so all tools see canvas coords
+        // without needing to know fatbits is active — matching the original design.
+        if let Some(ref fb) = self.fatbits {
+            return fb.fat_to_canvas(sx as i32, sy as i32);
+        }        let l = &self.layout;
         let cx = sx as i32 - l.canvas_x;
         let cy = sy as i32 - l.canvas_y;
         if cx >= 0 && cy >= 0 && cx < l.canvas_w && cy < l.canvas_h {
@@ -670,10 +789,21 @@ impl Paint {
         )
     }
 
+    /// Invalidate a single canvas pixel — or, in fatbits mode, its `zoom×zoom` fat block.
+    /// Equivalent to triggering a `DrawFatBits` update for one pixel in fatbits.c.
     fn invalidate_pixel(&self, ctx: &mut Ctx<'_>, x: i32, y: i32) {
-        let l = &self.layout;
+        if let Some(ref fb) = self.fatbits {
+            if let Some((bx, by)) = fb.canvas_to_fat_block(x, y) {
+                ctx.invalidate(Rectangle::new(
+                    Point::new(bx, by),
+                    Size::new(fb.zoom as u32, fb.zoom as u32),
+                ));
+            }
+            // Pixel outside the fat source region — not visible, skip.
+            return;
+        }
         ctx.invalidate(Rectangle::new(
-            Point::new(l.canvas_x + x, l.canvas_y + y),
+            Point::new(self.layout.canvas_x + x, self.layout.canvas_y + y),
             Size::new(1, 1),
         ));
     }
@@ -820,6 +950,21 @@ impl Paint {
     /// Return a screen-space `Rectangle` for a canvas-local strip, clamped
     /// to the canvas bounds.  Used for dirty-rect invalidation during drag.
     fn canvas_strip_rect(&self, cx: i32, cy: i32, w: i32, h: i32) -> Option<Rectangle> {
+        if let Some(ref fb) = self.fatbits {
+            let x0 = cx.max(fb.src_x);
+            let y0 = cy.max(fb.src_y);
+            let x1 = (cx + w - 1).min(fb.src_x + fb.src_w - 1);
+            let y1 = (cy + h - 1).min(fb.src_y + fb.src_h - 1);
+            if x1 < x0 || y1 < y0 {
+                return None;
+            }
+            let lx = x0 - fb.src_x;
+            let ly = y0 - fb.src_y;
+            return Some(Rectangle::new(
+                Point::new(fb.fat_x + lx * fb.zoom, fb.fat_y + ly * fb.zoom),
+                Size::new(((x1 - x0 + 1) * fb.zoom) as u32, ((y1 - y0 + 1) * fb.zoom) as u32),
+            ));
+        }
         self.layout.canvas_strip_rect(cx, cy, w, h)
     }
 
@@ -846,6 +991,25 @@ impl Paint {
 
     /// Invalidate a canvas-local bounding box in screen space.
     fn invalidate_bounds(&self, ctx: &mut Ctx<'_>, b: (i32, i32, i32, i32)) {
+        if let Some(ref fb) = self.fatbits {
+            // Map canvas bounds into the fat display area (like the limit rect in DrawFatBits).
+            let cx0 = b.0.max(fb.src_x);
+            let cy0 = b.1.max(fb.src_y);
+            let cx1 = b.2.min(fb.src_x + fb.src_w - 1);
+            let cy1 = b.3.min(fb.src_y + fb.src_h - 1);
+            if cx1 >= cx0 && cy1 >= cy0 {
+                let lx = cx0 - fb.src_x;
+                let ly = cy0 - fb.src_y;
+                ctx.invalidate(Rectangle::new(
+                    Point::new(fb.fat_x + lx * fb.zoom, fb.fat_y + ly * fb.zoom),
+                    Size::new(
+                        ((cx1 - cx0 + 1) * fb.zoom) as u32,
+                        ((cy1 - cy0 + 1) * fb.zoom) as u32,
+                    ),
+                ));
+            }
+            return;
+        }
         let cw = self.layout.canvas_w;
         let ch = self.layout.canvas_h;
         let x0 = (b.0).max(0);
@@ -1183,7 +1347,8 @@ impl Paint {
             .unwrap_or(255)
     }
 
-    /// Filled circle at `(cx, cy)` of radius `r`, drawn with the current pattern.
+    /// Filled circle at `(cx, cy)` of radius `r`, drawn with the current pattern
+    /// (or `stroke_ink` when set — used by the Pen tool's toggle behaviour).
     pub fn stamp_circle(&mut self, cx: i32, cy: i32, r: i32, ctx: &mut Ctx<'_>) {
         let r2 = r * r;
         for dy in -r..=r {
@@ -1191,7 +1356,8 @@ impl Paint {
                 if dx * dx + dy * dy <= r2 {
                     let px = cx + dx;
                     let py = cy + dy;
-                    let v = pattern_value(self.pattern, px, py);
+                    let v = self.stroke_ink
+                        .unwrap_or_else(|| pattern_value(self.pattern, px, py));
                     self.put_pixel(px, py, v);
                     self.invalidate_pixel(ctx, px, py);
                 }
@@ -1246,10 +1412,17 @@ impl Paint {
     fn on_pen_down(&mut self, cx: i32, cy: i32, ctx: &mut Ctx<'_>) {
         match self.tool {
             Tool::Pen => {
-                // Track from the very first pixel — no capture.
                 self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, 0));
-                let v = pattern_value(self.pattern, cx, cy);
-                self.put_pixel(cx, cy, v);
+                // Toggle: starting on a colored pixel erases it (draw with white);
+                // starting on white draws with the current pattern color.
+                let existing = self.get_pixel(cx, cy);
+                let ink = if existing != 255 {
+                    255u8
+                } else {
+                    pattern_value(self.pattern, cx, cy)
+                };
+                self.stroke_ink = Some(ink);
+                self.put_pixel(cx, cy, ink);
                 self.invalidate_pixel(ctx, cx, cy);
             }
             Tool::Eraser => {
@@ -1299,14 +1472,30 @@ impl Paint {
                 self.stroke_bounds = Some(Self::rubber_bounds(cx, cy, cx, cy, 3));
                 // TODO: port airbrush/spray routine from C
             }
+            Tool::Magnify => {
+                // Enter fatbits centred on the tapped point (re-centre if already active).
+                // Equivalent to calling SetFatBits in the original application.
+                self.set_fat_bits(cx, cy, ctx);
+            }
             _ => {}
         }
     }
 
     fn on_pen_move(&mut self, cx: i32, cy: i32, px: i32, py: i32, ctx: &mut Ctx<'_>) {
         match self.tool {
-            Tool::Pen | Tool::Brush => {
-                // No capture — just draw and grow the dirty bounds.
+            Tool::Pen => {
+                // Always 1 px; stroke_ink was set at pen_down.
+                let seg_b = Self::rubber_bounds(px, py, cx, cy, 0);
+                self.stroke_bounds = Some(match self.stroke_bounds {
+                    Some(old) => Self::union_bounds(old, seg_b),
+                    None => seg_b,
+                });
+                let saved_pw = self.pen_width;
+                self.pen_width = 0;
+                self.draw_line(px, py, cx, cy, ctx);
+                self.pen_width = saved_pw;
+            }
+            Tool::Brush => {
                 let m = self.pen_width as i32 + 1;
                 let seg_b = Self::rubber_bounds(px, py, cx, cy, m);
                 self.stroke_bounds = Some(match self.stroke_bounds {
@@ -1384,61 +1573,49 @@ impl Paint {
             }
             Tool::Selection => {
                 if self.sel_dragging {
-                    let layout = self.layout;
+                    // Read coords into locals first so we can call &self methods
+                    // (canvas_strip_rect) without conflicting with the mut borrow.
+                    let (sx0, sy0, sx1, sy1) = match self.selection {
+                        Some(ref s) => (s.x0, s.y0, s.x1, s.y1),
+                        None => return,
+                    };
+                    let rw = sx1 - sx0;
+                    let rh = sy1 - sy0;
+
+                    let dx = (cx - px).clamp(-sx0, self.layout.canvas_w - 1 - sx1);
+                    let dy = (cy - py).clamp(-sy0, self.layout.canvas_h - 1 - sy1);
+                    if dx == 0 && dy == 0 {
+                        return;
+                    }
+
+                    // Exposed background strips (C: EditMove logic).
+                    let hstrip = if dx > 0 {
+                        self.canvas_strip_rect(sx0, sy0, dx, rh + 1)
+                    } else if dx < 0 {
+                        self.canvas_strip_rect(sx1 + 1 + dx, sy0, -dx, rh + 1)
+                    } else {
+                        None
+                    };
+                    let vstrip = if dy > 0 {
+                        self.canvas_strip_rect(sx0, sy0, rw + 1, dy)
+                    } else if dy < 0 {
+                        self.canvas_strip_rect(sx0, sy1 + 1 + dy, rw + 1, -dy)
+                    } else {
+                        None
+                    };
+                    let new_rect = self.canvas_strip_rect(sx0 + dx, sy0 + dy, rw + 1, rh + 1);
+
+                    // Apply the move.
                     if let Some(ref mut s) = self.selection {
-                        let rw = s.x1 - s.x0; // rect width (stays fixed)
-                        let rh = s.y1 - s.y0;
-
-                        // Clamp delta so the rect stays entirely on canvas.
-                        let cww = layout.canvas_w;
-                        let chh = layout.canvas_h;
-                        let dx = (cx - px).clamp(-s.x0, cww - 1 - s.x1);
-                        let dy = (cy - py).clamp(-s.y0, chh - 1 - s.y1);
-                        if dx == 0 && dy == 0 {
-                            return;
-                        }
-
-                        // The two exposed background strips (C: EditMove logic).
-                        // Horizontal strip: full rect height, |dx| wide.
-                        let hstrip = if dx > 0 {
-                            // Moving right — strip exposed on the left.
-                            layout.canvas_strip_rect(s.x0, s.y0, dx, rh + 1)
-                        } else if dx < 0 {
-                            // Moving left — strip exposed on the right.
-                            layout.canvas_strip_rect(s.x1 + 1 + dx, s.y0, -dx, rh + 1)
-                        } else {
-                            None
-                        };
-
-                        // Vertical strip: full rect width, |dy| tall.
-                        let vstrip = if dy > 0 {
-                            // Moving down — strip exposed on the top.
-                            layout.canvas_strip_rect(s.x0, s.y0, rw + 1, dy)
-                        } else if dy < 0 {
-                            // Moving up — strip exposed on the bottom.
-                            layout.canvas_strip_rect(s.x0, s.y1 + 1 + dy, rw + 1, -dy)
-                        } else {
-                            None
-                        };
-
-                        // Move the rect.
                         s.x0 += dx;
                         s.x1 += dx;
                         s.y0 += dy;
                         s.y1 += dy;
-
-                        // Invalidate exposed strips + new position.
-                        if let Some(r) = hstrip {
-                            ctx.invalidate(r);
-                        }
-                        if let Some(r) = vstrip {
-                            ctx.invalidate(r);
-                        }
-                        // New position of the selection (for the composite draw).
-                        if let Some(r) = layout.canvas_strip_rect(s.x0, s.y0, rw + 1, rh + 1) {
-                            ctx.invalidate(r);
-                        }
                     }
+
+                    if let Some(r) = hstrip { ctx.invalidate(r); }
+                    if let Some(r) = vstrip { ctx.invalidate(r); }
+                    if let Some(r) = new_rect { ctx.invalidate(r); }
                 } else {
                     // Rubber-band a new selection.
                     let (ax, ay) = self.pen_start;
@@ -1517,6 +1694,7 @@ impl Paint {
                 self.invalidate_bounds(ctx, final_b);
             }
             Tool::Pen | Tool::Brush | Tool::Eraser => {
+                self.stroke_ink = None;
                 // Stroke complete — now we know the full dirty bounds.
                 // Push ghost[bounds] as undo (pre-stroke clean state), then imprint.
                 if let Some(sb) = self.stroke_bounds.take() {
@@ -1625,6 +1803,7 @@ impl Paint {
                     self.pen_active = true;
                     self.pen_start = (cx, cy);
                     self.pen_pos = (cx, cy);
+                    self.pen_screen = (x, y);
                     self.anchor = Some((cx, cy));
                     self.on_pen_down(cx, cy, ctx);
                 }
@@ -1632,6 +1811,30 @@ impl Paint {
             Event::PenMove { x, y } => {
                 if self.touch != TouchTarget::Canvas || !self.pen_active {
                     return None;
+                }
+                // Scroll in fatbits pans the source viewport using raw screen deltas.
+                // Canvas-coord tracking can't be used here because shifting src_x/src_y
+                // changes the coordinate mapping mid-drag — equivalent to SetThinBitRect
+                // being called each frame in the original C.
+                if self.tool == Tool::Scroll {
+                    if let Some(ref mut fb) = self.fatbits {
+                        let (px_scr, py_scr) = self.pen_screen;
+                        let dx_scr = x as i32 - px_scr as i32;
+                        let dy_scr = y as i32 - py_scr as i32;
+                        if dx_scr != 0 || dy_scr != 0 {
+                            // Grab-and-drag: content follows stylus, so viewport moves
+                            // opposite to the drag direction.
+                            let cw = self.layout.canvas_w;
+                            let ch = self.layout.canvas_h;
+                            fb.src_x = (fb.src_x - dx_scr / fb.zoom)
+                                .clamp(0, (cw - fb.src_w).max(0));
+                            fb.src_y = (fb.src_y - dy_scr / fb.zoom)
+                                .clamp(0, (ch - fb.src_h).max(0));
+                            self.pen_screen = (x, y);
+                            ctx.invalidate(self.canvas_rect());
+                        }
+                        return None;
+                    }
                 }
                 if let Some((cx, cy)) = self.screen_to_canvas(x, y) {
                     let (px, py) = self.pen_pos;
@@ -1645,7 +1848,10 @@ impl Paint {
                 match self.touch {
                     TouchTarget::ToolCell(i) => {
                         if let Some(tool) = PALETTE_CELLS[i] {
-                            if tool != self.tool {
+                            // Tapping Magnify while fatbits is active exits fatbits.
+                            if tool == Tool::Magnify && self.fatbits.is_some() {
+                                self.clear_fat_bits(ctx);
+                            } else if tool != self.tool {
                                 self.tool = tool;
                                 // Commit floating selection and dismiss ants.
                                 if self.selection.is_some() {
@@ -1702,7 +1908,168 @@ impl Paint {
         self.draw_palette(canvas);
     }
 
+    /// Expand the source region into `zoom×zoom` blocks — the `GrowBits` + `DrawFatBits`
+    /// equivalent.  Only redraws fat blocks whose screen rect overlaps `dirty` (the
+    /// `limit` rect optimisation from fatbits.c).
+    fn draw_fat_bits_area<D: DrawTarget<Color = Gray8>>(&self, canvas: &mut D, dirty: Rectangle) {
+        let fb = match &self.fatbits {
+            Some(f) => f,
+            None => return,
+        };
+
+        let fat_w = fb.src_w * fb.zoom;
+        let fat_h = fb.src_h * fb.zoom;
+        let fat_x1 = fb.fat_x + fat_w - 1;
+        let fat_y1 = fb.fat_y + fat_h - 1;
+
+        // Clip the dirty rect to the fat display area.
+        let d_x0 = dirty.top_left.x.max(fb.fat_x);
+        let d_y0 = dirty.top_left.y.max(fb.fat_y);
+        let d_x1 = (dirty.top_left.x + dirty.size.width as i32 - 1).min(fat_x1);
+        let d_y1 = (dirty.top_left.y + dirty.size.height as i32 - 1).min(fat_y1);
+        if d_x1 < d_x0 || d_y1 < d_y0 {
+            return;
+        }
+
+        // Fill the dirty sub-area with the grid colour first (forms the 1-px gap
+        // between fat blocks, matching the pixel-boundary grid in classic MacPaint).
+        let _ = Rectangle::new(
+            Point::new(d_x0, d_y0),
+            Size::new((d_x1 - d_x0 + 1) as u32, (d_y1 - d_y0 + 1) as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(Gray8::new(160)))
+        .draw(canvas);
+
+        // Source block range that covers the dirty area (the "limit" rect in DrawFatBits).
+        let bx0 = ((d_x0 - fb.fat_x) / fb.zoom).max(0);
+        let by0 = ((d_y0 - fb.fat_y) / fb.zoom).max(0);
+        let bx1 = ((d_x1 - fb.fat_x) / fb.zoom).min(fb.src_w - 1);
+        let by1 = ((d_y1 - fb.fat_y) / fb.zoom).min(fb.src_h - 1);
+
+        // GrowBits: paint each source pixel as a (zoom-1)×(zoom-1) block,
+        // leaving the last row/column as the grid gap filled above.
+        let block = (fb.zoom - 1).max(1) as u32;
+        for fy in by0..=by1 {
+            for fx in bx0..=bx1 {
+                let v = self.get_pixel(fb.src_x + fx, fb.src_y + fy);
+                let _ = Rectangle::new(
+                    Point::new(fb.fat_x + fx * fb.zoom, fb.fat_y + fy * fb.zoom),
+                    Size::new(block, block),
+                )
+                .into_styled(PrimitiveStyle::with_fill(Gray8::new(v)))
+                .draw(canvas);
+            }
+        }
+
+        // Fill any remainder below/right if canvas dimensions aren't exact multiples
+        // of zoom (ClearRect equivalent — keeps old canvas content from showing through).
+        let canvas_w = self.layout.canvas_w;
+        let canvas_h = self.layout.canvas_h;
+        let rem_w = canvas_w - fat_w;
+        let rem_h = canvas_h - fat_h;
+        if rem_w > 0 {
+            let _ = Rectangle::new(
+                Point::new(fb.fat_x + fat_w, fb.fat_y),
+                Size::new(rem_w as u32, canvas_h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(WHITE))
+            .draw(canvas);
+        }
+        if rem_h > 0 {
+            let _ = Rectangle::new(
+                Point::new(fb.fat_x, fb.fat_y + fat_h),
+                Size::new(fat_w as u32, rem_h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(WHITE))
+            .draw(canvas);
+        }
+
+        // Composite any floating selection pixels — drawn as fat blocks so they
+        // remain editable within the magnified view (mirrors the canvas compositing
+        // in draw_canvas_area but at zoom× scale).
+        if let Some(ref sel) = self.selection {
+            if let Some(ref captured) = sel.pixels {
+                let sw = (sel.x1 - sel.x0 + 1) as usize;
+                let sh = captured.len() / sw.max(1);
+                let block = (fb.zoom - 1).max(1) as u32;
+                for dy in 0..sh {
+                    for dx in 0..sw {
+                        let v = captured[dy * sw + dx];
+                        if v == 255 {
+                            continue; // transparent
+                        }
+                        let cx = sel.x0 + dx as i32;
+                        let cy = sel.y0 + dy as i32;
+                        if let Some((bx, by)) = fb.canvas_to_fat_block(cx, cy) {
+                            let _ = Rectangle::new(
+                                Point::new(bx, by),
+                                Size::new(block, block),
+                            )
+                            .into_styled(PrimitiveStyle::with_fill(Gray8::new(v)))
+                            .draw(canvas);
+                        }
+                    }
+                }
+            }
+
+            // Selection outline in fat-screen coordinates.  We find the selection
+            // bounds intersected with the source region, map to fat screen coords,
+            // and draw a 1-px marching-ants border using the same ant pattern as the
+            // normal view — stepped at fat-block boundaries (one ant step per canvas pixel).
+            let sx0 = sel.x0.max(fb.src_x);
+            let sy0 = sel.y0.max(fb.src_y);
+            let sx1 = (sel.x1 + 1).min(fb.src_x + fb.src_w);
+            let sy1 = (sel.y1 + 1).min(fb.src_y + fb.src_h);
+            if sx1 > sx0 && sy1 > sy0 {
+                const ANT_PTN: [u8; 14] = [
+                    0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E, 0x7C, 0xF8,
+                    0xF1, 0xE3, 0xC7, 0x8F, 0x1F, 0x3E,
+                ];
+                let phase = self.ant_phase;
+                let zoom = fb.zoom;
+                // Closure: draw one canvas-pixel-wide ant segment at fat screen position.
+                let mut ant_seg = |cx: i32, cy: i32, horiz: bool| {
+                    let lx = cx - fb.src_x;
+                    let ly = cy - fb.src_y;
+                    let row = ANT_PTN[(phase + cy as usize) & 7];
+                    let bit = (row >> (7 - (cx as usize & 7))) & 1 != 0;
+                    let color = if bit { 0u8 } else { 255u8 };
+                    let (bx, by) = (fb.fat_x + lx * zoom, fb.fat_y + ly * zoom);
+                    let _ = Rectangle::new(
+                        Point::new(bx, by),
+                        Size::new(if horiz { zoom as u32 } else { 1 }, if horiz { 1 } else { zoom as u32 }),
+                    )
+                    .into_styled(PrimitiveStyle::with_fill(Gray8::new(color)))
+                    .draw(canvas);
+                };
+                // Top and bottom edges.
+                for cx in sx0..sx1 {
+                    ant_seg(cx, sy0, true);
+                    ant_seg(cx, sy1, true);
+                }
+                // Left and right edges (skip corners already drawn).
+                for cy in (sy0 + 1)..sy1 {
+                    ant_seg(sx0, cy, false);
+                    ant_seg(sx1, cy, false);
+                }
+            }
+        }
+
+        // 1-px border around the fat display area.
+        let _ = Rectangle::new(
+            Point::new(fb.fat_x, fb.fat_y),
+            Size::new(fat_w as u32, fat_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
+        .draw(canvas);
+    }
+
     fn draw_canvas_area<D: DrawTarget<Color = Gray8>>(&self, canvas: &mut D, dirty: Rectangle) {
+        if self.fatbits.is_some() {
+            self.draw_fat_bits_area(canvas, dirty);
+            return;
+        }
+
         let l = &self.layout;
         let cwx = l.canvas_w;
         let chx = l.canvas_h;
@@ -1866,7 +2233,10 @@ impl Paint {
                 continue;
             }
 
-            let is_selected = cell.map_or(false, |t| t == self.tool);
+            // Magnify stays highlighted while fatbits is active, regardless of active tool.
+            let is_selected = cell.map_or(false, |t| {
+                t == self.tool || (t == Tool::Magnify && self.fatbits.is_some())
+            });
             let is_pressed = self.touch == TouchTarget::ToolCell(i)
                 || (is_undo && self.touch == TouchTarget::UndoBtn)
                 || (is_clear && self.touch == TouchTarget::ClearBtn);
