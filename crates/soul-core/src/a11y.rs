@@ -6,6 +6,11 @@
 //! and an optional `value` (slider percent, text content, scroll
 //! position). [`A11yNode::utterance`] composes these into the canonical
 //! string the screen reader vocalizes.
+//!
+//! Focus traversal is owned by [`FocusRing`], a ring buffer over the
+//! active app's a11y tree filtered by an optional [`FocusScope`]. The
+//! runtime rebuilds the ring once per frame; widgets and the screen
+//! reader interact with it through [`A11yManager`].
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -193,12 +198,224 @@ impl fmt::Display for A11yRole {
     }
 }
 
-/// Manages the accessibility state, including the screen reader's
-/// pending speech queue.
+/// Restricts which nodes the [`FocusRing`] traverses.
+///
+/// The default `Whole` lets focus walk every node the active app
+/// exposes. `Modal { rect }` restricts traversal to nodes whose bounds
+/// intersect `rect` — apps drawing a modal return that rect from
+/// [`crate::App::a11y_focus_scope`] so focus cannot leak behind the
+/// modal and silently activate background controls.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FocusScope {
+    #[default]
+    Whole,
+    Modal {
+        rect: Rectangle,
+    },
+}
+
+fn rects_intersect(a: &Rectangle, b: &Rectangle) -> bool {
+    let ax1 = a.top_left.x + a.size.width as i32;
+    let ay1 = a.top_left.y + a.size.height as i32;
+    let bx1 = b.top_left.x + b.size.width as i32;
+    let by1 = b.top_left.y + b.size.height as i32;
+    a.top_left.x < bx1 && b.top_left.x < ax1 && a.top_left.y < by1 && b.top_left.y < ay1
+}
+
+/// A ring buffer of focusable nodes with a current index.
+///
+/// The runtime owns one [`FocusRing`] inside [`A11yManager`] and
+/// rebuilds it once per frame from `App::a11y_nodes` filtered by the
+/// app's `a11y_focus_scope`. Identity is preserved across rebuilds:
+/// when the previously focused node still exists (matched on `(label,
+/// role)`), focus stays on it; otherwise it falls back to index 0.
+///
+/// `next` and `prev` wrap around. The ring is empty when the active
+/// app exposes no focusable nodes.
+#[derive(Debug, Default)]
+pub struct FocusRing {
+    nodes: Vec<A11yNode>,
+    index: Option<usize>,
+    scope: FocusScope,
+    /// Cheap signature of the last build — node count plus the first
+    /// and last `(label, role)` pair plus the scope. When unchanged,
+    /// `rebuild` skips work.
+    signature: u64,
+}
+
+impl FocusRing {
+    pub const fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            index: None,
+            scope: FocusScope::Whole,
+            signature: 0,
+        }
+    }
+
+    /// Replace the ring's contents from `all_nodes`, filtered by
+    /// `scope`. Returns `true` if the ring actually changed; `false`
+    /// when the cached signature said the new tree is equivalent.
+    ///
+    /// Identity preservation: if the currently focused `(label, role)`
+    /// pair is present in the new filtered list, focus moves to that
+    /// new index. Otherwise focus falls back to `0` (or `None` when
+    /// the new list is empty).
+    pub fn rebuild(&mut self, all_nodes: Vec<A11yNode>, scope: FocusScope) -> bool {
+        let filtered: Vec<A11yNode> = match &scope {
+            FocusScope::Whole => all_nodes,
+            FocusScope::Modal { rect } => all_nodes
+                .into_iter()
+                .filter(|n| rects_intersect(&n.bounds, rect))
+                .collect(),
+        };
+
+        let new_sig = compute_signature(&filtered, &scope);
+        if new_sig == self.signature && !filtered.is_empty() {
+            // Even when the signature matches, the bounds may have
+            // shifted (e.g., a list reflowed). Replace contents but
+            // preserve the index — no identity-search work needed.
+            self.nodes = filtered;
+            self.scope = scope;
+            return false;
+        }
+
+        let new_index = self
+            .current()
+            .and_then(|cur| {
+                let cur_label = cur.label.clone();
+                let cur_role = cur.role.clone();
+                filtered
+                    .iter()
+                    .position(|n| n.label == cur_label && n.role == cur_role)
+            })
+            .or(if filtered.is_empty() { None } else { Some(0) });
+
+        self.nodes = filtered;
+        self.index = new_index;
+        self.scope = scope;
+        self.signature = new_sig;
+        true
+    }
+
+    /// The currently focused node, if any.
+    pub fn current(&self) -> Option<&A11yNode> {
+        self.index.and_then(|i| self.nodes.get(i))
+    }
+
+    /// Advance focus by one with wraparound. Returns the new current
+    /// node, or `None` when the ring is empty.
+    pub fn next(&mut self) -> Option<&A11yNode> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let i = match self.index {
+            Some(i) => (i + 1) % self.nodes.len(),
+            None => 0,
+        };
+        self.index = Some(i);
+        self.nodes.get(i)
+    }
+
+    /// Move focus back by one with wraparound. Returns the new current
+    /// node, or `None` when the ring is empty.
+    pub fn prev(&mut self) -> Option<&A11yNode> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let i = match self.index {
+            Some(0) | None => self.nodes.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.index = Some(i);
+        self.nodes.get(i)
+    }
+
+    /// Borrow the filtered node list.
+    pub fn nodes(&self) -> &[A11yNode] {
+        &self.nodes
+    }
+
+    /// Current index, if focused.
+    pub fn index(&self) -> Option<usize> {
+        self.index
+    }
+
+    /// Active scope.
+    pub fn scope(&self) -> &FocusScope {
+        &self.scope
+    }
+
+    /// Number of focusable nodes in the ring.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Set focus to `i`, clamped to the ring. Returns the new current
+    /// node, or `None` when the ring is empty.
+    pub fn set_index(&mut self, i: usize) -> Option<&A11yNode> {
+        if self.nodes.is_empty() {
+            self.index = None;
+            return None;
+        }
+        let clamped = i.min(self.nodes.len() - 1);
+        self.index = Some(clamped);
+        self.nodes.get(clamped)
+    }
+
+    /// Clear focus without dropping the node list.
+    pub fn unfocus(&mut self) {
+        self.index = None;
+    }
+}
+
+fn compute_signature(nodes: &[A11yNode], scope: &FocusScope) -> u64 {
+    // FNV-1a over: count, scope, then first and last (label, role).
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mix = |hash: &mut u64, byte: u8| {
+        *hash ^= byte as u64;
+        *hash = hash.wrapping_mul(0x100000001b3);
+    };
+    let mix_bytes = |hash: &mut u64, bytes: &[u8]| {
+        for b in bytes {
+            mix(hash, *b);
+        }
+    };
+    let count = nodes.len() as u32;
+    mix_bytes(&mut hash, &count.to_le_bytes());
+    match scope {
+        FocusScope::Whole => mix(&mut hash, 0),
+        FocusScope::Modal { rect } => {
+            mix(&mut hash, 1);
+            mix_bytes(&mut hash, &rect.top_left.x.to_le_bytes());
+            mix_bytes(&mut hash, &rect.top_left.y.to_le_bytes());
+            mix_bytes(&mut hash, &rect.size.width.to_le_bytes());
+            mix_bytes(&mut hash, &rect.size.height.to_le_bytes());
+        }
+    }
+    if let Some(first) = nodes.first() {
+        mix_bytes(&mut hash, first.label.as_bytes());
+        mix_bytes(&mut hash, first.role.as_str().as_bytes());
+    }
+    if nodes.len() > 1 {
+        if let Some(last) = nodes.last() {
+            mix_bytes(&mut hash, last.label.as_bytes());
+            mix_bytes(&mut hash, last.role.as_str().as_bytes());
+        }
+    }
+    hash
+}
+
+/// Manages the accessibility state, including the focus ring and the
+/// screen reader's pending speech queue.
 #[derive(Default)]
 pub struct A11yManager {
     pub enabled: bool,
-    pub focus_index: Option<usize>,
+    pub focus: FocusRing,
     pub pending_speech: Vec<String>,
 }
 
@@ -284,5 +501,181 @@ mod tests {
     fn role_round_trip_through_str() {
         let r = A11yRole::Slider;
         assert_eq!(A11yRole::from_str(r.as_str()), r);
+    }
+
+    fn node(label: &str, role: A11yRole, x: i32, y: i32, w: u32, h: u32) -> A11yNode {
+        A11yNode::new(
+            Rectangle::new(Point::new(x, y), Size::new(w, h)),
+            label,
+            role,
+        )
+    }
+
+    #[test]
+    fn ring_starts_empty_and_unfocused() {
+        let r = FocusRing::new();
+        assert!(r.is_empty());
+        assert_eq!(r.index(), None);
+        assert!(r.current().is_none());
+    }
+
+    #[test]
+    fn ring_rebuild_focuses_first_node_when_starting_empty() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![
+                node("Save", A11yRole::Button, 0, 0, 10, 10),
+                node("Cancel", A11yRole::Button, 0, 10, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        assert_eq!(r.index(), Some(0));
+        assert_eq!(r.current().unwrap().label, "Save");
+    }
+
+    #[test]
+    fn ring_next_and_prev_wrap_around() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![
+                node("A", A11yRole::Button, 0, 0, 10, 10),
+                node("B", A11yRole::Button, 0, 10, 10, 10),
+                node("C", A11yRole::Button, 0, 20, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        assert_eq!(r.next().unwrap().label, "B");
+        assert_eq!(r.next().unwrap().label, "C");
+        assert_eq!(r.next().unwrap().label, "A"); // wraparound
+        assert_eq!(r.prev().unwrap().label, "C"); // wraparound back
+        assert_eq!(r.prev().unwrap().label, "B");
+    }
+
+    #[test]
+    fn ring_next_on_empty_returns_none() {
+        let mut r = FocusRing::new();
+        assert!(r.next().is_none());
+        assert!(r.prev().is_none());
+    }
+
+    #[test]
+    fn ring_rebuild_preserves_focus_by_label_and_role() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![
+                node("Save", A11yRole::Button, 0, 0, 10, 10),
+                node("Cancel", A11yRole::Button, 0, 10, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        r.next(); // focus moves to Cancel
+        assert_eq!(r.current().unwrap().label, "Cancel");
+
+        // Rebuild with the same nodes — focus should stay on Cancel
+        r.rebuild(
+            alloc::vec![
+                node("Save", A11yRole::Button, 0, 0, 10, 10),
+                node("Cancel", A11yRole::Button, 0, 10, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        assert_eq!(r.current().unwrap().label, "Cancel");
+
+        // Insert a new first node — focus should still be on Cancel
+        r.rebuild(
+            alloc::vec![
+                node("Reset", A11yRole::Button, 0, 0, 10, 10),
+                node("Save", A11yRole::Button, 0, 10, 10, 10),
+                node("Cancel", A11yRole::Button, 0, 20, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        assert_eq!(r.current().unwrap().label, "Cancel");
+    }
+
+    #[test]
+    fn ring_rebuild_falls_back_to_zero_when_focused_node_disappears() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![
+                node("Save", A11yRole::Button, 0, 0, 10, 10),
+                node("Cancel", A11yRole::Button, 0, 10, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        r.next(); // focus = Cancel
+        r.rebuild(
+            alloc::vec![node("Save", A11yRole::Button, 0, 0, 10, 10)],
+            FocusScope::Whole,
+        );
+        assert_eq!(r.current().unwrap().label, "Save");
+        assert_eq!(r.index(), Some(0));
+    }
+
+    #[test]
+    fn ring_rebuild_clears_index_when_new_list_is_empty() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![node("Save", A11yRole::Button, 0, 0, 10, 10)],
+            FocusScope::Whole,
+        );
+        r.rebuild(alloc::vec![], FocusScope::Whole);
+        assert!(r.current().is_none());
+        assert_eq!(r.index(), None);
+    }
+
+    #[test]
+    fn ring_modal_scope_filters_to_intersecting_nodes() {
+        let mut r = FocusRing::new();
+        let modal = Rectangle::new(Point::new(50, 50), Size::new(100, 100));
+        r.rebuild(
+            alloc::vec![
+                node("Behind", A11yRole::Button, 0, 0, 10, 10), // outside modal
+                node("Inside1", A11yRole::Button, 60, 60, 20, 20), // inside
+                node("Inside2", A11yRole::Button, 100, 100, 20, 20), // inside
+                node("OutsideToo", A11yRole::Button, 200, 200, 10, 10), // outside
+            ],
+            FocusScope::Modal { rect: modal },
+        );
+        assert_eq!(r.len(), 2);
+        let labels: alloc::vec::Vec<_> = r.nodes().iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(labels, alloc::vec!["Inside1", "Inside2"]);
+
+        // next/prev never escapes the modal scope
+        r.next();
+        assert_eq!(r.current().unwrap().label, "Inside2");
+        r.next();
+        assert_eq!(r.current().unwrap().label, "Inside1"); // wraps inside scope only
+    }
+
+    #[test]
+    fn ring_set_index_clamps_and_focuses() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![
+                node("A", A11yRole::Button, 0, 0, 10, 10),
+                node("B", A11yRole::Button, 0, 10, 10, 10),
+            ],
+            FocusScope::Whole,
+        );
+        let n = r.set_index(99).unwrap();
+        assert_eq!(n.label, "B"); // clamped to last
+        assert_eq!(r.index(), Some(1));
+    }
+
+    #[test]
+    fn ring_signature_skips_redundant_rebuilds() {
+        let mut r = FocusRing::new();
+        r.rebuild(
+            alloc::vec![node("Save", A11yRole::Button, 0, 0, 10, 10)],
+            FocusScope::Whole,
+        );
+        // Rebuild with identical inputs — returns false (no structural change).
+        let changed = r.rebuild(
+            alloc::vec![node("Save", A11yRole::Button, 0, 0, 10, 10)],
+            FocusScope::Whole,
+        );
+        assert!(!changed);
+        assert_eq!(r.current().unwrap().label, "Save");
     }
 }
