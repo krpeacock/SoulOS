@@ -113,6 +113,9 @@ pub struct WebPlatform {
     /// touch sequences, so a tap doesn't dispatch as both a touch and
     /// a mouse stylus.
     _touch_active: Rc<RefCell<bool>>,
+    /// Screen-curtain state. When `true`, [`flush`] paints the canvas
+    /// solid black instead of pushing the rendered framebuffer.
+    screen_curtain: bool,
 }
 
 impl WebPlatform {
@@ -199,6 +202,7 @@ impl WebPlatform {
             start_ms,
             _pointer_down: pointer_down,
             _touch_active: touch_active,
+            screen_curtain: false,
         })
     }
 }
@@ -223,16 +227,28 @@ impl Platform for WebPlatform {
     }
 
     fn flush(&mut self) {
-        // Pack 0x00RRGGBB → RRGGBBFF for ImageData (RGBA, A=255).
-        for (i, px) in self.display.buffer.iter().enumerate() {
-            let r = ((px >> 16) & 0xFF) as u8;
-            let g = ((px >> 8) & 0xFF) as u8;
-            let b = (px & 0xFF) as u8;
-            let base = i * 4;
-            self.rgba[base] = r;
-            self.rgba[base + 1] = g;
-            self.rgba[base + 2] = b;
-            self.rgba[base + 3] = 0xFF;
+        if self.screen_curtain {
+            // Curtain on: fill RGBA with opaque black so the user sees
+            // a blank screen while apps keep drawing into the logical
+            // framebuffer underneath.
+            for chunk in self.rgba.chunks_exact_mut(4) {
+                chunk[0] = 0;
+                chunk[1] = 0;
+                chunk[2] = 0;
+                chunk[3] = 0xFF;
+            }
+        } else {
+            // Pack 0x00RRGGBB → RRGGBBFF for ImageData (RGBA, A=255).
+            for (i, px) in self.display.buffer.iter().enumerate() {
+                let r = ((px >> 16) & 0xFF) as u8;
+                let g = ((px >> 8) & 0xFF) as u8;
+                let b = (px & 0xFF) as u8;
+                let base = i * 4;
+                self.rgba[base] = r;
+                self.rgba[base + 1] = g;
+                self.rgba[base + 2] = b;
+                self.rgba[base + 3] = 0xFF;
+            }
         }
         if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(
             Clamped(&self.rgba[..]),
@@ -247,6 +263,10 @@ impl Platform for WebPlatform {
     fn sleep_ms(&mut self, _ms: u32) {
         // Wasm has no thread to block; the rAF-driven frame loop in
         // lib.rs is the throttle.
+    }
+
+    fn set_screen_curtain(&mut self, on: bool) {
+        self.screen_curtain = on;
     }
 
     fn speak(&mut self, req: SpeechRequest<'_>) {

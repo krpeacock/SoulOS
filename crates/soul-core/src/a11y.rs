@@ -412,9 +412,8 @@ fn compute_signature(nodes: &[A11yNode], scope: &FocusScope) -> u64 {
 
 /// Manages the accessibility state, including the focus ring, the
 /// screen reader's pending speech queue, and global TTS preferences
-/// (rate, punctuation). Phase 4 will hydrate `rate_wpm` and
-/// `punctuation` from per-app settings; Phase 3a uses them with their
-/// defaults.
+/// (rate, punctuation). Phase 4 will hydrate `rate_wpm`,
+/// `punctuation`, and `screen_curtain` from per-app settings.
 pub struct A11yManager {
     pub enabled: bool,
     pub focus: FocusRing,
@@ -424,6 +423,12 @@ pub struct A11yManager {
     pub rate_wpm: u16,
     /// Punctuation verbosity for the screen reader.
     pub punctuation: soul_hal::Punctuation,
+    /// Screen-curtain state. When `true`, the runtime asks the
+    /// [`soul_hal::Platform`] to blank or otherwise suppress display
+    /// output. The big win is on e-ink: no panel writes means no
+    /// 300–900 ms refresh flash on every focus step. Toggle from
+    /// the runner via long-press Power while a11y is on.
+    pub screen_curtain: bool,
 }
 
 impl Default for A11yManager {
@@ -434,6 +439,7 @@ impl Default for A11yManager {
             pending_speech: Vec::new(),
             rate_wpm: soul_hal::SpeechRequest::DEFAULT_RATE_WPM,
             punctuation: soul_hal::Punctuation::Some,
+            screen_curtain: false,
         }
     }
 }

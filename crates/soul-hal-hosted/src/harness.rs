@@ -134,6 +134,9 @@ pub struct Harness<A> {
     app: A,
     dirty: Dirty,
     a11y: A11yManager,
+    /// Mirror of `a11y.screen_curtain` so we propagate transitions to
+    /// the platform exactly when the runtime would.
+    last_curtain: bool,
 }
 
 impl<A: soul_core::App> Harness<A> {
@@ -144,6 +147,7 @@ impl<A: soul_core::App> Harness<A> {
             app,
             dirty: Dirty::full(),
             a11y: A11yManager::new(),
+            last_curtain: false,
         };
         
         // Send the AppStart event to initialize the app
@@ -206,6 +210,13 @@ impl<A: soul_core::App> Harness<A> {
         // Drain accessibility speech as structured SpeechRequests so
         // harness assertions see the same rate/interrupt fields the
         // production soul-core drain produces.
+        // Sync curtain transitions to the platform — same one-shot
+        // semantics as soul-core::run.
+        if self.a11y.screen_curtain != self.last_curtain {
+            self.platform.set_screen_curtain(self.a11y.screen_curtain);
+            self.last_curtain = self.a11y.screen_curtain;
+        }
+
         let rate = self.a11y.rate_wpm;
         let punctuation = self.a11y.punctuation;
         for text in self.a11y.pending_speech.drain(..) {
@@ -368,6 +379,13 @@ impl<A: soul_core::App> Harness<A> {
         // Drain accessibility speech as structured SpeechRequests so
         // harness assertions see the same rate/interrupt fields the
         // production soul-core drain produces.
+        // Sync curtain transitions to the platform — same one-shot
+        // semantics as soul-core::run.
+        if self.a11y.screen_curtain != self.last_curtain {
+            self.platform.set_screen_curtain(self.a11y.screen_curtain);
+            self.last_curtain = self.a11y.screen_curtain;
+        }
+
         let rate = self.a11y.rate_wpm;
         let punctuation = self.a11y.punctuation;
         for text in self.a11y.pending_speech.drain(..) {
@@ -1577,13 +1595,41 @@ mod tests {
 
     #[test]
     fn screen_curtain_records_state() {
-        // Phase 3b will add a Host-level toggle; Phase 3a just verifies
-        // the headless platform records the call so 3b can build on it.
+        // Phase 3a baseline: the headless platform records direct
+        // calls to `set_screen_curtain` regardless of A11yManager.
         let app = SimpleNotesApp::new();
         let mut harness = Harness::new(app);
         harness.tick();
         assert!(!harness.platform.screen_curtain);
         harness.platform.set_screen_curtain(true);
         assert!(harness.platform.screen_curtain);
+    }
+
+    // ── Phase 3b tests: curtain propagation ──────────────────────────────────
+
+    #[test]
+    fn curtain_toggle_on_a11y_manager_propagates_to_platform_on_tick() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+        assert!(!harness.platform.screen_curtain);
+
+        harness.a11y.screen_curtain = true;
+        harness.tick();
+        assert!(harness.platform.screen_curtain, "tick must mirror the flag");
+
+        harness.a11y.screen_curtain = false;
+        harness.tick();
+        assert!(!harness.platform.screen_curtain, "tick must mirror clear");
+    }
+
+    #[test]
+    fn curtain_default_off() {
+        let app = SimpleNotesApp::new();
+        let harness = Harness::new(app);
+        assert!(
+            !harness.a11y.screen_curtain,
+            "A11yManager curtain default must be off"
+        );
     }
 }

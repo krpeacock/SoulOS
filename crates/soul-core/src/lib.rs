@@ -365,6 +365,10 @@ fn translate(input: InputEvent) -> Option<Event> {
 pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
     let mut dirty = Dirty::full();
     let mut a11y = A11yManager::new();
+    // Mirror of `a11y.screen_curtain` so we only call into the
+    // platform when the state actually changes — on e-ink the platform
+    // implementation may be expensive (e.g., switching panel modes).
+    let mut last_curtain = a11y.screen_curtain;
     {
         let now = platform.now_ms();
         let mut ctx = Ctx {
@@ -427,6 +431,15 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
                 .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                 .draw(&mut clip);
             app.draw(&mut clip, rect);
+        }
+
+        // Sync screen-curtain transitions to the platform. Apps and
+        // the host toggle the bool on `A11yManager`; we propagate it
+        // here once per frame so the platform impl only sees state
+        // changes.
+        if a11y.screen_curtain != last_curtain {
+            platform.set_screen_curtain(a11y.screen_curtain);
+            last_curtain = a11y.screen_curtain;
         }
 
         // Drain accessibility speech as structured SpeechRequests.
