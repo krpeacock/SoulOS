@@ -11,6 +11,7 @@ pub mod draw;
 pub mod egui_demo;
 pub mod launcher;
 pub mod paint;
+pub mod system_settings;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -525,6 +526,16 @@ pub struct Host {
     /// Timestamp of the last unconsumed `ButtonDown(Power)`, for
     /// long-press detection while a11y is on. Cleared on `ButtonUp`.
     power_down_ms: Option<u64>,
+    /// Persistent a11y preferences (`.soulos/system_settings.sdb`).
+    /// Loaded on `Host::new`, applied on `AppStart` and on every app
+    /// switch. Mutated whenever the user changes a setting (today:
+    /// long-press Power flips the curtain).
+    settings: system_settings::SystemSettings,
+    /// `app_id` whose override was applied to the running
+    /// [`A11yManager`]. Used to attribute writes back to the right
+    /// scope: changes inside an app override that app's settings;
+    /// changes at the home screen update the global record.
+    settings_app_id: String,
 }
 
 impl Host {
@@ -601,6 +612,10 @@ impl Host {
             last_tap: None,
             tap_count: 0,
             power_down_ms: None,
+            settings: system_settings::SystemSettings::open(
+                std::path::PathBuf::from(".soulos/system_settings.sdb"),
+            ),
+            settings_app_id: String::new(),
         }
     }
 
@@ -612,6 +627,7 @@ impl Host {
     fn launch_app(&mut self, idx: usize, ctx: &mut Ctx<'_>) {
         if idx != self.home_idx && idx < self.apps.len() {
             self.stack.push(idx);
+            self.apply_active_settings(ctx);
             self.apps[idx].handle(Event::AppStart, ctx);
             ctx.invalidate_all();
         }
@@ -628,6 +644,7 @@ impl Host {
     fn go_back(&mut self, ctx: &mut Ctx<'_>) {
         if self.stack.len() > 1 {
             self.stack.pop();
+            self.apply_active_settings(ctx);
             ctx.invalidate_all();
         }
     }
@@ -638,6 +655,7 @@ impl Host {
         if self.stack != [home] {
             self.stack.clear();
             self.stack.push(home);
+            self.apply_active_settings(ctx);
             ctx.invalidate_all();
         }
     }
@@ -945,6 +963,38 @@ impl Host {
         }
         ctx.invalidate_all();
     }
+
+    /// Apply persisted settings for the currently active app to
+    /// `ctx.a11y`. Called on `AppStart`, after every app launch /
+    /// return, and after a fresh DB load. The active `app_id` is
+    /// remembered in `self.settings_app_id` so subsequent saves go
+    /// to the right scope.
+    fn apply_active_settings(&mut self, ctx: &mut Ctx<'_>) {
+        let app_id = self.apps[self.active_idx()].app_id();
+        let effective = if app_id == HOME_APP_ID || app_id.is_empty() {
+            self.settings_app_id.clear();
+            self.settings.global()
+        } else {
+            self.settings_app_id = app_id.clone();
+            self.settings.for_app(&app_id)
+        };
+        effective.apply_to(ctx.a11y);
+    }
+
+    /// Persist the current screen-curtain state. Per-app when
+    /// `settings_app_id` is set; global otherwise. Called from the
+    /// long-press Power handler after the toggle so the change
+    /// survives across reboots.
+    fn persist_curtain(&mut self, on: bool) {
+        let mut s = system_settings::A11ySettings::default();
+        s.screen_curtain = Some(on);
+        if self.settings_app_id.is_empty() {
+            self.settings.save_global(&s);
+        } else {
+            let app_id = self.settings_app_id.clone();
+            self.settings.save_app_override(&app_id, &s);
+        }
+    }
 }
 
 impl Host {
@@ -953,6 +1003,15 @@ impl Host {
             for slot in &mut self.apps {
                 slot.persist();
             }
+            self.dispatch_event(event, ctx);
+            return;
+        }
+
+        // First-frame hook: hydrate A11yManager from persisted
+        // settings before any other handler sees `ctx.a11y`. The
+        // active app at AppStart is the home app.
+        if matches!(event, Event::AppStart) {
+            self.apply_active_settings(ctx);
             self.dispatch_event(event, ctx);
             return;
         }
@@ -975,11 +1034,13 @@ impl Host {
                 if let Some(down_ms) = self.power_down_ms.take() {
                     if ctx.now_ms.saturating_sub(down_ms) >= 500 {
                         ctx.a11y.screen_curtain = !ctx.a11y.screen_curtain;
-                        if ctx.a11y.screen_curtain {
+                        let on = ctx.a11y.screen_curtain;
+                        if on {
                             ctx.a11y.speak("Screen curtain on");
                         } else {
                             ctx.a11y.speak("Screen curtain off");
                         }
+                        self.persist_curtain(on);
                     }
                 }
                 return;
