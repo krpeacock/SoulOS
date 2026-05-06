@@ -318,6 +318,16 @@ pub trait App {
     fn a11y_nodes(&self) -> alloc::vec::Vec<a11y::A11yNode> {
         alloc::vec::Vec::new()
     }
+
+    /// Restrict focus traversal to a sub-rectangle of the screen.
+    ///
+    /// Apps drawing a modal (date picker, confirm-delete, item
+    /// chooser) return that modal's bounds so the [`a11y::FocusRing`]
+    /// can filter background nodes out of focus traversal. Apps that
+    /// have no modal — the default — return `None`.
+    fn a11y_focus_scope(&self) -> Option<Rectangle> {
+        None
+    }
 }
 
 fn translate(input: InputEvent) -> Option<Event> {
@@ -397,6 +407,18 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
             };
             app.handle(Event::Tick(now), &mut ctx);
         }
+
+        // Rebuild the focus ring once per frame from the app's current
+        // a11y tree and focus scope. The ring's signature gate makes
+        // this cheap when the tree hasn't changed shape.
+        if a11y.enabled {
+            let scope = match app.a11y_focus_scope() {
+                Some(rect) => a11y::FocusScope::Modal { rect },
+                None => a11y::FocusScope::Whole,
+            };
+            a11y.focus.rebuild(app.a11y_nodes(), scope);
+        }
+
         if let Some(rect) = dirty.take() {
             let mut clip = platform.display().clipped(&rect);
             // Clear only the dirty region to white before drawing.

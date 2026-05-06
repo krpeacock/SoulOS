@@ -515,7 +515,10 @@ pub struct Host {
 
     strip_pressed: bool,
     a11y_enabled: bool,
-    a11y_focus: Option<usize>,
+    /// Bounds of the focused node, cached for draw. Authoritative
+    /// focus state lives in `ctx.a11y.focus`; this is only the visual
+    /// snapshot since `App::draw` has no `Ctx`.
+    a11y_highlight: Option<Rectangle>,
     pen_start: Option<(i16, i16, u64)>,
     last_tap: Option<(i16, i16, u64)>,
     tap_count: u8,
@@ -590,7 +593,7 @@ impl Host {
             pending_request: None,
             strip_pressed: false,
             a11y_enabled: false,
-            a11y_focus: None,
+            a11y_highlight: None,
             pen_start: None,
             last_tap: None,
             tap_count: 0,
@@ -639,7 +642,11 @@ impl Host {
         self.apps[self.active_idx()].name()
     }
 
-    fn active_a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+    /// Combined a11y tree for the Host: active app's nodes plus the
+    /// system strip's Home/Menu buttons. Same data the [`A11yManager`]
+    /// rings over — driving `Host::a11y_nodes` and the focus ring from
+    /// one source.
+    fn build_a11y_tree(&self) -> Vec<soul_core::a11y::A11yNode> {
         use soul_core::a11y::{A11yNode, A11yRole};
         let mut nodes = self.apps[self.active_idx()].a11y_nodes();
         nodes.push(A11yNode::new(
@@ -655,32 +662,44 @@ impl Host {
         nodes
     }
 
+    /// Force an immediate rebuild of the focus ring against the current
+    /// tree, then snapshot the focused node's bounds for `draw`. Called
+    /// at the tail of every Host::handle so the highlight stays in sync
+    /// even when the inner app mutated the tree this turn.
+    fn refresh_focus_cache(&mut self, ctx: &mut Ctx<'_>) {
+        if !self.a11y_enabled {
+            self.a11y_highlight = None;
+            return;
+        }
+        let scope = soul_core::a11y::FocusScope::Whole;
+        ctx.a11y.focus.rebuild(self.build_a11y_tree(), scope);
+        self.a11y_highlight = ctx.a11y.focus.current().map(|n| n.bounds);
+    }
+
     fn speak_focused(&self, ctx: &mut Ctx<'_>) {
-        if let Some(idx) = self.a11y_focus {
-            if let Some(node) = self.active_a11y_nodes().get(idx) {
-                ctx.a11y.speak_node(node);
-            }
+        if let Some(node) = ctx.a11y.focus.current() {
+            let utterance = node.utterance();
+            ctx.a11y.speak(&utterance);
         }
     }
 
     fn activate_focused(&mut self, ctx: &mut Ctx<'_>) {
         use soul_core::a11y::A11yRole;
-        if let Some(idx) = self.a11y_focus {
-            let nodes = self.active_a11y_nodes();
-            if let Some(node) = nodes.get(idx) {
-                let center = node.bounds.center();
-                let x = center.x as i16;
-                let y = center.y as i16;
-                if node.role == A11yRole::SystemButton {
-                    if node.label == "Home" {
-                        self.go_home(ctx);
-                    } else if node.label == "Menu" {
-                        self.dispatch_event(Event::Menu, ctx);
-                    }
-                } else {
-                    self.dispatch_event(Event::PenDown { x, y }, ctx);
-                    self.dispatch_event(Event::PenUp { x, y }, ctx);
+        let target = ctx.a11y.focus.current().map(|n| {
+            (n.role.clone(), n.label.clone(), n.bounds.center())
+        });
+        if let Some((role, label, center)) = target {
+            let x = center.x as i16;
+            let y = center.y as i16;
+            if role == A11yRole::SystemButton {
+                if label == "Home" {
+                    self.go_home(ctx);
+                } else if label == "Menu" {
+                    self.dispatch_event(Event::Menu, ctx);
                 }
+            } else {
+                self.dispatch_event(Event::PenDown { x, y }, ctx);
+                self.dispatch_event(Event::PenUp { x, y }, ctx);
             }
         }
     }
@@ -903,20 +922,24 @@ impl Host {
 
     fn toggle_a11y(&mut self, ctx: &mut Ctx<'_>) {
         self.a11y_enabled = !self.a11y_enabled;
+        ctx.a11y.enabled = self.a11y_enabled;
         if self.a11y_enabled {
-            self.a11y_focus = Some(0);
+            ctx.a11y
+                .focus
+                .rebuild(self.build_a11y_tree(), soul_core::a11y::FocusScope::Whole);
+            ctx.a11y.focus.set_index(0);
             ctx.a11y.speak("Accessibility mode enabled");
             self.speak_focused(ctx);
         } else {
-            self.a11y_focus = None;
+            ctx.a11y.focus.unfocus();
             ctx.a11y.speak("Accessibility mode disabled");
         }
         ctx.invalidate_all();
     }
 }
 
-impl App for Host {
-    fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+impl Host {
+    fn handle_event(&mut self, event: Event, ctx: &mut Ctx<'_>) {
         if matches!(event, Event::AppStop) {
             for slot in &mut self.apps {
                 slot.persist();
@@ -946,17 +969,12 @@ impl App for Host {
                     let dy = y - y0;
 
                     if self.a11y_enabled && dx.abs() > 40 && dy.abs() < 40 {
-                        let nodes = self.active_a11y_nodes();
-                        if !nodes.is_empty() {
-                            let mut idx = self.a11y_focus.unwrap_or(0);
-                            if dx > 0 {
-                                idx = (idx + 1) % nodes.len();
-                            } else if idx == 0 {
-                                idx = nodes.len() - 1;
-                            } else {
-                                idx -= 1;
-                            }
-                            self.a11y_focus = Some(idx);
+                        let moved = if dx > 0 {
+                            ctx.a11y.focus.next().is_some()
+                        } else {
+                            ctx.a11y.focus.prev().is_some()
+                        };
+                        if moved {
                             self.speak_focused(ctx);
                             ctx.invalidate_all();
                         }
@@ -1019,6 +1037,21 @@ impl App for Host {
 
         self.dispatch_event(event, ctx);
     }
+}
+
+impl App for Host {
+    fn handle(&mut self, event: Event, ctx: &mut Ctx<'_>) {
+        self.handle_event(event, ctx);
+        // After every event, snapshot the focus highlight for `draw`
+        // and rebuild the ring so it tracks any tree change the inner
+        // app made this turn. The ring's signature gate makes the
+        // rebuild a no-op when the tree hasn't shifted.
+        self.refresh_focus_cache(ctx);
+    }
+
+    fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        self.build_a11y_tree()
+    }
 
     fn draw<D>(&mut self, canvas: &mut D, dirty: Rectangle)
     where
@@ -1030,22 +1063,24 @@ impl App for Host {
         draw_system_strip(canvas, &label);
 
         if self.a11y_enabled {
-            if let Some(idx) = self.a11y_focus {
-                let nodes = self.active_a11y_nodes();
-                if let Some(node) = nodes.get(idx) {
-                    let _ = node
-                        .bounds
-                        .into_styled(PrimitiveStyle::with_stroke(BLACK, 2))
-                        .draw(canvas);
-                    let inner = Rectangle::new(
-                        node.bounds.top_left + Point::new(1, 1),
-                        node.bounds.size.saturating_sub(Size::new(2, 2)),
-                    );
-                    let _ = inner
-                        .into_styled(PrimitiveStyle::with_stroke(WHITE, 1))
-                        .draw(canvas);
-                }
+            if let Some(bounds) = self.a11y_highlight {
+                let _ = bounds
+                    .into_styled(PrimitiveStyle::with_stroke(BLACK, 2))
+                    .draw(canvas);
+                let inner = Rectangle::new(
+                    bounds.top_left + Point::new(1, 1),
+                    bounds.size.saturating_sub(Size::new(2, 2)),
+                );
+                let _ = inner
+                    .into_styled(PrimitiveStyle::with_stroke(WHITE, 1))
+                    .draw(canvas);
             }
         }
+    }
+
+    fn a11y_focus_scope(&self) -> Option<Rectangle> {
+        // No modal overlays yet; the Item Chooser in Phase 5 will be
+        // the first caller to populate this.
+        None
     }
 }

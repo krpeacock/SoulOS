@@ -538,6 +538,42 @@ impl<A: soul_core::App> Harness<A> {
         self.tap(center.x as i16, center.y as i16);
     }
 
+    /// Force a focus-ring rebuild from the current app's a11y tree
+    /// and `a11y_focus_scope`. Tests use this to inspect ring state
+    /// without driving the soul-core event loop.
+    fn rebuild_focus_ring(&mut self) {
+        let scope = match self.app.a11y_focus_scope() {
+            Some(rect) => soul_core::a11y::FocusScope::Modal { rect },
+            None => soul_core::a11y::FocusScope::Whole,
+        };
+        self.a11y
+            .focus
+            .rebuild(self.app.a11y_nodes(), scope);
+    }
+
+    /// Advance focus to the next ring node (with wraparound). Returns
+    /// the new focused node, or `None` if the ring is empty.
+    pub fn focus_next(&mut self) -> Option<soul_core::a11y::A11yNode> {
+        self.a11y.enabled = true;
+        self.rebuild_focus_ring();
+        self.a11y.focus.next().cloned()
+    }
+
+    /// Move focus back one ring node (with wraparound). Returns the
+    /// new focused node, or `None` if the ring is empty.
+    pub fn focus_prev(&mut self) -> Option<soul_core::a11y::A11yNode> {
+        self.a11y.enabled = true;
+        self.rebuild_focus_ring();
+        self.a11y.focus.prev().cloned()
+    }
+
+    /// The currently focused node, or `None` when nothing is focused.
+    pub fn focused_node(&mut self) -> Option<soul_core::a11y::A11yNode> {
+        self.a11y.enabled = true;
+        self.rebuild_focus_ring();
+        self.a11y.focus.current().cloned()
+    }
+
     /// Access the application being driven by this harness.
     pub fn app(&self) -> &A {
         &self.app
@@ -1311,5 +1347,120 @@ mod tests {
         std::fs::remove_file(&golden_path).ok();
         
         println!("✅ Architecture example with settle() completed");
+    }
+
+    // ── Phase 2 focus-ring tests ──────────────────────────────────────────────
+
+    #[test]
+    fn focus_next_walks_ring_with_wraparound() {
+        use soul_core::a11y::A11yRole;
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+
+        // After rebuild the ring focuses index 0 — the heading.
+        let initial = harness.focused_node().unwrap();
+        assert_eq!(initial.label, "Notes Test");
+        assert_eq!(initial.role, A11yRole::Heading);
+
+        let next = harness.focus_next().unwrap();
+        assert_eq!(next.role, A11yRole::TextField);
+
+        // Two nodes total; next wraps back to the heading.
+        let wrap = harness.focus_next().unwrap();
+        assert_eq!(wrap.label, "Notes Test");
+    }
+
+    #[test]
+    fn focus_prev_from_initial_wraps_to_last() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+
+        // Initial focus is on the heading; prev wraps to the textbox.
+        let last = harness.focus_prev().unwrap();
+        assert!(last.label.contains("Welcome to test notes"));
+    }
+
+    #[test]
+    fn focus_preserved_when_dynamic_label_changes_elsewhere() {
+        // Heading label is stable; text content changes. Focus on the
+        // heading and then mutate the text — focus must stay on the
+        // heading even though the tree was rebuilt with a new
+        // TextField label.
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+        let initial = harness.focused_node().unwrap();
+        assert_eq!(initial.label, "Notes Test");
+
+        harness.type_text(" — edited");
+        harness.tick();
+
+        let still = harness.focused_node().unwrap();
+        assert_eq!(still.label, "Notes Test");
+    }
+
+    /// Test fixture exposing four nodes: two inside a 100×80 modal
+    /// rectangle and two outside. Used to verify [`FocusScope::Modal`]
+    /// keeps focus traversal contained.
+    struct ModalApp;
+
+    impl App for ModalApp {
+        fn handle(&mut self, _event: Event, _ctx: &mut Ctx<'_>) {}
+        fn draw<D>(&mut self, _canvas: &mut D, _dirty: Rectangle)
+        where
+            D: DrawTarget<Color = Gray8>,
+        {
+        }
+        fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+            use soul_core::a11y::{A11yNode, A11yRole};
+            vec![
+                A11yNode::new(
+                    Rectangle::new(Point::new(0, 0), Size::new(40, 40)),
+                    "Background-A",
+                    A11yRole::Button,
+                ),
+                A11yNode::new(
+                    Rectangle::new(Point::new(60, 60), Size::new(40, 40)),
+                    "Modal-A",
+                    A11yRole::Button,
+                ),
+                A11yNode::new(
+                    Rectangle::new(Point::new(110, 80), Size::new(20, 20)),
+                    "Modal-B",
+                    A11yRole::Button,
+                ),
+                A11yNode::new(
+                    Rectangle::new(Point::new(200, 200), Size::new(20, 20)),
+                    "Background-B",
+                    A11yRole::Button,
+                ),
+            ]
+        }
+        fn a11y_focus_scope(&self) -> Option<Rectangle> {
+            Some(Rectangle::new(Point::new(50, 50), Size::new(100, 80)))
+        }
+    }
+
+    #[test]
+    fn modal_scope_keeps_focus_inside_modal_rect() {
+        let mut harness = Harness::new(ModalApp);
+        harness.tick();
+
+        // Initial focus lands on the first node inside the modal.
+        let first = harness.focused_node().unwrap();
+        assert_eq!(first.label, "Modal-A");
+
+        // next() cycles to the second modal node, then wraps back to
+        // the first — never to a Background node.
+        let second = harness.focus_next().unwrap();
+        assert_eq!(second.label, "Modal-B");
+        let wrap = harness.focus_next().unwrap();
+        assert_eq!(wrap.label, "Modal-A");
+
+        // prev() also stays inside the scope.
+        let back = harness.focus_prev().unwrap();
+        assert_eq!(back.label, "Modal-B");
     }
 }
