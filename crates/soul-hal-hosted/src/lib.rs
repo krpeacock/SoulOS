@@ -180,6 +180,16 @@ pub struct HostedPlatform {
     /// Set true on the first call to a missing TTS engine (e.g. `espeak-ng`
     /// not on PATH) so we log a single warning instead of one per utterance.
     tts_warned: bool,
+    /// Screen-curtain state. When `true`, [`flush`] pushes a fully black
+    /// frame to minifb regardless of what the logical framebuffer holds —
+    /// the user sees black while apps keep drawing underneath. On real
+    /// e-ink hardware the equivalent implementation would suppress panel
+    /// writes entirely, saving the 300–900 ms refresh flash on every
+    /// focus step.
+    screen_curtain: bool,
+    /// Reusable all-black frame buffer used while [`screen_curtain`] is
+    /// on. Sized once at construction; never reallocated.
+    curtain_buf: Vec<u32>,
 }
 
 impl HostedPlatform {
@@ -209,6 +219,8 @@ impl HostedPlatform {
             prev_keys: Vec::new(),
             tts_child: None,
             tts_warned: false,
+            screen_curtain: false,
+            curtain_buf: vec![0u32; phys_w * phys_h],
         }
     }
 
@@ -324,12 +336,21 @@ impl Platform for HostedPlatform {
     fn flush(&mut self) {
         let pw = self.display.phys_width() as usize;
         let ph = self.display.phys_height() as usize;
-        let _ = self.window.update_with_buffer(&self.display.buffer, pw, ph);
+        let buf = if self.screen_curtain {
+            &self.curtain_buf
+        } else {
+            &self.display.buffer
+        };
+        let _ = self.window.update_with_buffer(buf, pw, ph);
         self.pump();
     }
 
     fn sleep_ms(&mut self, ms: u32) {
         std::thread::sleep(Duration::from_millis(ms as u64));
+    }
+
+    fn set_screen_curtain(&mut self, on: bool) {
+        self.screen_curtain = on;
     }
 
     fn speak(&mut self, req: SpeechRequest<'_>) {

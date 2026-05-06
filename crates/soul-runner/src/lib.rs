@@ -522,6 +522,9 @@ pub struct Host {
     pen_start: Option<(i16, i16, u64)>,
     last_tap: Option<(i16, i16, u64)>,
     tap_count: u8,
+    /// Timestamp of the last unconsumed `ButtonDown(Power)`, for
+    /// long-press detection while a11y is on. Cleared on `ButtonUp`.
+    power_down_ms: Option<u64>,
 }
 
 impl Host {
@@ -597,6 +600,7 @@ impl Host {
             pen_start: None,
             last_tap: None,
             tap_count: 0,
+            power_down_ms: None,
         }
     }
 
@@ -932,6 +936,9 @@ impl Host {
             self.speak_focused(ctx);
         } else {
             ctx.a11y.focus.unfocus();
+            // Turn off the curtain on a11y exit so a user can never
+            // strand themselves looking at a black screen.
+            ctx.a11y.screen_curtain = false;
             ctx.a11y.speak("Accessibility mode disabled");
         }
         ctx.invalidate_all();
@@ -951,6 +958,30 @@ impl Host {
         if matches!(event, Event::Key(KeyCode::Tab)) {
             self.toggle_a11y(ctx);
             return;
+        }
+
+        // Long-press Power toggles the screen curtain while a11y is on.
+        // 500 ms is a comfortable hold without triggering on accidental
+        // brushes. The runtime mirrors `ctx.a11y.screen_curtain` to the
+        // platform once per frame.
+        if self.a11y_enabled {
+            if matches!(event, Event::ButtonDown(HardButton::Power)) {
+                self.power_down_ms = Some(ctx.now_ms);
+                return;
+            }
+            if matches!(event, Event::ButtonUp(HardButton::Power)) {
+                if let Some(down_ms) = self.power_down_ms.take() {
+                    if ctx.now_ms.saturating_sub(down_ms) >= 500 {
+                        ctx.a11y.screen_curtain = !ctx.a11y.screen_curtain;
+                        if ctx.a11y.screen_curtain {
+                            ctx.a11y.speak("Screen curtain on");
+                        } else {
+                            ctx.a11y.speak("Screen curtain off");
+                        }
+                    }
+                }
+                return;
+            }
         }
 
         match event {
