@@ -13,6 +13,7 @@ fn make_button(id: &str, x: i32, y: i32, interactions: Vec<Interaction>) -> Comp
         a11y: A11yHints {
             label: id.into(),
             role: "button".into(),
+            hint: None,
         },
         interactions,
         binding: None,

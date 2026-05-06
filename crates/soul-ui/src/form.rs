@@ -26,6 +26,11 @@ impl Rect {
 pub struct A11yHints {
     pub label: String,
     pub role: String,
+    /// Optional descriptive hint spoken at [`Verbosity::High`].
+    /// Empty / missing in JSON falls through as `None` on the
+    /// resulting [`A11yNode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +322,11 @@ impl Form {
                         node = node.with_value(value);
                     }
                 }
+                if let Some(hint) = &c.a11y.hint {
+                    if !hint.is_empty() {
+                        node = node.with_hint(hint.clone());
+                    }
+                }
                 node
             })
             .collect()
@@ -379,6 +389,7 @@ mod tests {
             a11y: A11yHints {
                 label: label.into(),
                 role: role.into(),
+                hint: None,
             },
             interactions: Vec::new(),
             binding: None,
@@ -447,5 +458,50 @@ mod tests {
         };
         let nodes = form.a11y_nodes();
         assert_eq!(nodes[0].role, A11yRole::Custom("toolbar".into()));
+    }
+
+    #[test]
+    fn hint_in_a11y_hints_threads_through_to_a11y_node() {
+        let mut c = comp("save", ComponentType::Button, "button", "Save");
+        c.a11y.hint = Some("Persists the current draft".into());
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert_eq!(
+            nodes[0].hint.as_deref(),
+            Some("Persists the current draft")
+        );
+    }
+
+    #[test]
+    fn empty_hint_string_does_not_set_node_hint() {
+        let mut c = comp("save", ComponentType::Button, "button", "Save");
+        c.a11y.hint = Some(String::new());
+        let form = Form {
+            name: "f".into(),
+            components: vec![c],
+        };
+        let nodes = form.a11y_nodes();
+        assert!(nodes[0].hint.is_none());
+    }
+
+    #[test]
+    fn json_form_round_trips_with_optional_hint() {
+        // Backward-compat: forms saved before hint existed must still
+        // deserialize cleanly because A11yHints.hint defaults to None.
+        let json = r#"{
+            "name": "x",
+            "components": [{
+                "id": "save",
+                "type_": "Button",
+                "bounds": { "x": 0, "y": 0, "w": 10, "h": 10 },
+                "properties": {},
+                "a11y": { "label": "Save", "role": "button" }
+            }]
+        }"#;
+        let form: Form = serde_json::from_str(json).expect("legacy JSON must parse");
+        assert!(form.components[0].a11y.hint.is_none());
     }
 }

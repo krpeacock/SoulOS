@@ -681,9 +681,11 @@ impl Host {
     }
 
     fn speak_focused(&self, ctx: &mut Ctx<'_>) {
-        if let Some(node) = ctx.a11y.focus.current() {
-            let utterance = node.utterance();
-            ctx.a11y.speak(&utterance);
+        // Snapshot what we need from `focus` so the borrow on
+        // `ctx.a11y` is released before we call `speak_node`.
+        let node = ctx.a11y.focus.current().cloned();
+        if let Some(node) = node {
+            ctx.a11y.speak_node(&node);
         }
     }
 
