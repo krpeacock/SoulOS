@@ -1031,6 +1031,7 @@ impl Draw {
                 a11y: A11yHints {
                     label: format!("{label} tool"),
                     role: "button".into(),
+                    hint: None,
                 },
                 interactions: Vec::new(),
                 binding: None,
@@ -1052,6 +1053,7 @@ impl Draw {
                 a11y: A11yHints {
                     label: lbl.to_string(),
                     role: "button".into(),
+                    hint: None,
                 },
                 interactions: Vec::new(),
                 binding: None,
@@ -1069,6 +1071,7 @@ impl Draw {
                 a11y: A11yHints {
                     label: format!("Gray level {}", i),
                     role: "button".into(),
+                    hint: None,
                 },
                 interactions: Vec::new(),
                 binding: None,

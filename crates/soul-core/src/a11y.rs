@@ -131,6 +131,11 @@ pub struct A11yNode {
     pub role: A11yRole,
     pub state: A11yState,
     pub value: Option<String>,
+    /// Optional descriptive hint, spoken at [`Verbosity::High`] and
+    /// suppressed at lower verbosities. Use for behavior that isn't
+    /// obvious from `label` + `role` alone — e.g., "Toggle whether
+    /// saves are announced" on a checkbox.
+    pub hint: Option<String>,
 }
 
 impl A11yNode {
@@ -143,6 +148,7 @@ impl A11yNode {
             role,
             state: A11yState::default(),
             value: None,
+            hint: None,
         }
     }
 
@@ -158,13 +164,40 @@ impl A11yNode {
         self
     }
 
-    /// Compose the canonical screen-reader utterance: `label, role[,
-    /// state][: value]`. State terms are included only when
-    /// non-default; the value is appended after a colon when present.
+    /// Builder: attach a descriptive hint spoken at [`Verbosity::High`].
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
+    /// Compose the canonical screen-reader utterance at
+    /// [`Verbosity::Medium`]. Equivalent to
+    /// `self.utterance_with_verbosity(Verbosity::Medium)`.
     pub fn utterance(&self) -> String {
+        self.utterance_with_verbosity(Verbosity::Medium)
+    }
+
+    /// Compose a screen-reader utterance at the requested verbosity.
+    ///
+    /// - [`Verbosity::Low`]: `label` only — the fastest mode for
+    ///   experienced users who already know the layout. State is
+    ///   skipped entirely; value is included only when omitting it
+    ///   would be misleading (e.g., a slider would speak just its
+    ///   name with no number).
+    /// - [`Verbosity::Medium`]: `label, role, state: value` — the
+    ///   default. The role is included unless it would be redundant
+    ///   ([`A11yRole::Label`]).
+    /// - [`Verbosity::High`]: medium plus the optional `hint`,
+    ///   appended after a period. Useful when learning a new app.
+    pub fn utterance_with_verbosity(&self, v: Verbosity) -> String {
+        if matches!(v, Verbosity::Low) {
+            return self.label.clone();
+        }
+
         let mut out = self.label.clone();
         let role_str = self.role.as_str();
-        if !role_str.is_empty() {
+        let include_role = !matches!(self.role, A11yRole::Label) && !role_str.is_empty();
+        if include_role {
             let _ = write!(out, ", {role_str}");
         }
         if let Some(true) = self.state.checked {
@@ -183,13 +216,36 @@ impl A11yNode {
         } else if let Some(false) = self.state.expanded {
             let _ = write!(out, ", collapsed");
         }
-        if let Some(v) = &self.value {
-            if !v.is_empty() {
-                let _ = write!(out, ": {v}");
+        if let Some(value) = &self.value {
+            if !value.is_empty() {
+                let _ = write!(out, ": {value}");
+            }
+        }
+        if matches!(v, Verbosity::High) {
+            if let Some(hint) = &self.hint {
+                if !hint.is_empty() {
+                    let _ = write!(out, ". {hint}");
+                }
             }
         }
         out
     }
+}
+
+/// How much detail the screen reader includes when announcing a node.
+///
+/// Default is [`Verbosity::Medium`], which matches the prior behavior
+/// — name + role + state + value. Phase 4 will let users persist a
+/// preference per app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verbosity {
+    /// Label only — fastest, for users who know the layout.
+    Low,
+    /// Label + role + state + value — the default.
+    #[default]
+    Medium,
+    /// Medium plus the node's optional `hint` — useful when learning.
+    High,
 }
 
 impl fmt::Display for A11yRole {
@@ -412,8 +468,9 @@ fn compute_signature(nodes: &[A11yNode], scope: &FocusScope) -> u64 {
 
 /// Manages the accessibility state, including the focus ring, the
 /// screen reader's pending speech queue, and global TTS preferences
-/// (rate, punctuation). Phase 4 will hydrate `rate_wpm`,
-/// `punctuation`, and `screen_curtain` from per-app settings.
+/// (rate, punctuation, verbosity). Phase 4 will hydrate `rate_wpm`,
+/// `punctuation`, `verbosity`, and `screen_curtain` from per-app
+/// settings.
 pub struct A11yManager {
     pub enabled: bool,
     pub focus: FocusRing,
@@ -423,6 +480,10 @@ pub struct A11yManager {
     pub rate_wpm: u16,
     /// Punctuation verbosity for the screen reader.
     pub punctuation: soul_hal::Punctuation,
+    /// How much detail the screen reader includes when announcing a
+    /// node — name only, name + role + state + value (default), or
+    /// medium plus the node's optional `hint`.
+    pub verbosity: Verbosity,
     /// Screen-curtain state. When `true`, the runtime asks the
     /// [`soul_hal::Platform`] to blank or otherwise suppress display
     /// output. The big win is on e-ink: no panel writes means no
@@ -439,6 +500,7 @@ impl Default for A11yManager {
             pending_speech: Vec::new(),
             rate_wpm: soul_hal::SpeechRequest::DEFAULT_RATE_WPM,
             punctuation: soul_hal::Punctuation::Some,
+            verbosity: Verbosity::Medium,
             screen_curtain: false,
         }
     }
@@ -455,9 +517,11 @@ impl A11yManager {
         self.pending_speech.push(text.to_string());
     }
 
-    /// Queue the canonical utterance for `node`.
+    /// Queue the canonical utterance for `node`, composed at the
+    /// manager's current [`Verbosity`].
     pub fn speak_node(&mut self, node: &A11yNode) {
-        self.pending_speech.push(node.utterance());
+        self.pending_speech
+            .push(node.utterance_with_verbosity(self.verbosity));
     }
 }
 
@@ -534,6 +598,93 @@ mod tests {
             label,
             role,
         )
+    }
+
+    // ── Verbosity composition ───────────────────────────────────────────────
+
+    #[test]
+    fn verbosity_low_speaks_label_only() {
+        let n = A11yNode::new(rect(), "Notify", A11yRole::Checkbox)
+            .with_state(A11yState::checked(true))
+            .with_value("70%")
+            .with_hint("Toggle whether saves are announced");
+        assert_eq!(n.utterance_with_verbosity(Verbosity::Low), "Notify");
+    }
+
+    #[test]
+    fn verbosity_medium_includes_role_state_value_but_not_hint() {
+        let n = A11yNode::new(rect(), "Notify", A11yRole::Checkbox)
+            .with_state(A11yState::checked(true))
+            .with_hint("Toggle whether saves are announced");
+        assert_eq!(
+            n.utterance_with_verbosity(Verbosity::Medium),
+            "Notify, checkbox, checked"
+        );
+    }
+
+    #[test]
+    fn verbosity_high_appends_hint_after_period() {
+        let n = A11yNode::new(rect(), "Notify", A11yRole::Checkbox)
+            .with_state(A11yState::checked(true))
+            .with_hint("Toggle whether saves are announced");
+        assert_eq!(
+            n.utterance_with_verbosity(Verbosity::High),
+            "Notify, checkbox, checked. Toggle whether saves are announced"
+        );
+    }
+
+    #[test]
+    fn verbosity_medium_skips_role_for_label() {
+        // A Label node speaks its name without "label" appended —
+        // the role would be redundant noise.
+        let n = A11yNode::new(rect(), "Hello", A11yRole::Label).with_value("World");
+        assert_eq!(
+            n.utterance_with_verbosity(Verbosity::Medium),
+            "Hello: World"
+        );
+    }
+
+    #[test]
+    fn verbosity_high_with_no_hint_matches_medium() {
+        let n = A11yNode::new(rect(), "Save", A11yRole::Button);
+        assert_eq!(
+            n.utterance_with_verbosity(Verbosity::High),
+            n.utterance_with_verbosity(Verbosity::Medium),
+        );
+    }
+
+    #[test]
+    fn utterance_default_is_medium() {
+        let n = A11yNode::new(rect(), "Save", A11yRole::Button)
+            .with_hint("Hint that should not appear");
+        assert_eq!(n.utterance(), n.utterance_with_verbosity(Verbosity::Medium));
+        assert!(!n.utterance().contains("Hint"));
+    }
+
+    #[test]
+    fn manager_speak_node_honors_verbosity() {
+        let mut m = A11yManager::new();
+        let n = A11yNode::new(rect(), "Notify", A11yRole::Checkbox)
+            .with_state(A11yState::checked(false))
+            .with_hint("Description");
+
+        m.verbosity = Verbosity::Low;
+        m.speak_node(&n);
+        assert_eq!(m.pending_speech.last().unwrap(), "Notify");
+
+        m.verbosity = Verbosity::Medium;
+        m.speak_node(&n);
+        assert_eq!(
+            m.pending_speech.last().unwrap(),
+            "Notify, checkbox, unchecked"
+        );
+
+        m.verbosity = Verbosity::High;
+        m.speak_node(&n);
+        assert_eq!(
+            m.pending_speech.last().unwrap(),
+            "Notify, checkbox, unchecked. Description"
+        );
     }
 
     #[test]

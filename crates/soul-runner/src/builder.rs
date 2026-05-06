@@ -458,6 +458,7 @@ impl MobileBuilder {
             a11y: A11yHints {
                 label: id,
                 role: "widget".into(),
+                hint: None,
             },
             interactions: Vec::new(),
             binding: None,
