@@ -187,6 +187,7 @@ impl HostedPlatform {
             phys_h,
             WindowOptions {
                 scale: Scale::X1,
+                resize: true,
                 ..Default::default()
             },
         )
