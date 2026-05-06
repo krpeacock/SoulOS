@@ -18,7 +18,7 @@ use embedded_graphics::{
     pixelcolor::Gray8,
     prelude::*,
 };
-use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
+use soul_hal::{HardButton, InputEvent, KeyCode, Platform, SpeechRequest};
 use wasm_bindgen::{prelude::*, Clamped, JsCast};
 use web_sys::{
     AddEventListenerOptions, CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement,
@@ -249,10 +249,21 @@ impl Platform for WebPlatform {
         // lib.rs is the throttle.
     }
 
-    fn speak(&mut self, _text: &str) {
-        // Speech synthesis is intentionally unimplemented for the
-        // initial web build. Plumb to `SpeechSynthesisUtterance` once
-        // a11y on the web becomes a goal.
+    fn speak(&mut self, req: SpeechRequest<'_>) {
+        let Some(window) = web_sys::window() else { return };
+        let Ok(synth) = window.speech_synthesis() else { return };
+        if req.interrupt {
+            synth.cancel();
+        }
+        let utterance = match web_sys::SpeechSynthesisUtterance::new_with_text(req.text) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        // Web Speech rate is a multiplier where 1.0 == default. Map our
+        // wpm to a multiplier centered on DEFAULT_RATE_WPM.
+        let multiplier = (req.rate_wpm as f32) / (SpeechRequest::DEFAULT_RATE_WPM as f32);
+        utterance.set_rate(multiplier.clamp(0.1, 10.0));
+        synth.speak(&utterance);
     }
 }
 

@@ -429,9 +429,22 @@ pub fn run<P: Platform, A: App>(platform: &mut P, mut app: A) {
             app.draw(&mut clip, rect);
         }
 
-        // Drain accessibility speech
+        // Drain accessibility speech as structured SpeechRequests.
+        // Every utterance interrupts whatever the platform was saying
+        // — when the user navigates to a new node mid-sentence, they
+        // expect the new node's announcement to start immediately,
+        // not queue behind the previous one. This bounds the HAL-level
+        // queue depth at one and keeps the SR responsive when focus
+        // advances rapidly.
+        let rate = a11y.rate_wpm;
+        let punctuation = a11y.punctuation;
         for text in a11y.pending_speech.drain(..) {
-            platform.speak(&text);
+            platform.speak(soul_hal::SpeechRequest {
+                text: &text,
+                rate_wpm: rate,
+                interrupt: true,
+                punctuation,
+            });
         }
 
         // Flush (present frame + pump new events into the HAL queue).

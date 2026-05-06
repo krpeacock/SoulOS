@@ -410,13 +410,32 @@ fn compute_signature(nodes: &[A11yNode], scope: &FocusScope) -> u64 {
     hash
 }
 
-/// Manages the accessibility state, including the focus ring and the
-/// screen reader's pending speech queue.
-#[derive(Default)]
+/// Manages the accessibility state, including the focus ring, the
+/// screen reader's pending speech queue, and global TTS preferences
+/// (rate, punctuation). Phase 4 will hydrate `rate_wpm` and
+/// `punctuation` from per-app settings; Phase 3a uses them with their
+/// defaults.
 pub struct A11yManager {
     pub enabled: bool,
     pub focus: FocusRing,
     pub pending_speech: Vec<String>,
+    /// Words-per-minute for the screen reader. Default
+    /// [`soul_hal::SpeechRequest::DEFAULT_RATE_WPM`].
+    pub rate_wpm: u16,
+    /// Punctuation verbosity for the screen reader.
+    pub punctuation: soul_hal::Punctuation,
+}
+
+impl Default for A11yManager {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            focus: FocusRing::new(),
+            pending_speech: Vec::new(),
+            rate_wpm: soul_hal::SpeechRequest::DEFAULT_RATE_WPM,
+            punctuation: soul_hal::Punctuation::Some,
+        }
+    }
 }
 
 impl A11yManager {

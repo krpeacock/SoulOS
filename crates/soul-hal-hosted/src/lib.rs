@@ -13,7 +13,7 @@ use embedded_graphics::{
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 // KeyRepeat::No is used in pump() to guarantee single-fire per keypress.
-use soul_hal::{HardButton, InputEvent, KeyCode, Platform};
+use soul_hal::{HardButton, InputEvent, KeyCode, Platform, SpeechRequest};
 
 pub mod harness;
 
@@ -174,6 +174,12 @@ pub struct HostedPlatform {
     prev_mouse_pos: Option<(f32, f32)>,
     /// Keys held on the previous pump — used to generate ButtonDown/Up events.
     prev_keys: Vec<Key>,
+    /// Currently speaking TTS subprocess. Killed on a new request with
+    /// `interrupt: true` so navigation never falls behind.
+    tts_child: Option<std::process::Child>,
+    /// Set true on the first call to a missing TTS engine (e.g. `espeak-ng`
+    /// not on PATH) so we log a single warning instead of one per utterance.
+    tts_warned: bool,
 }
 
 impl HostedPlatform {
@@ -200,6 +206,8 @@ impl HostedPlatform {
             prev_mouse_down: false,
             prev_mouse_pos: None,
             prev_keys: Vec::new(),
+            tts_child: None,
+            tts_warned: false,
         }
     }
 
@@ -323,15 +331,68 @@ impl Platform for HostedPlatform {
         std::thread::sleep(Duration::from_millis(ms as u64));
     }
 
-    fn speak(&mut self, text: &str) {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("say").arg(text).spawn();
+    fn speak(&mut self, req: SpeechRequest<'_>) {
+        // Reap any zombie from the previous utterance, regardless of
+        // whether we'll interrupt it.
+        if let Some(mut prev) = self.tts_child.take() {
+            let still_running = matches!(prev.try_wait(), Ok(None));
+            if still_running && req.interrupt {
+                let _ = prev.kill();
+                let _ = prev.wait();
+            } else if still_running {
+                // Caller didn't ask to interrupt; put it back.
+                self.tts_child = Some(prev);
+                return;
+            }
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            println!("[TTS]: {}", text);
+
+        let mut command = build_tts_command(req.rate_wpm, req.text);
+        match command.as_mut().map(|c| c.spawn()) {
+            Some(Ok(child)) => self.tts_child = Some(child),
+            Some(Err(e)) => {
+                if !self.tts_warned {
+                    self.tts_warned = true;
+                    eprintln!(
+                        "[TTS] failed to launch engine: {e}. Speech output disabled. \
+                         Install `espeak-ng` (Linux) or run on macOS for native TTS."
+                    );
+                }
+                println!("[TTS]: {}", req.text);
+            }
+            None => {
+                if !self.tts_warned {
+                    self.tts_warned = true;
+                    eprintln!(
+                        "[TTS] no TTS engine configured for this platform. Speech \
+                         output disabled. Install `espeak-ng` and add it to PATH."
+                    );
+                }
+                println!("[TTS]: {}", req.text);
+            }
         }
+    }
+}
+
+/// Build the OS-specific TTS subprocess command, or `None` when the
+/// platform has no supported engine.
+fn build_tts_command(rate_wpm: u16, text: &str) -> Option<std::process::Command> {
+    let rate = rate_wpm.clamp(80, 400);
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("say");
+        cmd.arg("-r").arg(rate.to_string()).arg(text);
+        return Some(cmd);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = std::process::Command::new("espeak-ng");
+        cmd.arg("-s").arg(rate.to_string()).arg("--").arg(text);
+        return Some(cmd);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (rate, text);
+        None
     }
 }
 

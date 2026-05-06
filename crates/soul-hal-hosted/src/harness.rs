@@ -56,13 +56,26 @@ impl VirtualClock {
     }
 }
 
+/// One captured TTS request — owned snapshot of [`soul_hal::SpeechRequest`]
+/// suitable for after-the-fact assertions in tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeechLogEntry {
+    pub text: String,
+    pub rate_wpm: u16,
+    pub interrupt: bool,
+    pub punctuation: soul_hal::Punctuation,
+}
+
 /// A `Platform` with no window. Same framebuffer type as `HostedPlatform`,
 /// but: no minifb, virtual clock, no-op flush, speech captured to a `Vec`.
 pub struct HeadlessPlatform {
     pub display: MiniFbDisplay,
     pub pending: VecDeque<InputEvent>,
     pub clock: VirtualClock,
-    pub speech_log: Vec<String>,
+    pub speech_log: Vec<SpeechLogEntry>,
+    /// Curtain state (Phase 3b will exercise this; Phase 3a just
+    /// records the request).
+    pub screen_curtain: bool,
 }
 
 impl HeadlessPlatform {
@@ -72,6 +85,7 @@ impl HeadlessPlatform {
             pending: VecDeque::new(),
             clock: VirtualClock::new(),
             speech_log: Vec::new(),
+            screen_curtain: false,
         }
     }
 }
@@ -97,8 +111,17 @@ impl Platform for HeadlessPlatform {
         self.clock.advance(ms as u64);
     }
 
-    fn speak(&mut self, text: &str) {
-        self.speech_log.push(text.to_string());
+    fn speak(&mut self, req: soul_hal::SpeechRequest<'_>) {
+        self.speech_log.push(SpeechLogEntry {
+            text: req.text.to_string(),
+            rate_wpm: req.rate_wpm,
+            interrupt: req.interrupt,
+            punctuation: req.punctuation,
+        });
+    }
+
+    fn set_screen_curtain(&mut self, on: bool) {
+        self.screen_curtain = on;
     }
 }
 
@@ -180,9 +203,18 @@ impl<A: soul_core::App> Harness<A> {
             self.app.draw(&mut clip, rect);
         }
         
-        // Drain accessibility speech
+        // Drain accessibility speech as structured SpeechRequests so
+        // harness assertions see the same rate/interrupt fields the
+        // production soul-core drain produces.
+        let rate = self.a11y.rate_wpm;
+        let punctuation = self.a11y.punctuation;
         for text in self.a11y.pending_speech.drain(..) {
-            self.platform.speak(&text);
+            self.platform.speak(soul_hal::SpeechRequest {
+                text: &text,
+                rate_wpm: rate,
+                interrupt: true,
+                punctuation,
+            });
         }
         
         // Advance virtual clock by 16ms (like the real event loop)
@@ -333,9 +365,18 @@ impl<A: soul_core::App> Harness<A> {
             false // No drawing
         };
         
-        // Drain accessibility speech
+        // Drain accessibility speech as structured SpeechRequests so
+        // harness assertions see the same rate/interrupt fields the
+        // production soul-core drain produces.
+        let rate = self.a11y.rate_wpm;
+        let punctuation = self.a11y.punctuation;
         for text in self.a11y.pending_speech.drain(..) {
-            self.platform.speak(&text);
+            self.platform.speak(soul_hal::SpeechRequest {
+                text: &text,
+                rate_wpm: rate,
+                interrupt: true,
+                punctuation,
+            });
         }
         
         // Advance virtual clock by 16ms (like the real event loop)
@@ -349,9 +390,21 @@ impl<A: soul_core::App> Harness<A> {
         &self.platform.display
     }
 
-    /// Get the recorded speech log for accessibility testing.
-    pub fn speech_log(&self) -> &[String] {
+    /// Get the recorded speech log for accessibility testing — full
+    /// [`SpeechLogEntry`] snapshots including rate, interrupt, and
+    /// punctuation. Use [`Harness::speech_text`] for the text-only
+    /// view.
+    pub fn speech_log(&self) -> &[SpeechLogEntry] {
         &self.platform.speech_log
+    }
+
+    /// Convenience accessor: just the spoken strings, in order.
+    pub fn speech_text(&self) -> Vec<String> {
+        self.platform
+            .speech_log
+            .iter()
+            .map(|e| e.text.clone())
+            .collect()
     }
 
     /// Get a single pixel's grayscale value at the given logical coordinates.
@@ -755,10 +808,14 @@ mod tests {
 
     #[test]
     fn headless_platform_records_speech() {
+        use soul_hal::SpeechRequest;
         let mut p = HeadlessPlatform::new(240, 320);
-        p.speak("hello");
-        p.speak("world");
-        assert_eq!(p.speech_log, vec!["hello".to_string(), "world".to_string()]);
+        p.speak(SpeechRequest::new("hello"));
+        p.speak(SpeechRequest::new("world").with_rate_wpm(240));
+        let texts: Vec<&str> = p.speech_log.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["hello", "world"]);
+        assert_eq!(p.speech_log[1].rate_wpm, 240);
+        assert!(p.speech_log[0].interrupt);
     }
 
     #[test]
@@ -1462,5 +1519,71 @@ mod tests {
         // prev() also stays inside the scope.
         let back = harness.focus_prev().unwrap();
         assert_eq!(back.label, "Modal-B");
+    }
+
+    // ── Phase 3a tests: speech pipeline ──────────────────────────────────────
+
+    #[test]
+    fn speech_log_carries_rate_from_a11y_manager() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+        harness.a11y.rate_wpm = 240;
+        harness.a11y.speak("hello world");
+        harness.tick();
+
+        let log = harness.speech_log();
+        assert!(!log.is_empty());
+        assert!(log.iter().all(|e| e.rate_wpm == 240));
+    }
+
+    #[test]
+    fn speech_log_marks_every_utterance_interrupting() {
+        // Acceptance criterion: rapid focus advances queue speech
+        // requests that all carry `interrupt: true` so the screen
+        // reader never falls behind. We don't directly measure HAL
+        // queue depth here — that's a property of the platform impl
+        // — but we verify the requests soul-core's drain produces.
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+
+        for _ in 0..5 {
+            harness.focus_next();
+            harness.a11y.speak("focus moved");
+        }
+        harness.tick();
+
+        let log = harness.speech_log();
+        assert!(
+            log.len() >= 5,
+            "expected at least 5 captured utterances, got {}",
+            log.len()
+        );
+        assert!(log.iter().all(|e| e.interrupt), "every utterance must interrupt");
+    }
+
+    #[test]
+    fn speech_log_default_punctuation_is_some() {
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+        harness.a11y.speak("hello");
+        harness.tick();
+
+        let log = harness.speech_log();
+        assert!(log.iter().all(|e| e.punctuation == soul_hal::Punctuation::Some));
+    }
+
+    #[test]
+    fn screen_curtain_records_state() {
+        // Phase 3b will add a Host-level toggle; Phase 3a just verifies
+        // the headless platform records the call so 3b can build on it.
+        let app = SimpleNotesApp::new();
+        let mut harness = Harness::new(app);
+        harness.tick();
+        assert!(!harness.platform.screen_curtain);
+        harness.platform.set_screen_curtain(true);
+        assert!(harness.platform.screen_curtain);
     }
 }

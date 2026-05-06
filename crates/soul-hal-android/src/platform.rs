@@ -17,7 +17,7 @@ use ndk::native_window::NativeWindow;
 use raw_window_handle::{
     AndroidDisplayHandle, DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle,
 };
-use soul_hal::{HardButton, KeyCode, Platform};
+use soul_hal::{HardButton, KeyCode, Platform, SpeechRequest};
 
 /// Empty stand-in for an Android display handle.
 ///
@@ -370,10 +370,17 @@ impl Platform for AndroidPlatform {
         std::thread::sleep(std::time::Duration::from_millis(ms as u64));
     }
 
-    fn speak(&mut self, text: &str) {
-        // TTS over the JNI bridge is significant scope; log for now so the
-        // accessibility code path still drains its queue without leaking.
-        log::info!("[TTS] {text}");
+    fn speak(&mut self, req: SpeechRequest<'_>) {
+        // TTS over the JNI bridge is significant scope; log for now so
+        // the accessibility code path still drains its queue without
+        // leaking. Phase 3a still records rate + interrupt so the
+        // future JNI integration can preserve them.
+        log::info!(
+            "[TTS rate={} interrupt={}] {}",
+            req.rate_wpm,
+            req.interrupt,
+            req.text
+        );
     }
 }
 
