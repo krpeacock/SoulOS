@@ -150,8 +150,15 @@ fn run_frame(s: &mut RunState) {
     }
 
     // Drain accessibility speech, then present.
+    let rate = s.a11y.rate_wpm;
+    let punctuation = s.a11y.punctuation;
     for text in s.a11y.pending_speech.drain(..) {
-        s.platform.speak(&text);
+        s.platform.speak(soul_hal::SpeechRequest {
+            text: &text,
+            rate_wpm: rate,
+            interrupt: true,
+            punctuation,
+        });
     }
     s.platform.flush();
 }

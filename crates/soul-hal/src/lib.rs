@@ -76,8 +76,93 @@ pub trait Platform {
     /// this is typically a WFI / low-power wait.
     fn sleep_ms(&mut self, ms: u32);
 
-    /// Speak text using the platform's text-to-speech system.
-    fn speak(&mut self, text: &str);
+    /// Speak a structured TTS request.
+    ///
+    /// Implementations are expected to honor `interrupt`: when `true`
+    /// the platform must stop any utterance currently in flight before
+    /// starting this one, so a screen reader user advancing focus
+    /// rapidly never falls behind. Implementations that cannot
+    /// natively interrupt should still drop the request rather than
+    /// queue it.
+    fn speak(&mut self, req: SpeechRequest<'_>);
+
+    /// Show or hide the screen curtain.
+    ///
+    /// On e-ink targets the curtain suppresses panel flushes — the
+    /// big win is not privacy but eliminating the 300–900 ms refresh
+    /// flash on every focus step. The default is a no-op so the trait
+    /// stays cheap to implement on platforms where curtain has no
+    /// meaningful behavior. Phase 3b wires hosted/web implementations.
+    fn set_screen_curtain(&mut self, _on: bool) {}
+}
+
+/// How aggressively a TTS engine should pronounce punctuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Punctuation {
+    /// Skip almost all punctuation. Quiet, fast.
+    None,
+    /// Read a useful subset (commas, periods, colons). Default.
+    #[default]
+    Some,
+    /// Read every punctuation symbol literally — useful when editing
+    /// code, math, or addresses.
+    All,
+}
+
+/// A structured TTS request handed to [`Platform::speak`].
+///
+/// Lives in `soul-hal` so the no_std core can construct one without
+/// pulling in `String`. `text` is borrowed for the duration of the
+/// call; the implementation must not retain it past return.
+#[derive(Debug, Clone, Copy)]
+pub struct SpeechRequest<'a> {
+    /// Utterance to speak. Caller-owned; the impl must not retain.
+    pub text: &'a str,
+    /// Words per minute. Implementations clamp to whatever range the
+    /// underlying engine supports; values outside ~80..=400 are
+    /// generally clamped to the engine's bounds.
+    pub rate_wpm: u16,
+    /// When true, abort any currently-speaking utterance before
+    /// starting this one. Screen readers want this on for every
+    /// new utterance triggered by user navigation.
+    pub interrupt: bool,
+    /// Punctuation verbosity.
+    pub punctuation: Punctuation,
+}
+
+impl<'a> SpeechRequest<'a> {
+    /// Default rate. Roughly the macOS `say` default (~175 wpm) and a
+    /// reasonable middle ground between TalkBack/VoiceOver presets.
+    pub const DEFAULT_RATE_WPM: u16 = 175;
+
+    /// Construct a request with sensible defaults: default rate,
+    /// `interrupt = true`, `Punctuation::Some`.
+    pub const fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            rate_wpm: Self::DEFAULT_RATE_WPM,
+            interrupt: true,
+            punctuation: Punctuation::Some,
+        }
+    }
+
+    /// Builder: set the rate.
+    pub const fn with_rate_wpm(mut self, rate_wpm: u16) -> Self {
+        self.rate_wpm = rate_wpm;
+        self
+    }
+
+    /// Builder: set the interrupt flag.
+    pub const fn with_interrupt(mut self, interrupt: bool) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+
+    /// Builder: set the punctuation policy.
+    pub const fn with_punctuation(mut self, punctuation: Punctuation) -> Self {
+        self.punctuation = punctuation;
+        self
+    }
 }
 
 /// An input event produced by the platform.
@@ -166,4 +251,29 @@ pub enum HardButton {
     VolumeUp,
     /// Volume down.
     VolumeDown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speech_request_defaults() {
+        let r = SpeechRequest::new("hello");
+        assert_eq!(r.text, "hello");
+        assert_eq!(r.rate_wpm, SpeechRequest::DEFAULT_RATE_WPM);
+        assert!(r.interrupt);
+        assert_eq!(r.punctuation, Punctuation::Some);
+    }
+
+    #[test]
+    fn speech_request_builders_chain() {
+        let r = SpeechRequest::new("x")
+            .with_rate_wpm(240)
+            .with_interrupt(false)
+            .with_punctuation(Punctuation::All);
+        assert_eq!(r.rate_wpm, 240);
+        assert!(!r.interrupt);
+        assert_eq!(r.punctuation, Punctuation::All);
+    }
 }

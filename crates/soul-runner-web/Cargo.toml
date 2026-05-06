@@ -39,4 +39,6 @@ features = [
     "EventTarget",
     "AddEventListenerOptions",
     "Performance",
+    "SpeechSynthesis",
+    "SpeechSynthesisUtterance",
 ]

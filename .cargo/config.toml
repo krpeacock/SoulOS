@@ -6,3 +6,13 @@ rustflags = ["-L", "/opt/homebrew/lib"]
 
 [target.x86_64-apple-darwin]
 rustflags = ["-L", "/usr/local/lib"]
+
+# Trunk runs wasm-opt on release builds. Modern rustc emits bulk-memory
+# instructions by default (since 1.82), which Trunk's bundled wasm-opt
+# rejects unless `--enable-bulk-memory` is passed. Compiling for the
+# wasm MVP feature set sidesteps that entirely — the output uses only
+# instructions wasm-opt accepts unconditionally. The size/perf cost is
+# negligible for a Palm-style UI; SoulOS isn't running tight inner
+# loops in the simulator.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-cpu=mvp"]
