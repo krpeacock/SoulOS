@@ -18,8 +18,18 @@ fi
 rustup default stable
 rustup target add wasm32-unknown-unknown
 
-if ! command -v trunk >/dev/null 2>&1; then
-  cargo install trunk --locked
+# Force trunk to a version that supports `data-wasm-opt-params` on
+# the `<link rel="rust">` tag in index.html. Older trunk silently
+# ignored that attribute, which is how Netlify started failing with
+# `Bulk memory operations require bulk memory [--enable-bulk-memory]`
+# despite the index.html clearly passing the flag — Netlify's persistent
+# `/opt/build/cache` was holding onto a pre-0.21 trunk binary. The
+# `--force` reinstall is the cheapest reliable fix; cargo's incremental
+# build still keeps it fast.
+TRUNK_VERSION=0.21.14
+if ! command -v trunk >/dev/null 2>&1 || \
+   [ "$(trunk --version 2>/dev/null | awk '{print $2}')" != "$TRUNK_VERSION" ]; then
+  cargo install trunk --locked --version "$TRUNK_VERSION" --force
 fi
 
 trunk build --release

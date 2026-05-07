@@ -17,6 +17,7 @@ APPS = [
     ("mail",      "✉️"),
     ("calc",      "🧮"),
     ("prefs",     "⚙️"),
+    ("settings",  "♿"),
     ("draw",      "✏️"),
     ("sync",      "🔄"),
     ("builder",   "🔨"),

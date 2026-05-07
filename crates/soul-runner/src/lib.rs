@@ -9,8 +9,10 @@ pub mod builder;
 pub mod calculator;
 pub mod draw;
 pub mod egui_demo;
+pub mod item_chooser;
 pub mod launcher;
 pub mod paint;
+pub mod settings;
 pub mod system_settings;
 
 use embedded_graphics::{
@@ -36,6 +38,7 @@ use draw::Draw;
 use egui_demo::EguiDemo;
 use launcher::Launcher;
 use paint::Paint;
+use settings::Settings;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
@@ -57,6 +60,7 @@ pub(crate) enum NativeKind {
     Builder(MobileBuilder),
     Paint(Paint),
     EguiDemo(EguiDemo),
+    Settings(Settings),
 }
 
 impl NativeKind {
@@ -68,6 +72,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => MobileBuilder::APP_ID,
             NativeKind::Paint(_)      => Paint::APP_ID,
             NativeKind::EguiDemo(_)   => EguiDemo::APP_ID,
+            NativeKind::Settings(_)   => Settings::APP_ID,
         }
     }
 
@@ -79,6 +84,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => MobileBuilder::NAME,
             NativeKind::Paint(_)      => Paint::NAME,
             NativeKind::EguiDemo(_)   => EguiDemo::NAME,
+            NativeKind::Settings(_)   => Settings::NAME,
         }
     }
 
@@ -92,6 +98,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => Some("builder"),
             NativeKind::Paint(_)      => Some("paint"),
             NativeKind::EguiDemo(_)   => Some("egui_demo"),
+            NativeKind::Settings(_)   => Some("settings"),
         }
     }
 
@@ -103,6 +110,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.handle_event(event, ctx),
             NativeKind::Paint(p)      => p.handle_event(event, ctx),
             NativeKind::EguiDemo(e)   => { e.handle(event, ctx); None }
+            NativeKind::Settings(s)   => { s.handle(event, ctx); None }
         }
     }
 
@@ -114,6 +122,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.draw(canvas, dirty),
             NativeKind::Paint(p)      => p.draw(canvas, dirty),
             NativeKind::EguiDemo(e)   => e.draw(canvas, dirty),
+            NativeKind::Settings(s)   => s.draw(canvas, dirty),
         }
     }
 
@@ -125,6 +134,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.a11y_nodes(),
             NativeKind::Paint(p)      => p.a11y_nodes(),
             NativeKind::EguiDemo(e)   => e.a11y_nodes(),
+            NativeKind::Settings(s)   => s.a11y_nodes(),
         }
     }
 
@@ -136,6 +146,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.persist(),
             NativeKind::Paint(p)      => p.persist(),
             NativeKind::EguiDemo(e)   => e.persist(),
+            NativeKind::Settings(_)   => {}
         }
     }
 }
@@ -173,6 +184,7 @@ enum AppKind {
     },
     Builder,
     EguiDemo,
+    Settings,
 }
 
 /// The app manifest. Only the minimum needed to locate and load each app.
@@ -262,6 +274,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         handles: &[],
     },
     AppDescriptor {
+        kind: AppKind::Settings,
+        handles: &[],
+    },
+    AppDescriptor {
         kind: AppKind::EguiDemo,
         handles: &[],
     },
@@ -336,6 +352,7 @@ impl AppSlot {
             }
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
             AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
+            AppKind::Settings => AppSlot::Native(NativeKind::Settings(Settings::new())),
         }
     }
 
@@ -536,6 +553,17 @@ pub struct Host {
     /// scope: changes inside an app override that app's settings;
     /// changes at the home screen update the global record.
     settings_app_id: String,
+    /// Snapshot of the four user-facing knobs as of the last sync to
+    /// disk. After every `Host::handle` the runtime compares
+    /// `ctx.a11y` to this; any drift triggers a write to
+    /// `system_settings` and updates the snapshot. The Settings app
+    /// edits `ctx.a11y` directly; this is what makes its changes
+    /// stick.
+    last_persisted: system_settings::A11ySettings,
+    /// The Item Chooser modal overlay, when open. While `Some`, the
+    /// chooser owns the keyboard, the focus ring scopes to its
+    /// rect, and `draw` paints it on top of the underlying app.
+    chooser: Option<item_chooser::ItemChooser>,
 }
 
 impl Host {
@@ -616,6 +644,8 @@ impl Host {
                 std::path::PathBuf::from(".soulos/system_settings.sdb"),
             ),
             settings_app_id: String::new(),
+            last_persisted: system_settings::A11ySettings::default(),
+            chooser: None,
         }
     }
 
@@ -719,7 +749,12 @@ impl Host {
                 if label == "Home" {
                     self.go_home(ctx);
                 } else if label == "Menu" {
-                    self.dispatch_event(Event::Menu, ctx);
+                    // a11y is by definition on here (activate_focused
+                    // is only reached on a11y double-tap), so route
+                    // through `open_chooser` directly. `Event::Menu`
+                    // would otherwise dispatch to the inner app and
+                    // miss the Host's chooser trap.
+                    self.open_chooser(ctx);
                 }
             } else {
                 self.dispatch_event(Event::PenDown { x, y }, ctx);
@@ -979,20 +1014,102 @@ impl Host {
             self.settings.for_app(&app_id)
         };
         effective.apply_to(ctx.a11y);
+        // Snapshot post-apply so `persist_settings_if_changed` doesn't
+        // immediately write back the values we just loaded.
+        self.last_persisted = system_settings::A11ySettings::snapshot(ctx.a11y);
     }
 
-    /// Persist the current screen-curtain state. Per-app when
-    /// `settings_app_id` is set; global otherwise. Called from the
-    /// long-press Power handler after the toggle so the change
-    /// survives across reboots.
-    fn persist_curtain(&mut self, on: bool) {
-        let mut s = system_settings::A11ySettings::default();
-        s.screen_curtain = Some(on);
+    /// Compare `ctx.a11y` to the last-persisted snapshot. When any
+    /// of the four user-facing knobs has changed (Settings app
+    /// toggle, long-press Power → curtain, future programmatic
+    /// changes), write the new bag to `system_settings` — per-app
+    /// when `settings_app_id` is set, global otherwise — and update
+    /// the snapshot. Called at the tail of every `App::handle`.
+    fn persist_settings_if_changed(&mut self, ctx: &Ctx<'_>) {
+        let current = system_settings::A11ySettings::snapshot(ctx.a11y);
+        if current == self.last_persisted {
+            return;
+        }
         if self.settings_app_id.is_empty() {
-            self.settings.save_global(&s);
+            self.settings.save_global(&current);
         } else {
             let app_id = self.settings_app_id.clone();
-            self.settings.save_app_override(&app_id, &s);
+            self.settings.save_app_override(&app_id, &current);
+        }
+        self.last_persisted = current;
+    }
+
+    /// Open the Item Chooser with a fresh snapshot of the underlying
+    /// screen's a11y tree. The active app's nodes plus the system
+    /// Home/Menu strip are included so a user can type "Home" to
+    /// jump back as well as type any widget label.
+    fn open_chooser(&mut self, ctx: &mut Ctx<'_>) {
+        let snapshot = self.build_a11y_tree();
+        let count = snapshot.len();
+        let chooser = item_chooser::ItemChooser::open(snapshot);
+        let initial = chooser
+            .selected_node()
+            .map(|n| (n.label.clone(), n.role.as_str().to_string()));
+        self.chooser = Some(chooser);
+        ctx.invalidate_all();
+        // Announce the chooser and the initial highlighted item.
+        ctx.a11y
+            .speak(&format!("Item chooser, {} items", count));
+        if let Some((label, role)) = initial {
+            ctx.a11y.speak(&format!("{}, {}", label, role));
+        }
+    }
+
+    /// Speak the chooser's currently highlighted row, if any. Called
+    /// after every selection change (arrow keys, PageUp/PageDown,
+    /// query-driven re-rank) so the screen reader tracks the cursor.
+    fn speak_chooser_selection(&self, ctx: &mut Ctx<'_>) {
+        if let Some(ch) = self.chooser.as_ref() {
+            if let Some(node) = ch.selected_node() {
+                ctx.a11y
+                    .speak(&format!("{}, {}", node.label, node.role.as_str()));
+            } else {
+                ctx.a11y.speak("No matches");
+            }
+        }
+    }
+
+    /// Pop the chooser without selecting. Focus on the underlying
+    /// app is left wherever it was when the chooser opened — Phase 2
+    /// identity preservation handles that automatically because the
+    /// FocusRing rebuild after this call sees the underlying tree
+    /// again and matches the prior `(label, role)`.
+    fn close_chooser(&mut self, ctx: &mut Ctx<'_>) {
+        if self.chooser.take().is_some() {
+            ctx.invalidate_all();
+        }
+    }
+
+    /// Pop the chooser and move the FocusRing to the first node
+    /// matching `(label, role)` in the underlying tree.
+    fn select_from_chooser(
+        &mut self,
+        label: String,
+        role: soul_core::a11y::A11yRole,
+        ctx: &mut Ctx<'_>,
+    ) {
+        self.chooser = None;
+        ctx.invalidate_all();
+        // Rebuild the focus ring against the underlying tree first
+        // (the cached one was scoped to the chooser).
+        let nodes = self.build_a11y_tree();
+        ctx.a11y
+            .focus
+            .rebuild(nodes, soul_core::a11y::FocusScope::Whole);
+        if let Some(idx) = ctx
+            .a11y
+            .focus
+            .nodes()
+            .iter()
+            .position(|n| n.label == label && n.role == role)
+        {
+            ctx.a11y.focus.set_index(idx);
+            self.speak_focused(ctx);
         }
     }
 }
@@ -1016,8 +1133,80 @@ impl Host {
             return;
         }
 
+        // While the Item Chooser is open it owns the input stream:
+        // typing filters, Enter selects, Esc/Power dismisses. Every
+        // selection change (typing, arrow, PageUp/Down) re-speaks
+        // the new highlighted row so a screen-reader user can hear
+        // the live filter result, not just the count.
+        if self.chooser.is_some() {
+            match event {
+                Event::Key(k) => {
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.handle_key(k))
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    match action {
+                        item_chooser::ChooserAction::NoOp => {}
+                        item_chooser::ChooserAction::Repaint => {
+                            self.speak_chooser_selection(ctx);
+                            ctx.invalidate_all();
+                        }
+                        item_chooser::ChooserAction::Select { label, role } => {
+                            self.select_from_chooser(label, role, ctx);
+                        }
+                        item_chooser::ChooserAction::Dismiss => self.close_chooser(ctx),
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::PageUp) => {
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.page_up())
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    if matches!(action, item_chooser::ChooserAction::Repaint) {
+                        self.speak_chooser_selection(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::PageDown) => {
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.page_down())
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    if matches!(action, item_chooser::ChooserAction::Repaint) {
+                        self.speak_chooser_selection(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::Power) | Event::ButtonUp(HardButton::Power) => {
+                    self.close_chooser(ctx);
+                    return;
+                }
+                Event::Menu | Event::ButtonDown(HardButton::Home) => {
+                    // Re-press Menu, or Home, dismisses without
+                    // selecting — same as VoiceOver's Item Chooser.
+                    self.close_chooser(ctx);
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         if matches!(event, Event::Key(KeyCode::Tab)) {
             self.toggle_a11y(ctx);
+            return;
+        }
+
+        // Menu opens the Item Chooser while a11y is on. With a11y
+        // off, Menu still falls through to the active app so its
+        // existing behavior (open in-app menu bar) is unchanged.
+        if self.a11y_enabled && matches!(event, Event::Menu) {
+            self.open_chooser(ctx);
             return;
         }
 
@@ -1034,13 +1223,13 @@ impl Host {
                 if let Some(down_ms) = self.power_down_ms.take() {
                     if ctx.now_ms.saturating_sub(down_ms) >= 500 {
                         ctx.a11y.screen_curtain = !ctx.a11y.screen_curtain;
-                        let on = ctx.a11y.screen_curtain;
-                        if on {
+                        if ctx.a11y.screen_curtain {
                             ctx.a11y.speak("Screen curtain on");
                         } else {
                             ctx.a11y.speak("Screen curtain off");
                         }
-                        self.persist_curtain(on);
+                        // Persistence is handled reactively at the
+                        // tail of `App::handle`.
                     }
                 }
                 return;
@@ -1096,6 +1285,23 @@ impl Host {
                             return;
                         }
                         if self.a11y_enabled {
+                            // System-strip taps stay first-class while
+                            // a11y is on. Without this, the user would
+                            // have to swipe-to-focus the Menu/Home
+                            // button and double-tap — which is fine on
+                            // a desktop with hard buttons, but on touch
+                            // devices and laptops without F6 the strip
+                            // is the only discoverable trigger.
+                            if hit_test(&strip_menu_rect(), x, y) {
+                                self.strip_pressed = false;
+                                self.open_chooser(ctx);
+                                return;
+                            }
+                            if hit_test(&strip_home_rect(), x, y) {
+                                self.strip_pressed = false;
+                                self.go_home(ctx);
+                                return;
+                            }
                             if self.tap_count == 2 {
                                 self.activate_focused(ctx);
                             }
@@ -1141,9 +1347,19 @@ impl App for Host {
         // app made this turn. The ring's signature gate makes the
         // rebuild a no-op when the tree hasn't shifted.
         self.refresh_focus_cache(ctx);
+        // Detect any change to the four user-facing a11y knobs and
+        // persist them — Settings app edits, long-press Power, future
+        // programmatic changes all funnel through here.
+        self.persist_settings_if_changed(ctx);
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        // While the Item Chooser is open, the chooser owns the
+        // a11y surface — its own query field plus the filtered list.
+        // The Phase 2 modal-scope filter does the rest.
+        if let Some(ch) = &self.chooser {
+            return ch.a11y_nodes();
+        }
         self.build_a11y_tree()
     }
 
@@ -1155,6 +1371,13 @@ impl App for Host {
         self.apps[active].draw(canvas, dirty);
         let label = self.active_label().to_string();
         draw_system_strip(canvas, &label);
+
+        // The Item Chooser sits above the underlying app + system
+        // strip but below the focus highlight, which still tracks
+        // the chooser's own selection while open.
+        if let Some(ch) = &self.chooser {
+            ch.draw(canvas);
+        }
 
         if self.a11y_enabled {
             if let Some(bounds) = self.a11y_highlight {
@@ -1173,8 +1396,8 @@ impl App for Host {
     }
 
     fn a11y_focus_scope(&self) -> Option<Rectangle> {
-        // No modal overlays yet; the Item Chooser in Phase 5 will be
-        // the first caller to populate this.
-        None
+        // While the chooser is open, scope the focus ring to its
+        // bounds so navigation stays inside the modal.
+        self.chooser.as_ref().map(|c| c.bounds())
     }
 }

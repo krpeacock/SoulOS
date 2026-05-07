@@ -31,6 +31,7 @@ mod screenshot_tests {
     use soul_hal_hosted::Harness;
     use soul_runner::{
         builder::MobileBuilder, draw::Draw, egui_demo::EguiDemo, launcher::Launcher, paint::Paint,
+        settings::Settings,
     };
     use std::path::PathBuf;
 
@@ -97,5 +98,15 @@ mod screenshot_tests {
         let mut h = Harness::new(EguiDemo::new());
         h.settle().ok();
         h.save_png(output_dir().join("egui_demo.png")).expect("save png");
+    }
+
+    #[test]
+    fn screenshot_settings() {
+        if !should_run("settings") {
+            return;
+        }
+        let mut h = Harness::new(Settings::new());
+        h.settle().ok();
+        h.save_png(output_dir().join("settings.png")).expect("save png");
     }
 }

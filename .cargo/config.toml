@@ -8,11 +8,13 @@ rustflags = ["-L", "/opt/homebrew/lib"]
 rustflags = ["-L", "/usr/local/lib"]
 
 # Trunk runs wasm-opt on release builds. Modern rustc emits bulk-memory
-# instructions by default (since 1.82), which Trunk's bundled wasm-opt
-# rejects unless `--enable-bulk-memory` is passed. Compiling for the
-# wasm MVP feature set sidesteps that entirely — the output uses only
-# instructions wasm-opt accepts unconditionally. The size/perf cost is
-# negligible for a Palm-style UI; SoulOS isn't running tight inner
-# loops in the simulator.
+# instructions by default (since 1.82), which older binaryen versions
+# reject unless `--enable-bulk-memory` is passed. The deploy-side
+# workaround is in `crates/soul-runner-web/index.html` (it sets
+# `data-wasm-opt-params` so trunk forwards `--enable-bulk-memory` and
+# friends to wasm-opt) plus a trunk-version pin in
+# `scripts/netlify-build.sh` to keep Netlify's persistent build cache
+# from holding onto a pre-0.21 trunk that silently ignored that attr.
+# `target-cpu=mvp` here is conservative codegen on top of all that.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-cpu=mvp"]
