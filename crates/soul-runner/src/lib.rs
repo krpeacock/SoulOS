@@ -9,6 +9,7 @@ pub mod builder;
 pub mod calculator;
 pub mod draw;
 pub mod egui_demo;
+pub mod item_chooser;
 pub mod launcher;
 pub mod paint;
 pub mod system_settings;
@@ -536,6 +537,10 @@ pub struct Host {
     /// scope: changes inside an app override that app's settings;
     /// changes at the home screen update the global record.
     settings_app_id: String,
+    /// The Item Chooser modal overlay, when open. While `Some`, the
+    /// chooser owns the keyboard, the focus ring scopes to its
+    /// rect, and `draw` paints it on top of the underlying app.
+    chooser: Option<item_chooser::ItemChooser>,
 }
 
 impl Host {
@@ -616,6 +621,7 @@ impl Host {
                 std::path::PathBuf::from(".soulos/system_settings.sdb"),
             ),
             settings_app_id: String::new(),
+            chooser: None,
         }
     }
 
@@ -995,6 +1001,55 @@ impl Host {
             self.settings.save_app_override(&app_id, &s);
         }
     }
+
+    /// Open the Item Chooser with a fresh snapshot of the underlying
+    /// screen's a11y tree. The active app's nodes plus the system
+    /// Home/Menu strip are included so a user can type "Home" to
+    /// jump back as well as type any widget label.
+    fn open_chooser(&mut self, ctx: &mut Ctx<'_>) {
+        let snapshot = self.build_a11y_tree();
+        self.chooser = Some(item_chooser::ItemChooser::open(snapshot));
+        ctx.invalidate_all();
+    }
+
+    /// Pop the chooser without selecting. Focus on the underlying
+    /// app is left wherever it was when the chooser opened — Phase 2
+    /// identity preservation handles that automatically because the
+    /// FocusRing rebuild after this call sees the underlying tree
+    /// again and matches the prior `(label, role)`.
+    fn close_chooser(&mut self, ctx: &mut Ctx<'_>) {
+        if self.chooser.take().is_some() {
+            ctx.invalidate_all();
+        }
+    }
+
+    /// Pop the chooser and move the FocusRing to the first node
+    /// matching `(label, role)` in the underlying tree.
+    fn select_from_chooser(
+        &mut self,
+        label: String,
+        role: soul_core::a11y::A11yRole,
+        ctx: &mut Ctx<'_>,
+    ) {
+        self.chooser = None;
+        ctx.invalidate_all();
+        // Rebuild the focus ring against the underlying tree first
+        // (the cached one was scoped to the chooser).
+        let nodes = self.build_a11y_tree();
+        ctx.a11y
+            .focus
+            .rebuild(nodes, soul_core::a11y::FocusScope::Whole);
+        if let Some(idx) = ctx
+            .a11y
+            .focus
+            .nodes()
+            .iter()
+            .position(|n| n.label == label && n.role == role)
+        {
+            ctx.a11y.focus.set_index(idx);
+            self.speak_focused(ctx);
+        }
+    }
 }
 
 impl Host {
@@ -1016,8 +1071,63 @@ impl Host {
             return;
         }
 
+        // While the Item Chooser is open it owns the input stream:
+        // typing filters, Enter selects, Esc/Power dismisses.
+        if self.chooser.is_some() {
+            match event {
+                Event::Key(k) => {
+                    if let Some(ch) = self.chooser.as_mut() {
+                        match ch.handle_key(k) {
+                            item_chooser::ChooserAction::NoOp => {}
+                            item_chooser::ChooserAction::Repaint => ctx.invalidate_all(),
+                            item_chooser::ChooserAction::Select { label, role } => {
+                                self.select_from_chooser(label, role, ctx);
+                            }
+                            item_chooser::ChooserAction::Dismiss => self.close_chooser(ctx),
+                        }
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::PageUp) => {
+                    if let Some(ch) = self.chooser.as_mut() {
+                        if matches!(ch.page_up(), item_chooser::ChooserAction::Repaint) {
+                            ctx.invalidate_all();
+                        }
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::PageDown) => {
+                    if let Some(ch) = self.chooser.as_mut() {
+                        if matches!(ch.page_down(), item_chooser::ChooserAction::Repaint) {
+                            ctx.invalidate_all();
+                        }
+                    }
+                    return;
+                }
+                Event::ButtonDown(HardButton::Power) | Event::ButtonUp(HardButton::Power) => {
+                    self.close_chooser(ctx);
+                    return;
+                }
+                Event::Menu | Event::ButtonDown(HardButton::Home) => {
+                    // Re-press Menu, or Home, dismisses without
+                    // selecting — same as VoiceOver's Item Chooser.
+                    self.close_chooser(ctx);
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         if matches!(event, Event::Key(KeyCode::Tab)) {
             self.toggle_a11y(ctx);
+            return;
+        }
+
+        // Menu opens the Item Chooser while a11y is on. With a11y
+        // off, Menu still falls through to the active app so its
+        // existing behavior (open in-app menu bar) is unchanged.
+        if self.a11y_enabled && matches!(event, Event::Menu) {
+            self.open_chooser(ctx);
             return;
         }
 
@@ -1144,6 +1254,12 @@ impl App for Host {
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
+        // While the Item Chooser is open, the chooser owns the
+        // a11y surface — its own query field plus the filtered list.
+        // The Phase 2 modal-scope filter does the rest.
+        if let Some(ch) = &self.chooser {
+            return ch.a11y_nodes();
+        }
         self.build_a11y_tree()
     }
 
@@ -1155,6 +1271,13 @@ impl App for Host {
         self.apps[active].draw(canvas, dirty);
         let label = self.active_label().to_string();
         draw_system_strip(canvas, &label);
+
+        // The Item Chooser sits above the underlying app + system
+        // strip but below the focus highlight, which still tracks
+        // the chooser's own selection while open.
+        if let Some(ch) = &self.chooser {
+            ch.draw(canvas);
+        }
 
         if self.a11y_enabled {
             if let Some(bounds) = self.a11y_highlight {
@@ -1173,8 +1296,8 @@ impl App for Host {
     }
 
     fn a11y_focus_scope(&self) -> Option<Rectangle> {
-        // No modal overlays yet; the Item Chooser in Phase 5 will be
-        // the first caller to populate this.
-        None
+        // While the chooser is open, scope the focus ring to its
+        // bounds so navigation stays inside the modal.
+        self.chooser.as_ref().map(|c| c.bounds())
     }
 }
