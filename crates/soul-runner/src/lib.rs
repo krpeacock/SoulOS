@@ -12,6 +12,7 @@ pub mod egui_demo;
 pub mod item_chooser;
 pub mod launcher;
 pub mod paint;
+pub mod settings;
 pub mod system_settings;
 
 use embedded_graphics::{
@@ -37,6 +38,7 @@ use draw::Draw;
 use egui_demo::EguiDemo;
 use launcher::Launcher;
 use paint::Paint;
+use settings::Settings;
 
 /// Square PGM icon size; must match `generate_icons.py` export size.
 pub(crate) const ICON_CELL: u32 = 32;
@@ -58,6 +60,7 @@ pub(crate) enum NativeKind {
     Builder(MobileBuilder),
     Paint(Paint),
     EguiDemo(EguiDemo),
+    Settings(Settings),
 }
 
 impl NativeKind {
@@ -69,6 +72,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => MobileBuilder::APP_ID,
             NativeKind::Paint(_)      => Paint::APP_ID,
             NativeKind::EguiDemo(_)   => EguiDemo::APP_ID,
+            NativeKind::Settings(_)   => Settings::APP_ID,
         }
     }
 
@@ -80,6 +84,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => MobileBuilder::NAME,
             NativeKind::Paint(_)      => Paint::NAME,
             NativeKind::EguiDemo(_)   => EguiDemo::NAME,
+            NativeKind::Settings(_)   => Settings::NAME,
         }
     }
 
@@ -93,6 +98,7 @@ impl NativeKind {
             NativeKind::Builder(_)    => Some("builder"),
             NativeKind::Paint(_)      => Some("paint"),
             NativeKind::EguiDemo(_)   => Some("egui_demo"),
+            NativeKind::Settings(_)   => Some("settings"),
         }
     }
 
@@ -104,6 +110,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.handle_event(event, ctx),
             NativeKind::Paint(p)      => p.handle_event(event, ctx),
             NativeKind::EguiDemo(e)   => { e.handle(event, ctx); None }
+            NativeKind::Settings(s)   => { s.handle(event, ctx); None }
         }
     }
 
@@ -115,6 +122,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.draw(canvas, dirty),
             NativeKind::Paint(p)      => p.draw(canvas, dirty),
             NativeKind::EguiDemo(e)   => e.draw(canvas, dirty),
+            NativeKind::Settings(s)   => s.draw(canvas, dirty),
         }
     }
 
@@ -126,6 +134,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.a11y_nodes(),
             NativeKind::Paint(p)      => p.a11y_nodes(),
             NativeKind::EguiDemo(e)   => e.a11y_nodes(),
+            NativeKind::Settings(s)   => s.a11y_nodes(),
         }
     }
 
@@ -137,6 +146,7 @@ impl NativeKind {
             NativeKind::Builder(b)    => b.persist(),
             NativeKind::Paint(p)      => p.persist(),
             NativeKind::EguiDemo(e)   => e.persist(),
+            NativeKind::Settings(_)   => {}
         }
     }
 }
@@ -174,6 +184,7 @@ enum AppKind {
     },
     Builder,
     EguiDemo,
+    Settings,
 }
 
 /// The app manifest. Only the minimum needed to locate and load each app.
@@ -263,6 +274,10 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         handles: &[],
     },
     AppDescriptor {
+        kind: AppKind::Settings,
+        handles: &[],
+    },
+    AppDescriptor {
         kind: AppKind::EguiDemo,
         handles: &[],
     },
@@ -337,6 +352,7 @@ impl AppSlot {
             }
             AppKind::Builder => AppSlot::Native(NativeKind::Builder(MobileBuilder::new())),
             AppKind::EguiDemo => AppSlot::Native(NativeKind::EguiDemo(EguiDemo::new())),
+            AppKind::Settings => AppSlot::Native(NativeKind::Settings(Settings::new())),
         }
     }
 
@@ -537,6 +553,13 @@ pub struct Host {
     /// scope: changes inside an app override that app's settings;
     /// changes at the home screen update the global record.
     settings_app_id: String,
+    /// Snapshot of the four user-facing knobs as of the last sync to
+    /// disk. After every `Host::handle` the runtime compares
+    /// `ctx.a11y` to this; any drift triggers a write to
+    /// `system_settings` and updates the snapshot. The Settings app
+    /// edits `ctx.a11y` directly; this is what makes its changes
+    /// stick.
+    last_persisted: system_settings::A11ySettings,
     /// The Item Chooser modal overlay, when open. While `Some`, the
     /// chooser owns the keyboard, the focus ring scopes to its
     /// rect, and `draw` paints it on top of the underlying app.
@@ -621,6 +644,7 @@ impl Host {
                 std::path::PathBuf::from(".soulos/system_settings.sdb"),
             ),
             settings_app_id: String::new(),
+            last_persisted: system_settings::A11ySettings::default(),
             chooser: None,
         }
     }
@@ -985,21 +1009,29 @@ impl Host {
             self.settings.for_app(&app_id)
         };
         effective.apply_to(ctx.a11y);
+        // Snapshot post-apply so `persist_settings_if_changed` doesn't
+        // immediately write back the values we just loaded.
+        self.last_persisted = system_settings::A11ySettings::snapshot(ctx.a11y);
     }
 
-    /// Persist the current screen-curtain state. Per-app when
-    /// `settings_app_id` is set; global otherwise. Called from the
-    /// long-press Power handler after the toggle so the change
-    /// survives across reboots.
-    fn persist_curtain(&mut self, on: bool) {
-        let mut s = system_settings::A11ySettings::default();
-        s.screen_curtain = Some(on);
+    /// Compare `ctx.a11y` to the last-persisted snapshot. When any
+    /// of the four user-facing knobs has changed (Settings app
+    /// toggle, long-press Power → curtain, future programmatic
+    /// changes), write the new bag to `system_settings` — per-app
+    /// when `settings_app_id` is set, global otherwise — and update
+    /// the snapshot. Called at the tail of every `App::handle`.
+    fn persist_settings_if_changed(&mut self, ctx: &Ctx<'_>) {
+        let current = system_settings::A11ySettings::snapshot(ctx.a11y);
+        if current == self.last_persisted {
+            return;
+        }
         if self.settings_app_id.is_empty() {
-            self.settings.save_global(&s);
+            self.settings.save_global(&current);
         } else {
             let app_id = self.settings_app_id.clone();
-            self.settings.save_app_override(&app_id, &s);
+            self.settings.save_app_override(&app_id, &current);
         }
+        self.last_persisted = current;
     }
 
     /// Open the Item Chooser with a fresh snapshot of the underlying
@@ -1144,13 +1176,13 @@ impl Host {
                 if let Some(down_ms) = self.power_down_ms.take() {
                     if ctx.now_ms.saturating_sub(down_ms) >= 500 {
                         ctx.a11y.screen_curtain = !ctx.a11y.screen_curtain;
-                        let on = ctx.a11y.screen_curtain;
-                        if on {
+                        if ctx.a11y.screen_curtain {
                             ctx.a11y.speak("Screen curtain on");
                         } else {
                             ctx.a11y.speak("Screen curtain off");
                         }
-                        self.persist_curtain(on);
+                        // Persistence is handled reactively at the
+                        // tail of `App::handle`.
                     }
                 }
                 return;
@@ -1251,6 +1283,10 @@ impl App for Host {
         // app made this turn. The ring's signature gate makes the
         // rebuild a no-op when the tree hasn't shifted.
         self.refresh_focus_cache(ctx);
+        // Detect any change to the four user-facing a11y knobs and
+        // persist them — Settings app edits, long-press Power, future
+        // programmatic changes all funnel through here.
+        self.persist_settings_if_changed(ctx);
     }
 
     fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
