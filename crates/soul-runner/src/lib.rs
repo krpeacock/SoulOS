@@ -749,7 +749,12 @@ impl Host {
                 if label == "Home" {
                     self.go_home(ctx);
                 } else if label == "Menu" {
-                    self.dispatch_event(Event::Menu, ctx);
+                    // a11y is by definition on here (activate_focused
+                    // is only reached on a11y double-tap), so route
+                    // through `open_chooser` directly. `Event::Menu`
+                    // would otherwise dispatch to the inner app and
+                    // miss the Host's chooser trap.
+                    self.open_chooser(ctx);
                 }
             } else {
                 self.dispatch_event(Event::PenDown { x, y }, ctx);
@@ -1238,6 +1243,23 @@ impl Host {
                             return;
                         }
                         if self.a11y_enabled {
+                            // System-strip taps stay first-class while
+                            // a11y is on. Without this, the user would
+                            // have to swipe-to-focus the Menu/Home
+                            // button and double-tap — which is fine on
+                            // a desktop with hard buttons, but on touch
+                            // devices and laptops without F6 the strip
+                            // is the only discoverable trigger.
+                            if hit_test(&strip_menu_rect(), x, y) {
+                                self.strip_pressed = false;
+                                self.open_chooser(ctx);
+                                return;
+                            }
+                            if hit_test(&strip_home_rect(), x, y) {
+                                self.strip_pressed = false;
+                                self.go_home(ctx);
+                                return;
+                            }
                             if self.tap_count == 2 {
                                 self.activate_focused(ctx);
                             }
