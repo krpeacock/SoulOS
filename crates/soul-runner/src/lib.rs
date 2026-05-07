@@ -1045,8 +1045,33 @@ impl Host {
     /// jump back as well as type any widget label.
     fn open_chooser(&mut self, ctx: &mut Ctx<'_>) {
         let snapshot = self.build_a11y_tree();
-        self.chooser = Some(item_chooser::ItemChooser::open(snapshot));
+        let count = snapshot.len();
+        let chooser = item_chooser::ItemChooser::open(snapshot);
+        let initial = chooser
+            .selected_node()
+            .map(|n| (n.label.clone(), n.role.as_str().to_string()));
+        self.chooser = Some(chooser);
         ctx.invalidate_all();
+        // Announce the chooser and the initial highlighted item.
+        ctx.a11y
+            .speak(&format!("Item chooser, {} items", count));
+        if let Some((label, role)) = initial {
+            ctx.a11y.speak(&format!("{}, {}", label, role));
+        }
+    }
+
+    /// Speak the chooser's currently highlighted row, if any. Called
+    /// after every selection change (arrow keys, PageUp/PageDown,
+    /// query-driven re-rank) so the screen reader tracks the cursor.
+    fn speak_chooser_selection(&self, ctx: &mut Ctx<'_>) {
+        if let Some(ch) = self.chooser.as_ref() {
+            if let Some(node) = ch.selected_node() {
+                ctx.a11y
+                    .speak(&format!("{}, {}", node.label, node.role.as_str()));
+            } else {
+                ctx.a11y.speak("No matches");
+            }
+        }
     }
 
     /// Pop the chooser without selecting. Focus on the underlying
@@ -1109,35 +1134,52 @@ impl Host {
         }
 
         // While the Item Chooser is open it owns the input stream:
-        // typing filters, Enter selects, Esc/Power dismisses.
+        // typing filters, Enter selects, Esc/Power dismisses. Every
+        // selection change (typing, arrow, PageUp/Down) re-speaks
+        // the new highlighted row so a screen-reader user can hear
+        // the live filter result, not just the count.
         if self.chooser.is_some() {
             match event {
                 Event::Key(k) => {
-                    if let Some(ch) = self.chooser.as_mut() {
-                        match ch.handle_key(k) {
-                            item_chooser::ChooserAction::NoOp => {}
-                            item_chooser::ChooserAction::Repaint => ctx.invalidate_all(),
-                            item_chooser::ChooserAction::Select { label, role } => {
-                                self.select_from_chooser(label, role, ctx);
-                            }
-                            item_chooser::ChooserAction::Dismiss => self.close_chooser(ctx),
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.handle_key(k))
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    match action {
+                        item_chooser::ChooserAction::NoOp => {}
+                        item_chooser::ChooserAction::Repaint => {
+                            self.speak_chooser_selection(ctx);
+                            ctx.invalidate_all();
                         }
+                        item_chooser::ChooserAction::Select { label, role } => {
+                            self.select_from_chooser(label, role, ctx);
+                        }
+                        item_chooser::ChooserAction::Dismiss => self.close_chooser(ctx),
                     }
                     return;
                 }
                 Event::ButtonDown(HardButton::PageUp) => {
-                    if let Some(ch) = self.chooser.as_mut() {
-                        if matches!(ch.page_up(), item_chooser::ChooserAction::Repaint) {
-                            ctx.invalidate_all();
-                        }
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.page_up())
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    if matches!(action, item_chooser::ChooserAction::Repaint) {
+                        self.speak_chooser_selection(ctx);
+                        ctx.invalidate_all();
                     }
                     return;
                 }
                 Event::ButtonDown(HardButton::PageDown) => {
-                    if let Some(ch) = self.chooser.as_mut() {
-                        if matches!(ch.page_down(), item_chooser::ChooserAction::Repaint) {
-                            ctx.invalidate_all();
-                        }
+                    let action = self
+                        .chooser
+                        .as_mut()
+                        .map(|ch| ch.page_down())
+                        .unwrap_or(item_chooser::ChooserAction::NoOp);
+                    if matches!(action, item_chooser::ChooserAction::Repaint) {
+                        self.speak_chooser_selection(ctx);
+                        ctx.invalidate_all();
                     }
                     return;
                 }
