@@ -1115,6 +1115,21 @@ impl Host {
 }
 
 impl Host {
+    /// True when the currently focused a11y node is a text-editing
+    /// widget (TextField or TextArea). Auto-edit-mode: a11y stops
+    /// absorbing keyboard and pen events while a textbox is focused
+    /// so the on-screen keyboard, the physical keyboard, and the
+    /// underlying app's text-cursor handling all keep working. The
+    /// user still has explicit ways out (ArrowUp/ArrowDown, swipe,
+    /// triple-tap, Tab) so they're never trapped in the field.
+    fn focus_is_editable(ctx: &Ctx<'_>) -> bool {
+        use soul_core::a11y::A11yRole;
+        matches!(
+            ctx.a11y.focus.current().map(|n| n.role.clone()),
+            Some(A11yRole::TextField) | Some(A11yRole::TextArea)
+        )
+    }
+
     fn handle_event(&mut self, event: Event, ctx: &mut Ctx<'_>) {
         if matches!(event, Event::AppStop) {
             for slot in &mut self.apps {
@@ -1242,7 +1257,11 @@ impl Host {
                 if (y as i32) >= STRIP_TOP {
                     self.strip_pressed = true;
                 }
-                if self.a11y_enabled {
+                // Absorb pen-down in a11y mode UNLESS focus is on a
+                // text widget — the app needs the press through so
+                // the on-screen keyboard widget and cursor-positioning
+                // keep working while the textbox is focused.
+                if self.a11y_enabled && !Self::focus_is_editable(ctx) {
                     return;
                 }
             }
@@ -1304,8 +1323,16 @@ impl Host {
                             }
                             if self.tap_count == 2 {
                                 self.activate_focused(ctx);
+                                return;
                             }
-                            return;
+                            // When a textbox is focused, fall through
+                            // to dispatch the tap so the app's text
+                            // widget (and any on-screen keyboard) sees
+                            // it. Otherwise absorb the tap as normal
+                            // a11y-mode behavior.
+                            if !Self::focus_is_editable(ctx) {
+                                return;
+                            }
                         }
                     }
                 }
@@ -1323,7 +1350,55 @@ impl Host {
             _ => {}
         }
 
+        // Keyboard a11y nav. ArrowUp/Down always navigate focus —
+        // this is the user's escape route from a textbox in
+        // edit-mode. ArrowLeft/Right pass through when focus is
+        // editable (so the textbox can use them for cursor movement);
+        // otherwise they also navigate focus.
         if self.a11y_enabled {
+            match event {
+                Event::Key(KeyCode::ArrowUp) => {
+                    if ctx.a11y.focus.prev().is_some() {
+                        self.speak_focused(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::Key(KeyCode::ArrowDown) => {
+                    if ctx.a11y.focus.next().is_some() {
+                        self.speak_focused(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::Key(KeyCode::ArrowLeft) if !Self::focus_is_editable(ctx) => {
+                    if ctx.a11y.focus.prev().is_some() {
+                        self.speak_focused(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::Key(KeyCode::ArrowRight) if !Self::focus_is_editable(ctx) => {
+                    if ctx.a11y.focus.next().is_some() {
+                        self.speak_focused(ctx);
+                        ctx.invalidate_all();
+                    }
+                    return;
+                }
+                Event::Key(KeyCode::Enter) if !Self::focus_is_editable(ctx) => {
+                    self.activate_focused(ctx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Catch-all absorption for non-editable a11y mode. While a
+        // textbox is focused, every event that wasn't handled above
+        // (printable chars, backspace, arrow LR, Enter for newline,
+        // pen taps inside the textbox or its on-screen keyboard)
+        // falls through to `dispatch_event` so typing keeps working.
+        if self.a11y_enabled && !Self::focus_is_editable(ctx) {
             return;
         }
 
