@@ -89,6 +89,7 @@ fn embedded_text(key: &str) -> Option<&'static str> {
         script!("date"),
         script!("todo"),
         script!("egui_demo"),
+        script!("button_demo"),
         script!("mail"),
         script!("prefs"),
         script!("sync"),

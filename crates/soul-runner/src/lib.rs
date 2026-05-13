@@ -231,6 +231,13 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
     },
     AppDescriptor {
         kind: AppKind::Scripted {
+            script: "assets/scripts/button_demo.rhai",
+            db: "",
+        },
+        handles: &[],
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
             script: "assets/scripts/mail.rhai",
             db: ".soulos/mail.sdb",
         },
