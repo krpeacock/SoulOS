@@ -18,7 +18,9 @@ use soul_hal::{HardButton, InputEvent, KeyCode, Platform, SpeechRequest};
 pub mod harness;
 
 // Re-export key types from harness for convenience
-pub use harness::{SettleTimeout, Harness, HeadlessPlatform, VirtualClock};
+pub use harness::{
+    CoverageGap, CoverageReport, Harness, HeadlessPlatform, SettleTimeout, VirtualClock,
+};
 
 // ── Framebuffer ──────────────────────────────────────────────────────────────
 
