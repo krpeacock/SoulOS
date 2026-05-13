@@ -43,15 +43,16 @@ fn on_draw() {
     clear();
     title_bar("egui Components Demo");
 
-    // Button variants section rendered in the egui layer
+    // Button variants section rendered in the egui layer (below the canvas title bar)
+    egui_space((), 18);
     egui_group((), "Button Variants", |ui| {
         egui_label(ui, "Standard  /  Small  /  Icon:");
         egui_horizontal_layout((), |ui| {
             if egui_button(ui, "Normal") { btn_last = "Normal"; }
             if egui_small_button(ui, "Small") { btn_last = "Small"; }
-            if egui_icon_button(ui, "×") { btn_last = "× icon"; }
-            if egui_icon_button(ui, "◀") { btn_last = "◀ icon"; }
-            if egui_icon_button(ui, "▶") { btn_last = "▶ icon"; }
+            if egui_icon_button(ui, "x") { btn_last = "x icon"; }
+            if egui_icon_button(ui, "<") { btn_last = "< icon"; }
+            if egui_icon_button(ui, ">") { btn_last = "> icon"; }
         });
 
         egui_label(ui, "Toggle (click to flip):");

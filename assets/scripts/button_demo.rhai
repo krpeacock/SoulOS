@@ -20,14 +20,16 @@ fn on_draw() {
     title_bar("Button Variants");
 
     egui_begin();
+    egui_space((), 18); // leave room below the canvas title bar
 
     // --- Standard buttons ---
     egui_label((), "Standard:");
     egui_horizontal_layout((), |ui| {
         if egui_button(ui, "Normal") { last_action = "Normal"; }
         if egui_small_button(ui, "Small") { last_action = "Small"; }
-        if egui_icon_button(ui, "×") { last_action = "Icon ×"; }
-        if egui_icon_button(ui, "◀") { last_action = "Icon ◀"; }
+        if egui_icon_button(ui, "x") { last_action = "Icon x"; }
+        if egui_icon_button(ui, "<") { last_action = "Icon <"; }
+        if egui_icon_button(ui, ">") { last_action = "Icon >"; }
     });
 
     egui_separator(());

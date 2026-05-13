@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use embedded_graphics::image::{Image, ImageRaw};
 use embedded_graphics::pixelcolor::Gray8;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::Rectangle;
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope, AST, FnPtr};
 use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
 use soul_db::Database;
@@ -120,24 +120,19 @@ where
         for clipped_shape in egui_output.shapes {
             match clipped_shape.shape {
                 egui::Shape::Rect(rect_shape) => {
-                    // Skip fully transparent shapes
-                    if rect_shape.fill.a() == 0 {
-                        continue;
-                    }
-                    
                     let rect = rect_shape.rect;
-                    let color = color_to_gray8(rect_shape.fill);
                     let eg_rect = Rectangle::new(
                         Point::new(rect.min.x as i32, rect.min.y as i32),
                         Size::new(rect.width() as u32, rect.height() as u32),
                     );
-                    let _ = self.fill_solid(&eg_rect, color);
-                    
-                    // Draw stroke if present
+                    if rect_shape.fill.a() > 0 {
+                        let _ = self.fill_solid(&eg_rect, color_to_gray8(rect_shape.fill));
+                    }
                     if rect_shape.stroke.width > 0.0 && rect_shape.stroke.color.a() > 0 {
-                        let _stroke_color = color_to_gray8(rect_shape.stroke.color);
-                        // Simplified stroke as a border rect for now
-                        // Proper stroke would need primitives::Styled
+                        let stroke_color = color_to_gray8(rect_shape.stroke.color);
+                        let _ = eg_rect
+                            .into_styled(PrimitiveStyle::with_stroke(stroke_color, 1))
+                            .draw(self);
                     }
                 }
                 egui::Shape::Text(text_shape) => {
@@ -760,10 +755,22 @@ impl ScriptedApp {
                 (*ui_ptr).label(text);
             }
         });
+        // Use egui only for layout positioning; render via the canvas button() primitive
+        // so pressed/inverted state renders correctly on the Gray8 canvas.
         engine.register_fn("egui_button", |_ui: Dynamic, text: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    (*ui_ptr).button(text).clicked()
+                    let w = (text.len() as f32 * 7.0 + 16.0).max(60.0);
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(w, 22.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &text, false,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }
@@ -801,61 +808,101 @@ impl ScriptedApp {
         engine.register_fn("egui_small_button", |_ui: Dynamic, text: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    (*ui_ptr).add(egui::Button::new(text).small()).clicked()
+                    let w = (text.len() as f32 * 7.0 + 12.0).max(22.0);
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(w, 18.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &text, false,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }
             }
         });
 
-        // Toggle button: shows persistent selected/active state (black fill when active).
-        // Use for tab bars, filter groups, or any on/off choice.
-        // Returns true on the frame the user clicks it.
+        // Toggle button: shows persistent selected/active state.
+        // pressed=true → black fill, white text (inverted Palm style).
         engine.register_fn("egui_toggle_button", |_ui: Dynamic, text: String, active: bool| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    (*ui_ptr).add(soul_ui::SoulOSButton::new(text).pressed(active)).clicked()
+                    let w = (text.len() as f32 * 7.0 + 16.0).max(44.0);
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(w, 22.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &text, active,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }
             }
         });
 
-        // Fill-width button: stretches to the full available width.
-        // Use for primary actions (Save, Submit, Add) that deserve visual emphasis.
+        // Fill button: stretches to full available width for primary actions.
         engine.register_fn("egui_fill_button", |_ui: Dynamic, text: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    let width = (*ui_ptr).available_width();
-                    (*ui_ptr)
-                        .add_sized(egui::Vec2::new(width, 28.0), egui::Button::new(text))
-                        .clicked()
+                    let w = (*ui_ptr).available_width().max(60.0);
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(w, 24.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &text, false,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }
             }
         });
 
-        // Icon button: square 24×24, intended for single Unicode symbols (×, ←, ▶, etc.).
-        // Keeps touch target the same as a normal button while the label is just a glyph.
+        // Icon button: square touch target for single-glyph labels (x, <, >, etc.).
         engine.register_fn("egui_icon_button", |_ui: Dynamic, symbol: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    (*ui_ptr)
-                        .add(soul_ui::SoulOSButton::new(symbol).min_size(egui::Vec2::new(24.0, 24.0)))
-                        .clicked()
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(22.0, 22.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &symbol, false,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }
             }
         });
 
-        // Danger button: inverted styling (white text on black) to signal a destructive action.
-        // Use for Delete, Clear All, Reset — anything the user should think twice about.
+        // Danger button: inverted styling signals a destructive action.
         engine.register_fn("egui_danger_button", |_ui: Dynamic, text: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    (*ui_ptr).add(soul_ui::SoulOSButton::new(text).pressed(true)).clicked()
+                    let w = (text.len() as f32 * 7.0 + 16.0).max(44.0);
+                    let (rect, response) = (*ui_ptr)
+                        .allocate_exact_size(egui::Vec2::new(w, 22.0), egui::Sense::click());
+                    if let Some(canvas) = ACTIVE_CANVAS {
+                        (*canvas).button(
+                            rect.min.x as i32, rect.min.y as i32,
+                            rect.width() as u32, rect.height() as u32,
+                            &text, true,
+                        );
+                    }
+                    response.clicked()
                 } else {
                     false
                 }

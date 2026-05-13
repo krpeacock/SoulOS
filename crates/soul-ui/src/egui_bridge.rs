@@ -79,7 +79,15 @@ impl EguiRhaiBridge {
 
     pub fn run(&self, content_fn: impl FnOnce(&mut Ui)) -> egui::FullOutput {
         let mut content_fn_opt = Some(content_fn);
-        self.context.run(Default::default(), |ctx| {
+        // Provide the SoulOS virtual resolution so egui layout dimensions are correct.
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(240.0, 320.0),
+            )),
+            ..Default::default()
+        };
+        self.context.run(raw_input, |ctx| {
             // Use Frame::none() to avoid drawing a background that would cover manual drawing
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
