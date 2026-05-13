@@ -18,6 +18,9 @@ pub mod system_settings;
 // conditional on the same cfg).
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 pub mod harness_ext;
+// Physical-resolution text hook for the hosted (minifb) platform.
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+pub mod hd_text;
 
 use embedded_graphics::{
     draw_target::DrawTarget,

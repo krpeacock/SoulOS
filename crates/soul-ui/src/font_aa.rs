@@ -1,15 +1,11 @@
 // Anti-aliased text rendering via fontdue at logical pixel scale.
 //
-// Each glyph is rasterized at the requested `size_px` in logical pixels and
-// coverage values (0–255) are blended against a white background before being
-// emitted as individual `Gray8` pixels.  Those pixels pass through the
-// DrawTarget's `draw_iter` normally — on the hosted platform each logical pixel
-// expands to a PIXEL_SCALE×PIXEL_SCALE physical block, so the gray edge
-// coverage appears at 4×4 granularity rather than sub-pixel, but is still
-// visibly smoother than the 1-bit bitmap fonts they replace.
-//
-// `draw_text_aa_phys` on `MiniFbDisplay` (soul-hal-hosted) bypasses `draw_iter`
-// to write single physical pixels and achieves true sub-pixel precision.
+// Each glyph is rasterized at the requested `size_px` in logical pixels.
+// By default, coverage values pass through `DrawTarget::draw_iter` — on the
+// hosted desktop platform each logical pixel expands to a PIXEL_SCALE×PIXEL_SCALE
+// physical block.  When a physical renderer is installed via `set_phys_text_fn`,
+// `draw_text_face` delegates to it instead, achieving true sub-pixel precision
+// at any display scale factor.
 
 extern crate alloc;
 
@@ -18,6 +14,22 @@ use alloc::boxed::Box;
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Gray8, prelude::*};
 use fontdue::{Font, FontSettings};
 use once_cell::race::OnceBox;
+
+// Optional hook for physical-resolution text rendering.
+// When set, draw_text_face routes all text through this function instead of
+// emitting Gray8 pixels via draw_iter.  The platform sets this once at startup
+// (e.g., desktop HAL at 4× scale) and never changes it during a session.
+// `luma` follows the same convention as draw_text_face: 0 = black, 255 = white.
+static mut PHYS_TEXT_FN: Option<fn(i32, i32, &str, f32, u8)> = None;
+
+/// Install a physical-resolution text renderer.
+///
+/// Pass `None` to restore the default `draw_iter` path.
+/// # Safety
+/// Must be called before any drawing begins (single-threaded SoulOS invariant).
+pub unsafe fn set_phys_text_fn(f: Option<fn(i32, i32, &str, f32, u8)>) {
+    PHYS_TEXT_FN = f;
+}
 
 /// The three system typefaces available for text rendering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,6 +92,15 @@ pub fn draw_text_face<D>(
 where
     D: DrawTarget<Color = Gray8>,
 {
+    // When a physical renderer is installed (e.g., 4× desktop HAL), delegate
+    // entirely — it rasterizes at physical scale and writes 1:1 physical pixels,
+    // giving sharp text instead of 4×4-block-expanded gray coverage.
+    unsafe {
+        if let Some(f) = PHYS_TEXT_FN {
+            f(x, y, text, size_px, luma);
+            return Ok(());
+        }
+    }
     let font = get_font_for(face);
     let cap_h = {
         let (m, _) = font.rasterize('H', size_px);

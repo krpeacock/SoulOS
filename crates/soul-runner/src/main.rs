@@ -16,6 +16,17 @@ fn main() {
     log::info!("🚀 SoulOS starting up...");
 
     let mut platform = HostedPlatform::new("SoulOS", SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+
+    // Install physical-resolution text rendering.  The desktop display runs at
+    // PIXEL_SCALE×PIXEL_SCALE per logical pixel; without this hook every glyph's
+    // gray edge coverage would be expanded to a 4×4 block, making text visibly
+    // blurry.  draw_text_aa_phys rasterizes at full physical resolution and
+    // writes individual physical pixels, producing crisp output.
+    unsafe {
+        soul_runner::hd_text::register_hosted_display(&mut platform.display);
+        soul_ui::font_aa::set_phys_text_fn(Some(soul_runner::hd_text::hosted_phys_text));
+    }
+
     run(&mut platform, Host::new());
 }
 
