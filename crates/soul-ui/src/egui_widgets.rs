@@ -36,24 +36,28 @@ impl Default for SoulOSStyle {
 pub fn apply_soulos_style(ctx: &Context) {
     let style = SoulOSStyle::default();
     let mut visuals = ctx.style().visuals.clone();
-    
-    // Set basic colors
+
+    // All surfaces must be white — SoulOS is a light-background system.
     visuals.override_text_color = Some(style.text);
     visuals.panel_fill = style.background;
+    visuals.window_fill = style.background;
     visuals.extreme_bg_color = style.background;
-    
-    // Button styling
+    // faint_bg_color is what Frame::group() uses for its fill
+    visuals.faint_bg_color = style.background;
+
+    // Button / widget states
+    visuals.widgets.noninteractive.bg_fill = style.background;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, style.border);
+
     visuals.widgets.inactive.bg_fill = style.background;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, style.border);
-    // Note: rounding is a method in newer EGUI versions
-    // We'll apply rounding directly in widget rendering instead
-    
+
     visuals.widgets.hovered.bg_fill = style.accent;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, style.border);
-    
+
     visuals.widgets.active.bg_fill = style.text;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, style.background);
-    
+
     ctx.set_visuals(visuals);
 }
 

@@ -8,6 +8,9 @@ pub struct EguiRhaiBridge {
 
 impl EguiRhaiBridge {
     pub fn new(context: Context) -> Self {
+        // Apply SoulOS light style once — this persists across frames because
+        // egui::Context stores style internally.
+        crate::apply_soulos_style(&context);
         Self { context }
     }
 
