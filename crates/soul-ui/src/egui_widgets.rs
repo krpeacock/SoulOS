@@ -59,14 +59,14 @@ pub fn apply_soulos_style(ctx: &Context) {
 
 /// Enhanced button widget with SoulOS Palm-style behavior
 pub struct SoulOSButton {
-    text: WidgetText,
+    text: String,
     min_size: Vec2,
     pressed: bool,
     sense: Sense,
 }
 
 impl SoulOSButton {
-    pub fn new(text: impl Into<WidgetText>) -> Self {
+    pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             min_size: Vec2::new(24.0, 24.0),
@@ -81,7 +81,7 @@ impl SoulOSButton {
         self
     }
 
-    /// Set pressed state (for showing selected/active state)
+    /// Set pressed/selected state — renders as inverted (black bg, white text)
     pub fn pressed(mut self, pressed: bool) -> Self {
         self.pressed = pressed;
         self
@@ -96,11 +96,12 @@ impl SoulOSButton {
 
 impl Widget for SoulOSButton {
     fn ui(self, ui: &mut Ui) -> Response {
-        // Simplified button implementation using EGUI's built-in button
-        let button = Button::new(self.text);
-        if self.pressed {
-            // For now, just use regular button - pressed state would need custom styling
-        }
+        let button = if self.pressed {
+            Button::new(RichText::new(self.text).color(Color32::WHITE))
+                .fill(Color32::BLACK)
+        } else {
+            Button::new(self.text)
+        };
         ui.add_sized(self.min_size, button)
     }
 }
@@ -347,6 +348,21 @@ impl WidgetFactory {
         SoulOSButton::new(text).min_size(Vec2::new(20.0, 15.0))
     }
 
+    /// Create a toggle button that shows persistent selected/active state
+    pub fn toggle_button(text: &str, active: bool) -> SoulOSButton {
+        SoulOSButton::new(text).pressed(active)
+    }
+
+    /// Create a square icon/symbol button (touch-friendly, equal w/h)
+    pub fn icon_button(symbol: &str) -> SoulOSButton {
+        SoulOSButton::new(symbol).min_size(Vec2::new(24.0, 24.0))
+    }
+
+    /// Create a destructive action button with inverted (black-fill) styling
+    pub fn danger_button(text: &str) -> SoulOSButton {
+        SoulOSButton::new(text).pressed(true)
+    }
+
     /// Create a title bar
     pub fn title_bar(title: &str, width: f32) -> SoulOSTitleBar {
         SoulOSTitleBar::new(title, width)
@@ -398,20 +414,30 @@ mod tests {
     #[test]
     fn test_widget_factory() {
         let button = WidgetFactory::button("Test");
-        // Test that button was created with correct properties
         assert_eq!(button.min_size, Vec2::new(24.0, 24.0));
-        
+        assert!(!button.pressed);
+
         let small_button = WidgetFactory::small_button("X");
         assert_eq!(small_button.min_size, Vec2::new(20.0, 15.0));
+
+        let toggle = WidgetFactory::toggle_button("On", true);
+        assert!(toggle.pressed);
+
+        let icon = WidgetFactory::icon_button("×");
+        assert_eq!(icon.min_size, Vec2::new(24.0, 24.0));
+
+        let danger = WidgetFactory::danger_button("Delete");
+        assert!(danger.pressed);
     }
 
-    #[test] 
+    #[test]
     fn test_soulos_button_configuration() {
         let button = SoulOSButton::new("Test")
             .min_size(Vec2::new(50.0, 30.0))
             .pressed(true);
-        
+
         assert_eq!(button.min_size, Vec2::new(50.0, 30.0));
         assert!(button.pressed);
+        assert_eq!(button.text, "Test");
     }
 }

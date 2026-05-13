@@ -801,8 +801,61 @@ impl ScriptedApp {
         engine.register_fn("egui_small_button", |_ui: Dynamic, text: String| -> bool {
             unsafe {
                 if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
-                    // Small button style
                     (*ui_ptr).add(egui::Button::new(text).small()).clicked()
+                } else {
+                    false
+                }
+            }
+        });
+
+        // Toggle button: shows persistent selected/active state (black fill when active).
+        // Use for tab bars, filter groups, or any on/off choice.
+        // Returns true on the frame the user clicks it.
+        engine.register_fn("egui_toggle_button", |_ui: Dynamic, text: String, active: bool| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    (*ui_ptr).add(soul_ui::SoulOSButton::new(text).pressed(active)).clicked()
+                } else {
+                    false
+                }
+            }
+        });
+
+        // Fill-width button: stretches to the full available width.
+        // Use for primary actions (Save, Submit, Add) that deserve visual emphasis.
+        engine.register_fn("egui_fill_button", |_ui: Dynamic, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    let width = (*ui_ptr).available_width();
+                    (*ui_ptr)
+                        .add_sized(egui::Vec2::new(width, 28.0), egui::Button::new(text))
+                        .clicked()
+                } else {
+                    false
+                }
+            }
+        });
+
+        // Icon button: square 24×24, intended for single Unicode symbols (×, ←, ▶, etc.).
+        // Keeps touch target the same as a normal button while the label is just a glyph.
+        engine.register_fn("egui_icon_button", |_ui: Dynamic, symbol: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    (*ui_ptr)
+                        .add(soul_ui::SoulOSButton::new(symbol).min_size(egui::Vec2::new(24.0, 24.0)))
+                        .clicked()
+                } else {
+                    false
+                }
+            }
+        });
+
+        // Danger button: inverted styling (white text on black) to signal a destructive action.
+        // Use for Delete, Clear All, Reset — anything the user should think twice about.
+        engine.register_fn("egui_danger_button", |_ui: Dynamic, text: String| -> bool {
+            unsafe {
+                if let Some(ui_ptr) = soul_ui::ACTIVE_UI {
+                    (*ui_ptr).add(soul_ui::SoulOSButton::new(text).pressed(true)).clicked()
                 } else {
                     false
                 }
