@@ -14,6 +14,10 @@ pub mod launcher;
 pub mod paint;
 pub mod settings;
 pub mod system_settings;
+// Harness<Host> extensions — only available on desktop (soul-hal-hosted dep is
+// conditional on the same cfg).
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+pub mod harness_ext;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -356,6 +360,50 @@ impl AppSlot {
         }
     }
 
+    /// Replace the database of a scripted app slot. No-op for native slots.
+    /// Used by the test harness to inject seeded fixture data.
+    fn inject_db(&mut self, db: soul_db::Database) {
+        if let AppSlot::Scripted { app, .. } = self {
+            app.db = db;
+        }
+    }
+
+    /// Like `from_descriptor` but always starts the scripted app with an
+    /// empty in-memory database, ignoring any on-disk `.sdb` file.
+    fn from_descriptor_headless(desc: &AppDescriptor) -> Self {
+        match &desc.kind {
+            AppKind::Scripted { script, db: _ } => {
+                let script_stem = Path::new(script)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("app");
+                let script_src = assets::read_to_string(script).unwrap_or_else(|_| {
+                    "fn on_draw() {} fn on_event(_ev) {}".to_string()
+                });
+                let soul_db = soul_db::Database::new(script_stem);
+                match ScriptedApp::new(script_stem, &script_src, soul_db) {
+                    Ok(app) => AppSlot::Scripted {
+                        app: Box::new(app),
+                        db_path: PathBuf::new(), // no persistence in headless mode
+                    },
+                    Err(_) => {
+                        let err_script = format!(
+                            "let app_id = \"error.{s}\"; let app_name = \"{s}\"; \
+                             fn on_draw() {{ title_bar(\"Load Error\"); }} fn on_event(_ev) {{}}",
+                            s = script_stem
+                        );
+                        let err_app =
+                            ScriptedApp::new(script_stem, &err_script, soul_db::Database::new(script_stem))
+                                .expect("error fallback is always valid");
+                        AppSlot::Scripted { app: Box::new(err_app), db_path: PathBuf::new() }
+                    }
+                }
+            }
+            // Native apps have no DB to replace; delegate to the normal path.
+            _ => Self::from_descriptor(desc),
+        }
+    }
+
     /// The stable, app-assigned unique identifier.
     /// For scripted apps this comes from the script's own `let app_id = "..."`.
     fn app_id(&self) -> String {
@@ -649,6 +697,71 @@ impl Host {
         }
     }
 
+    /// Like `new()` but every scripted app starts with an empty in-memory
+    /// database — no `.soulos/*.sdb` files are read. Used by the test harness
+    /// to guarantee a clean, deterministic initial state independent of any
+    /// data left behind by previous runs.
+    pub fn new_headless() -> Self {
+        let mut apps: Vec<AppSlot> = Vec::with_capacity(APP_MANIFEST.len() + 1);
+        apps.push(AppSlot::Native(NativeKind::Launcher(
+            crate::launcher::Launcher::new(),
+        )));
+        for desc in APP_MANIFEST {
+            apps.push(AppSlot::from_descriptor_headless(desc));
+        }
+
+        let home_idx = apps
+            .iter()
+            .position(|s| s.app_id() == HOME_APP_ID)
+            .unwrap_or(0);
+
+        let app_meta: Box<Vec<soul_script::AppEntry>> = Box::new(
+            apps.iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.app_id() != HOME_APP_ID)
+                .map(|(slot_idx, slot)| soul_script::AppEntry {
+                    app_id: slot.app_id(),
+                    name: slot.name(),
+                    slot_idx,
+                    icon_stem: slot.icon_stem().unwrap_or_default(),
+                })
+                .collect(),
+        );
+        unsafe { soul_script::set_app_list(app_meta.as_ref() as *const _) }
+
+        let mut capability_index: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (manifest_idx, desc) in APP_MANIFEST.iter().enumerate() {
+            let slot_idx = manifest_idx + 1;
+            for &action in desc.handles {
+                capability_index.entry(action.to_string()).or_default().push(slot_idx);
+            }
+        }
+        for action in &["get_resource", "set_resource", "pick_app"] {
+            capability_index.entry(action.to_string()).or_default().insert(0, home_idx);
+        }
+
+        Self {
+            apps,
+            home_idx,
+            stack: vec![home_idx],
+            _app_meta: app_meta,
+            capability_index,
+            pending_request: None,
+            strip_pressed: false,
+            a11y_enabled: false,
+            a11y_highlight: None,
+            pen_start: None,
+            last_tap: None,
+            tap_count: 0,
+            power_down_ms: None,
+            settings: system_settings::SystemSettings::open(std::path::PathBuf::new()),
+            settings_app_id: String::new(),
+            last_persisted: system_settings::A11ySettings::default(),
+            chooser: None,
+        }
+    }
+
     fn active_idx(&self) -> usize {
         *self.stack.last().unwrap_or(&self.home_idx)
     }
@@ -664,9 +777,19 @@ impl Host {
     }
 
     /// Resolve a stable app ID to a slot index and launch it.
-    fn launch_by_id(&mut self, id: &str, ctx: &mut Ctx<'_>) {
+    /// Public so `Harness<Host>` in `soul-runner::harness_ext` can call it.
+    pub fn launch_by_id(&mut self, id: &str, ctx: &mut Ctx<'_>) {
         if let Some(idx) = self.apps.iter().position(|s| s.app_id() == id) {
             self.launch_app(idx, ctx);
+        }
+    }
+
+    /// Replace the database for a scripted app by its stable `app_id`.
+    /// No-op when the app is native or the ID is not found.
+    /// Used by the test harness to inject fixture data before launching.
+    pub fn inject_db(&mut self, app_id: &str, db: soul_db::Database) {
+        if let Some(slot) = self.apps.iter_mut().find(|s| s.app_id() == app_id) {
+            slot.inject_db(db);
         }
     }
 

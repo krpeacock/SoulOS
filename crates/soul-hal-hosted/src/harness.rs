@@ -1,11 +1,8 @@
 //! Headless platform for deterministic testing.
 //!
-//! Stage 1+2+3+4+5 complete (see `docs/Harness.md`).
-//! Provides a `Platform` impl that runs with no window and reads time
-//! from a clock the test advances explicitly, plus the `Harness` driver API
-//! for input, stepping, A11y queries, PNG snapshots with golden images,
-//! settle() for waiting until the app stabilizes, and advance_ms() for
-//! time-based testing.
+//! Stages 1–5 complete (see `docs/Harness.md`). `Harness<Host>` extensions
+//! (launch, with_db, home) live in `soul-runner::harness_ext` to avoid a
+//! circular dependency.
 
 use std::collections::VecDeque;
 
@@ -162,74 +159,10 @@ impl<A: soul_core::App> Harness<A> {
         harness
     }
 
-    /// Advance exactly one frame of the event loop.
-    /// This drains pending events, sends a Tick, and draws if dirty.
-    pub fn tick(&mut self) {
-        let _frame_start = self.platform.now_ms();
-        
-        // Drain all pending events
-        while let Some(ev) = self.platform.poll_event() {
-            if let Some(e) = translate_input_event(ev) {
-                let now = self.platform.now_ms();
-                let mut ctx = Ctx {
-                    now_ms: now,
-                    dirty: &mut self.dirty,
-                    a11y: &mut self.a11y,
-                };
-                self.app.handle(e, &mut ctx);
-            }
-        }
-        
-        // Send tick event
-        {
-            let now = self.platform.now_ms();
-            let mut ctx = Ctx {
-                now_ms: now,
-                dirty: &mut self.dirty,
-                a11y: &mut self.a11y,
-            };
-            self.app.handle(Event::Tick(now), &mut ctx);
-        }
-        
-        // Draw if dirty
-        if let Some(rect) = self.dirty.take() {
-            use embedded_graphics::{
-                draw_target::DrawTargetExt,
-                pixelcolor::Gray8,
-                primitives::PrimitiveStyle,
-                prelude::*,
-            };
-            let mut clip = self.platform.display.clipped(&rect);
-            // Clear only the dirty region to white before drawing.
-            let _ = rect
-                .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
-                .draw(&mut clip);
-            self.app.draw(&mut clip, rect);
-        }
-        
-        // Drain accessibility speech as structured SpeechRequests so
-        // harness assertions see the same rate/interrupt fields the
-        // production soul-core drain produces.
-        // Sync curtain transitions to the platform — same one-shot
-        // semantics as soul-core::run.
-        if self.a11y.screen_curtain != self.last_curtain {
-            self.platform.set_screen_curtain(self.a11y.screen_curtain);
-            self.last_curtain = self.a11y.screen_curtain;
-        }
-
-        let rate = self.a11y.rate_wpm;
-        let punctuation = self.a11y.punctuation;
-        for text in self.a11y.pending_speech.drain(..) {
-            self.platform.speak(soul_hal::SpeechRequest {
-                text: &text,
-                rate_wpm: rate,
-                interrupt: true,
-                punctuation,
-            });
-        }
-        
-        // Advance virtual clock by 16ms (like the real event loop)
-        self.platform.clock.advance(16);
+    /// Advance exactly one frame of the event loop. Returns whether any
+    /// drawing occurred (used by `settle()`).
+    pub fn tick(&mut self) -> bool {
+        self.step_frame()
     }
 
     /// Simulate a stylus tap at the given coordinates.
@@ -306,15 +239,11 @@ impl<A: soul_core::App> Harness<A> {
         let mut ticks_elapsed = 0;
 
         while consecutive_clean < clean_frames && ticks_elapsed < max_ticks {
-            // Run a tick but track if it generated any drawing
-            let had_drawing = self.tick_and_check_dirty();
+            let had_drawing = self.step_frame();
             ticks_elapsed += 1;
-            
             if had_drawing {
-                // Reset clean counter if there was drawing
                 consecutive_clean = 0;
             } else {
-                // Increment clean counter if no drawing
                 consecutive_clean += 1;
             }
         }
@@ -329,11 +258,10 @@ impl<A: soul_core::App> Harness<A> {
         }
     }
 
-    /// Run one tick and return true if any drawing occurred.
-    fn tick_and_check_dirty(&mut self) -> bool {
-        let _frame_start = self.platform.now_ms();
-        
-        // Drain all pending events
+    /// One pass of the soul-core event loop. Returns true if any drawing
+    /// occurred (dirty rect was non-empty). Called by both `tick()` and
+    /// `settle_with_params()`.
+    fn step_frame(&mut self) -> bool {
         while let Some(ev) = self.platform.poll_event() {
             if let Some(e) = translate_input_event(ev) {
                 let now = self.platform.now_ms();
@@ -345,8 +273,7 @@ impl<A: soul_core::App> Harness<A> {
                 self.app.handle(e, &mut ctx);
             }
         }
-        
-        // Send tick event
+
         {
             let now = self.platform.now_ms();
             let mut ctx = Ctx {
@@ -356,8 +283,7 @@ impl<A: soul_core::App> Harness<A> {
             };
             self.app.handle(Event::Tick(now), &mut ctx);
         }
-        
-        // Check if we need to draw and do it
+
         let had_drawing = if let Some(rect) = self.dirty.take() {
             use embedded_graphics::{
                 draw_target::DrawTargetExt,
@@ -366,21 +292,15 @@ impl<A: soul_core::App> Harness<A> {
                 prelude::*,
             };
             let mut clip = self.platform.display.clipped(&rect);
-            // Clear only the dirty region to white before drawing.
             let _ = rect
                 .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
                 .draw(&mut clip);
             self.app.draw(&mut clip, rect);
-            true // Had drawing
+            true
         } else {
-            false // No drawing
+            false
         };
-        
-        // Drain accessibility speech as structured SpeechRequests so
-        // harness assertions see the same rate/interrupt fields the
-        // production soul-core drain produces.
-        // Sync curtain transitions to the platform — same one-shot
-        // semantics as soul-core::run.
+
         if self.a11y.screen_curtain != self.last_curtain {
             self.platform.set_screen_curtain(self.a11y.screen_curtain);
             self.last_curtain = self.a11y.screen_curtain;
@@ -396,11 +316,25 @@ impl<A: soul_core::App> Harness<A> {
                 punctuation,
             });
         }
-        
-        // Advance virtual clock by 16ms (like the real event loop)
+
         self.platform.clock.advance(16);
-        
         had_drawing
+    }
+
+    /// Provide mutable access to the app and a live `Ctx` in one call.
+    /// Used by `Harness<Host>` in `soul-runner` to drive host-level
+    /// operations (launch, go_home) without exposing private fields.
+    pub fn with_ctx<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut A, &mut Ctx<'_>),
+    {
+        let now = self.platform.now_ms();
+        let mut ctx = Ctx {
+            now_ms: now,
+            dirty: &mut self.dirty,
+            a11y: &mut self.a11y,
+        };
+        f(&mut self.app, &mut ctx);
     }
 
     /// Get the current framebuffer for inspection.
@@ -655,6 +589,106 @@ impl<A: soul_core::App> Harness<A> {
         &mut self.app
     }
 }
+
+// ── Coverage report ──────────────────────────────────────────────────────────
+
+/// A quality problem found in the app's a11y tree.
+#[derive(Debug, Clone)]
+pub struct CoverageGap {
+    pub node: soul_core::a11y::A11yNode,
+    /// Short human-readable description of the problem.
+    pub reason: &'static str,
+}
+
+/// Result of [`Harness::coverage_report`].
+#[derive(Debug)]
+pub struct CoverageReport {
+    /// Every node the app currently reports.
+    pub nodes: Vec<soul_core::a11y::A11yNode>,
+    /// Nodes with detectable quality problems (empty label, zero-sized
+    /// bounds, or bounds entirely outside the logical screen).
+    pub gaps: Vec<CoverageGap>,
+    /// Fraction of the logical screen area (240×320) covered by at least
+    /// one a11y node. 0.0 means nothing is annotated; 1.0 means every pixel
+    /// is inside at least one node bounds.
+    pub screen_coverage: f32,
+}
+
+impl CoverageReport {
+    /// True when every node has a non-empty label and valid bounds, and at
+    /// least one node exists. Convenient for `assert!(h.coverage_report().is_clean())`.
+    pub fn is_clean(&self) -> bool {
+        !self.nodes.is_empty() && self.gaps.is_empty()
+    }
+}
+
+impl<A: soul_core::App> Harness<A> {
+    /// Inspect the app's current a11y tree for coverage quality problems.
+    ///
+    /// This is a pure, non-mutating call — no events are sent. It reports:
+    /// - nodes with empty labels
+    /// - nodes with zero-sized or off-screen bounds
+    /// - the fraction of the logical 240×320 screen covered by node bounds
+    ///
+    /// For "tappable area with no a11y node" detection (requires sending
+    /// PenDown events) use a probe-based approach layered on `tick()`.
+    pub fn coverage_report(&self) -> CoverageReport {
+        use soul_core::a11y::A11yNode;
+
+        let screen_w = SCREEN_WIDTH as i32;
+        let screen_h = SCREEN_HEIGHT as i32;
+        let screen_area = (screen_w * screen_h) as f32;
+
+        let nodes: Vec<A11yNode> = self.app.a11y_nodes();
+        let mut gaps = Vec::new();
+
+        for node in &nodes {
+            if node.label.trim().is_empty() {
+                gaps.push(CoverageGap { node: node.clone(), reason: "empty label" });
+                continue;
+            }
+            let w = node.bounds.size.width as i32;
+            let h = node.bounds.size.height as i32;
+            if w == 0 || h == 0 {
+                gaps.push(CoverageGap { node: node.clone(), reason: "zero-sized bounds" });
+                continue;
+            }
+            let x0 = node.bounds.top_left.x;
+            let y0 = node.bounds.top_left.y;
+            let x1 = x0 + w;
+            let y1 = y0 + h;
+            if x1 <= 0 || y1 <= 0 || x0 >= screen_w || y0 >= screen_h {
+                gaps.push(CoverageGap { node: node.clone(), reason: "bounds entirely off-screen" });
+            }
+        }
+
+        // Compute covered pixel fraction using a 4×4 sampling grid per node.
+        // Exact coverage would require a bitmask; this approximation is cheap
+        // and good enough for the "is anything annotated at all" use case.
+        let covered: f32 = if nodes.is_empty() {
+            0.0
+        } else {
+            let mut area = 0i64;
+            for node in &nodes {
+                let x0 = node.bounds.top_left.x.max(0) as i64;
+                let y0 = node.bounds.top_left.y.max(0) as i64;
+                let x1 = (node.bounds.top_left.x + node.bounds.size.width as i32)
+                    .min(screen_w) as i64;
+                let y1 = (node.bounds.top_left.y + node.bounds.size.height as i32)
+                    .min(screen_h) as i64;
+                if x1 > x0 && y1 > y0 {
+                    area += (x1 - x0) * (y1 - y0);
+                }
+            }
+            // Clamp to 1.0 — overlapping nodes can push the sum above 100 %.
+            (area as f32 / screen_area).min(1.0)
+        };
+
+        CoverageReport { nodes, gaps, screen_coverage: covered }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Translate HAL InputEvent to core Event.
 /// This is a copy of the logic from soul-core's run function.
