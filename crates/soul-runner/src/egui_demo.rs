@@ -51,7 +51,7 @@ impl EguiDemo {
     pub const APP_ID: &'static str = "com.soulos.egui_demo_native";
     pub const NAME: &'static str = "egui Demo (Native)";
     
-    const CONTENT_HEIGHT: u32 = 1200; // Total scrollable content height (increased to ensure scrolling)
+    const CONTENT_HEIGHT: u32 = 1400; // Total scrollable content height
     const LINE_HEIGHT: u32 = 20;
     const SECTION_SPACING: u32 = 16;
     const GROUP_SPACING: u32 = 12;
@@ -254,6 +254,46 @@ impl EguiDemo {
         Ok(())
     }
     
+    /// Draw the button variants showcase section
+    fn draw_button_variants_section<D>(&self, canvas: &mut D, y: &mut i32) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Gray8>,
+    {
+        self.draw_section_header(canvas, y, "Button Variants")?;
+
+        // Row 1: Normal | Small | Icon buttons
+        let _ = label(canvas, Point::new(12, *y), "Normal / Small / Icon:");
+        *y += Self::LINE_HEIGHT as i32;
+        let _ = button(canvas, Rectangle::new(Point::new(12, *y), Size::new(60, 20)), "Normal", false);
+        let _ = button(canvas, Rectangle::new(Point::new(80, *y), Size::new(50, 15)), "Small", false);
+        let _ = button(canvas, Rectangle::new(Point::new(140, *y), Size::new(20, 20)), "×", false);
+        let _ = button(canvas, Rectangle::new(Point::new(164, *y), Size::new(20, 20)), "◀", false);
+        let _ = button(canvas, Rectangle::new(Point::new(188, *y), Size::new(20, 20)), "▶", false);
+        *y += Self::LINE_HEIGHT as i32;
+
+        // Row 2: Toggle — one off (normal), one on (pressed=true / inverted)
+        let _ = label(canvas, Point::new(12, *y), "Toggle off / on:");
+        *y += Self::LINE_HEIGHT as i32;
+        let _ = button(canvas, Rectangle::new(Point::new(12, *y), Size::new(80, 20)), "Toggle Off", false);
+        let _ = button(canvas, Rectangle::new(Point::new(100, *y), Size::new(80, 20)), "Toggle On", true);
+        *y += Self::LINE_HEIGHT as i32;
+
+        // Row 3: Fill — spans available width
+        let _ = label(canvas, Point::new(12, *y), "Fill (primary action):");
+        *y += Self::LINE_HEIGHT as i32;
+        let _ = button(canvas, Rectangle::new(Point::new(12, *y), Size::new(208, 24)), "Save Changes", false);
+        *y += 28;
+
+        // Row 4: Danger — inverted styling signals destructive action
+        let _ = label(canvas, Point::new(12, *y), "Danger (destructive):");
+        *y += Self::LINE_HEIGHT as i32;
+        let _ = button(canvas, Rectangle::new(Point::new(12, *y), Size::new(96, 20)), "Delete All", true);
+        *y += Self::LINE_HEIGHT as i32;
+
+        *y += Self::SECTION_SPACING as i32;
+        Ok(())
+    }
+
     /// Handle text input
     fn handle_text_input(&mut self, key: KeyCode) {
         match key {
@@ -427,7 +467,8 @@ impl App for EguiDemo {
         let _ = self.draw_selection_section(&mut translated_canvas, &mut y);
         let _ = self.draw_layout_section(&mut translated_canvas, &mut y);
         let _ = self.draw_visual_section(&mut translated_canvas, &mut y);
-        
+        let _ = self.draw_button_variants_section(&mut translated_canvas, &mut y);
+
         // Final message
         let _ = label(&mut translated_canvas, Point::new(8, y), "All components rendered!");
         

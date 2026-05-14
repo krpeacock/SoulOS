@@ -16,6 +16,11 @@ let radio_selection = "Option2";
 let combo_selection = "Choice B";
 let progress_value = 70;
 
+// Button variant demo state
+let btn_toggle_a = false;
+let btn_toggle_b = true;
+let btn_last = "";
+
 fn on_event(event) {
     if event.type == "AppStart" {
         invalidate_all();
@@ -37,7 +42,44 @@ fn on_event(event) {
 fn on_draw() {
     clear();
     title_bar("egui Components Demo");
-    
+
+    // Button variants section rendered in the egui layer (below the canvas title bar)
+    egui_space((), 18);
+    egui_group((), "Button Variants", |ui| {
+        egui_label(ui, "Standard  /  Small  /  Icon:");
+        egui_horizontal_layout((), |ui| {
+            if egui_button(ui, "Normal") { btn_last = "Normal"; }
+            if egui_small_button(ui, "Small") { btn_last = "Small"; }
+            if egui_icon_button(ui, "x") { btn_last = "x icon"; }
+            if egui_icon_button(ui, "<") { btn_last = "< icon"; }
+            if egui_icon_button(ui, ">") { btn_last = "> icon"; }
+        });
+
+        egui_label(ui, "Toggle (click to flip):");
+        egui_horizontal_layout((), |ui| {
+            if egui_toggle_button(ui, "A", btn_toggle_a) {
+                btn_toggle_a = !btn_toggle_a;
+                btn_last = "Toggle A → " + btn_toggle_a;
+            }
+            if egui_toggle_button(ui, "B", btn_toggle_b) {
+                btn_toggle_b = !btn_toggle_b;
+                btn_last = "Toggle B → " + btn_toggle_b;
+            }
+        });
+
+        egui_label(ui, "Fill (stretches to width):");
+        if egui_fill_button((), "Save Changes") { btn_last = "Save"; }
+
+        egui_label(ui, "Danger (destructive action):");
+        egui_horizontal_layout((), |ui| {
+            if egui_danger_button(ui, "Delete All") { btn_last = "Delete All"; }
+        });
+
+        if btn_last != "" {
+            egui_label(ui, "→ " + btn_last);
+        }
+    });
+
     ui_begin();
     
     ui_heading("egui Component Showcase");

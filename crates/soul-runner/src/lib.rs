@@ -18,6 +18,9 @@ pub mod system_settings;
 // conditional on the same cfg).
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 pub mod harness_ext;
+// Physical-resolution text hook for the hosted (minifb) platform.
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+pub mod hd_text;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -226,6 +229,13 @@ pub(crate) const APP_MANIFEST: &[AppDescriptor] = &[
         kind: AppKind::Scripted {
             script: "assets/scripts/egui_demo.rhai",
             db: ".soulos/egui_demo.sdb",
+        },
+        handles: &[],
+    },
+    AppDescriptor {
+        kind: AppKind::Scripted {
+            script: "assets/scripts/button_demo.rhai",
+            db: "",
         },
         handles: &[],
     },
