@@ -15,7 +15,7 @@ use embedded_graphics::{
 };
 use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
-use soul_ui::{button, hit_test, label, title_bar, TextInput, TextInputOutput, BLACK, TITLE_BAR_H};
+use soul_ui::{button, hit_test, label, title_bar, MenuItem, MenuSheet, TextInput, TextInputOutput, BLACK, TITLE_BAR_H};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -42,18 +42,17 @@ const CAT_CANVAS: u8 = 0;
 /// Category 1: UI form JSON (single record).
 const CAT_FORM: u8 = 1;
 
-const MENU_ITEMS: &[&str] = &[
-    "New",
-    "Save",
-    "Name...",
-    "Gallery",
-    "Done",      // returns edited bitmap to Builder; no-op when not in exchange mode
-    "Load bg",
-    "Clear bg",
-    "Edit Layout",
-    "Delete Elem",
-    "Reset Layout",
-    "Close menu",
+const MENU_ITEMS: &[MenuItem<'static>] = &[
+    MenuItem::with_shortcut("New", 'N'),
+    MenuItem::with_shortcut("Save", 'S'),
+    MenuItem::new("Name..."),
+    MenuItem::new("Gallery"),
+    MenuItem::new("Done"),
+    MenuItem::new("Load bg"),
+    MenuItem::new("Clear bg"),
+    MenuItem::new("Edit Layout"),
+    MenuItem::with_shortcut("Delete Elem", 'D'),
+    MenuItem::new("Reset Layout"),
 ];
 
 const OPEN_ROW_H: i32 = 24;
@@ -116,8 +115,7 @@ pub struct Draw {
     tool: Tool,
     paint_touch: PaintTarget,
     last_cell: Option<(usize, usize)>,
-    menu_open: bool,
-    menu_touch: Option<usize>,
+    menu: MenuSheet,
     mode: Mode,
     undo_stack: Vec<(Vec<u8>, Vec<bool>)>,
     ui_form: soul_ui::Form,
@@ -148,8 +146,7 @@ impl Draw {
             tool: Tool::Brush,
             paint_touch: PaintTarget::None,
             last_cell: None,
-            menu_open: false,
-            menu_touch: None,
+            menu: MenuSheet::new(),
             mode: Mode::Normal,
             undo_stack: Vec::new(),
             ui_form,
@@ -297,15 +294,6 @@ impl Draw {
             }
         }
         Some((lx, ly))
-    }
-
-    fn rect_menu_entry(i: usize) -> Rectangle {
-        let col = (i % 2) as i32;
-        let row = (i / 2) as i32;
-        Rectangle::new(
-            Point::new(15 + col * 105, 60 + row * 26),
-            Size::new(100, 22),
-        )
     }
 
     fn rect_name_input() -> Rectangle {
@@ -567,7 +555,6 @@ impl Draw {
     // --- Menu / modal helpers --------------------------------------------
 
     fn menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
-        self.menu_open = false;
         match idx {
             0 => {
                 // New
@@ -693,7 +680,6 @@ impl Draw {
 
     fn cancel_modal(&mut self, ctx: &mut Ctx<'_>) {
         self.mode = Mode::Normal;
-        self.menu_open = false;
         ctx.invalidate_all();
     }
 
@@ -719,34 +705,6 @@ impl Draw {
             }
         }
         PaintTarget::None
-    }
-
-    fn handle_menu_pen(&mut self, down: bool, move_: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
-        if down {
-            self.menu_touch =
-                (0..MENU_ITEMS.len()).find(|&i| hit_test(&Self::rect_menu_entry(i), x, y));
-            if self.menu_touch.is_some() {
-                ctx.invalidate(Rectangle::new(Point::new(16, 48), Size::new(208, 240)));
-            }
-            None
-        } else if move_ {
-            None
-        } else if up {
-            let end = (0..MENU_ITEMS.len()).find(|&i| hit_test(&Self::rect_menu_entry(i), x, y));
-            let req = if self.menu_touch.is_some() && end == self.menu_touch {
-                if let Some(i) = end {
-                    self.menu_action(i, ctx)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            self.menu_touch = None;
-            req
-        } else {
-            None
-        }
     }
 
     fn handle_name_pen(&mut self, down: bool, up: bool, x: i16, y: i16, ctx: &mut Ctx<'_>) {
@@ -809,8 +767,8 @@ impl Draw {
                 match &self.mode {
                     Mode::NameInput(_) | Mode::Gallery { .. } => self.cancel_modal(ctx),
                     Mode::Normal => {
-                        self.menu_open = !self.menu_open;
-                        ctx.invalidate_all();
+                        let out = self.menu.handle(&Event::Menu, MENU_ITEMS);
+                        if let Some(r) = out.dirty { ctx.invalidate(r); }
                     }
                 }
                 None
@@ -853,6 +811,12 @@ impl Draw {
                 None
             }
             Event::ButtonDown(HardButton::PageUp) => {
+                if self.menu.is_open() {
+                    let out = self.menu.handle(&Event::ButtonDown(HardButton::PageUp), MENU_ITEMS);
+                    if let Some(r) = out.dirty { ctx.invalidate(r); }
+                    if let Some(idx) = out.committed { return self.menu_action(idx, ctx); }
+                    return None;
+                }
                 if let Mode::Gallery { scroll, .. } = &mut self.mode {
                     *scroll = scroll.saturating_sub(1);
                     ctx.invalidate(Rectangle::new(Point::new(8, 44), Size::new(224, 200)));
@@ -860,6 +824,12 @@ impl Draw {
                 None
             }
             Event::ButtonDown(HardButton::PageDown) => {
+                if self.menu.is_open() {
+                    let out = self.menu.handle(&Event::ButtonDown(HardButton::PageDown), MENU_ITEMS);
+                    if let Some(r) = out.dirty { ctx.invalidate(r); }
+                    if let Some(idx) = out.committed { return self.menu_action(idx, ctx); }
+                    return None;
+                }
                 if let Mode::Gallery { scroll, records, .. } = &mut self.mode {
                     let max_scroll = records.len().saturating_sub(OPEN_VISIBLE);
                     *scroll = (*scroll + 1).min(max_scroll);
@@ -871,14 +841,16 @@ impl Draw {
                 Mode::NameInput(_) => { self.handle_name_pen(true, false, x, y, ctx); None }
                 Mode::Gallery { .. } => { self.handle_gallery_pen(true, false, x, y, ctx); None }
                 Mode::Normal => {
+                    let was_open = self.menu.is_open();
+                    let menu_out = self.menu.handle(&Event::PenDown { x, y }, MENU_ITEMS);
+                    if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                    if was_open { return None; }
+
                     if self.builder_mode
                         && self.edit_overlay.pen_down(&self.ui_form, x, y) {
                             ctx.invalidate_all();
                             return None;
                         }
-                    if self.menu_open {
-                        return self.handle_menu_pen(true, false, false, x, y, ctx);
-                    }
                     let z = self.paint_zone_at(x, y);
                     self.paint_touch = z;
                     match z {
@@ -914,13 +886,18 @@ impl Draw {
                 }
             },
             Event::PenMove { x, y } => {
-                if self.builder_mode && matches!(self.mode, Mode::Normal) && !self.menu_open {
+                if self.menu.is_open() {
+                    let menu_out = self.menu.handle(&Event::PenMove { x, y }, MENU_ITEMS);
+                    if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                    return None;
+                }
+                if self.builder_mode && matches!(self.mode, Mode::Normal) {
                     if self.edit_overlay.pen_move(&mut self.ui_form, x, y) {
                         ctx.invalidate_all();
                         return None;
                     }
                 }
-                if !matches!(self.mode, Mode::Normal) || self.menu_open {
+                if !matches!(self.mode, Mode::Normal) {
                     return None;
                 }
                 if self.paint_touch == PaintTarget::Canvas
@@ -943,14 +920,18 @@ impl Draw {
                 Mode::NameInput(_) => { self.handle_name_pen(false, true, x, y, ctx); None }
                 Mode::Gallery { .. } => { self.handle_gallery_pen(false, true, x, y, ctx); None }
                 Mode::Normal => {
+                    let was_open = self.menu.is_open();
+                    let menu_out = self.menu.handle(&Event::PenUp { x, y }, MENU_ITEMS);
+                    if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                    if let Some(idx) = menu_out.committed { return self.menu_action(idx, ctx); }
+                    if was_open { return None; }
+
                     if self.builder_mode {
                         self.edit_overlay.pen_up();
                         self.persist_form();
                         ctx.invalidate_all();
                     }
-                    let req = if self.menu_open {
-                        self.handle_menu_pen(false, false, true, x, y, ctx)
-                    } else {
+                    let req = {
                         let end = self.paint_zone_at(x, y);
                         if self.paint_touch == end {
                             match end {
@@ -1231,20 +1212,7 @@ impl App for Draw {
                 let _ = button(canvas, Self::rect_gallery_cancel(), "Cancel", false);
             }
             Mode::Normal => {
-                if self.menu_open {
-                    let rect = Rectangle::new(Point::new(10, 30), Size::new(220, 240));
-                    let _ = rect
-                        .into_styled(PrimitiveStyle::with_fill(Gray8::WHITE))
-                        .draw(canvas);
-                    let _ = rect
-                        .into_styled(PrimitiveStyle::with_stroke(BLACK, 1))
-                        .draw(canvas);
-                    let _ = label(canvas, Point::new(15, 38), "Menu");
-                    for (i, &item) in MENU_ITEMS.iter().enumerate() {
-                        let pressed = self.menu_touch == Some(i);
-                        let _ = button(canvas, Self::rect_menu_entry(i), item, pressed);
-                    }
-                }
+                self.menu.draw(canvas, MENU_ITEMS);
             }
         }
     }
@@ -1254,15 +1222,7 @@ impl App for Draw {
         let mut nodes = self.ui_form.a11y_nodes();
         match &self.mode {
             Mode::Normal => {
-                if self.menu_open {
-                    for (i, item) in MENU_ITEMS.iter().enumerate() {
-                        nodes.push(A11yNode::new(
-                            Self::rect_menu_entry(i),
-                            *item,
-                            A11yRole::MenuItem,
-                        ));
-                    }
-                }
+                nodes.extend(self.menu.a11y_nodes(MENU_ITEMS));
             }
             Mode::NameInput(input) => {
                 nodes.push(input.a11y_node("Canvas name"));
