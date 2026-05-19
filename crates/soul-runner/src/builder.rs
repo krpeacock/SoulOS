@@ -7,7 +7,8 @@ use embedded_graphics::{
 use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
 use soul_ui::{
-    button, label, title_bar, A11yHints, Component, ComponentType, EditOverlay, Form, Rect,
+    button, label, title_bar, A11yHints, Component, ComponentType, EditOverlay, Form,
+    MenuItem, MenuSheet, Rect,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -50,21 +51,20 @@ const RESOURCE_MENU: &[&str] = &[
     "Back",
 ];
 
-const FORM_MENU: &[&str] = &[
-    "New Form",
-    "Add Button",
-    "Add Label",
-    "Add Input",
-    "Add Area",
-    "Add Checkbox",
-    "Edit Id",
-    "Edit Class",
-    "Edit Label",
-    "Edit Binding",
-    "Delete Element",
-    "Save Form",
-    "Back",
-    "Close Menu",
+const FORM_MENU_ITEMS: &[MenuItem<'static>] = &[
+    MenuItem::new("New Form"),
+    MenuItem::with_shortcut("Add Button", 'B'),
+    MenuItem::with_shortcut("Add Label", 'L'),
+    MenuItem::with_shortcut("Add Input", 'I'),
+    MenuItem::with_shortcut("Add Area", 'A'),
+    MenuItem::with_shortcut("Add Checkbox", 'X'),
+    MenuItem::new("Edit Id"),
+    MenuItem::new("Edit Class"),
+    MenuItem::new("Edit Label"),
+    MenuItem::new("Edit Binding"),
+    MenuItem::with_shortcut("Delete Element", 'D'),
+    MenuItem::with_shortcut("Save Form", 'S'),
+    MenuItem::new("Back"),
 ];
 
 // ── MobileBuilder ─────────────────────────────────────────────────────────────
@@ -79,8 +79,9 @@ pub struct MobileBuilder {
     form: Form,
     edit_overlay: EditOverlay,
     db_path: PathBuf,
-    menu_open: bool,
-    menu_touch: Option<usize>,
+    menu: MenuSheet,
+    /// Pressed index for inline Home / ResourcePicker buttons (tap feedback).
+    button_touch: Option<usize>,
     editing_value: Option<(soul_ui::TextInput, EditField)>,
     keyboard: soul_ui::Keyboard,
 }
@@ -101,8 +102,8 @@ impl MobileBuilder {
             form: Form::new("new_app"),
             edit_overlay: EditOverlay::new(),
             db_path,
-            menu_open: false,
-            menu_touch: None,
+            menu: MenuSheet::new(),
+            button_touch: None,
             editing_value: None,
             keyboard: soul_ui::Keyboard::new(APP_HEIGHT as i32 - soul_ui::KEYBOARD_HEIGHT as i32),
         }
@@ -132,11 +133,6 @@ impl MobileBuilder {
             }
             Event::Exchange { action, payload, .. } => {
                 self.handle_exchange(&action, payload, ctx)
-            }
-            Event::Menu => {
-                self.menu_open = !self.menu_open;
-                ctx.invalidate_all();
-                None
             }
             _ => match self.state {
                 BuilderState::Home => self.handle_home(event, ctx),
@@ -251,13 +247,13 @@ impl MobileBuilder {
     fn handle_home(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
         match event {
             Event::PenDown { x, y } => {
-                self.menu_touch = (0..HOME_MENU.len())
+                self.button_touch = (0..HOME_MENU.len())
                     .find(|&i| soul_ui::hit_test(&Self::home_button_rect(i), x, y));
                 ctx.invalidate_all();
                 None
             }
             Event::PenUp { x, y } => {
-                if let Some(i) = self.menu_touch.take() {
+                if let Some(i) = self.button_touch.take() {
                     if soul_ui::hit_test(&Self::home_button_rect(i), x, y) {
                         ctx.invalidate_all();
                         return self.home_action(i, ctx);
@@ -306,13 +302,13 @@ impl MobileBuilder {
     ) -> Option<SystemRequest> {
         match event {
             Event::PenDown { x, y } => {
-                self.menu_touch = (0..RESOURCE_MENU.len())
+                self.button_touch = (0..RESOURCE_MENU.len())
                     .find(|&i| soul_ui::hit_test(&Self::resource_button_rect(i), x, y));
                 ctx.invalidate_all();
                 None
             }
             Event::PenUp { x, y } => {
-                if let Some(i) = self.menu_touch.take() {
+                if let Some(i) = self.button_touch.take() {
                     if soul_ui::hit_test(&Self::resource_button_rect(i), x, y) {
                         ctx.invalidate_all();
                         return self.resource_action(i, ctx);
@@ -373,15 +369,6 @@ impl MobileBuilder {
     }
 
     // ── Form editor state ────────────────────────────────────────────────────
-
-    fn menu_item_rect(i: usize) -> Rectangle {
-        let col = (i % 2) as i32;
-        let row = (i / 2) as i32;
-        Rectangle::new(
-            Point::new(15 + col * 105, 25 + row * 24),
-            Size::new(100, 22),
-        )
-    }
 
     fn start_editing(&mut self, field: EditField) {
         if let Some(id) = &self.edit_overlay.selected_id {
@@ -467,6 +454,17 @@ impl MobileBuilder {
     }
 
     fn handle_form_editor(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        // MenuSheet intercepts first — it handles Event::Menu (toggle) and all
+        // pen/key events while open.
+        let menu_out = self.menu.handle(&event, FORM_MENU_ITEMS);
+        if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+        if let Some(idx) = menu_out.committed {
+            return self.form_menu_action(idx, ctx);
+        }
+        if self.menu.is_open() {
+            return None;
+        }
+
         // Text editing overlay intercepts all events when active.
         if let Some((input, field)) = &mut self.editing_value {
             match event {
@@ -573,32 +571,16 @@ impl MobileBuilder {
 
         match event {
             Event::PenDown { x, y } => {
-                if self.menu_open {
-                    self.menu_touch = (0..FORM_MENU.len())
-                        .find(|&i| soul_ui::hit_test(&Self::menu_item_rect(i), x, y));
-                    ctx.invalidate_all();
-                    return None;
-                }
                 if self.edit_overlay.pen_down(&self.form, x, y) {
                     ctx.invalidate_all();
                 }
             }
             Event::PenMove { x, y } => {
-                if !self.menu_open
-                    && self.edit_overlay.pen_move(&mut self.form, x, y) {
-                        ctx.invalidate_all();
-                    }
-            }
-            Event::PenUp { x, y } => {
-                if self.menu_open {
-                    if let Some(i) = self.menu_touch.take() {
-                        if soul_ui::hit_test(&Self::menu_item_rect(i), x, y) {
-                            return self.form_menu_action(i, ctx);
-                        }
-                    }
-                    self.menu_touch = None;
-                    return None;
+                if self.edit_overlay.pen_move(&mut self.form, x, y) {
+                    ctx.invalidate_all();
                 }
+            }
+            Event::PenUp { .. } => {
                 self.edit_overlay.pen_up();
                 ctx.invalidate_all();
             }
@@ -608,28 +590,28 @@ impl MobileBuilder {
     }
 
     fn form_menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
-        self.menu_open = false;
-        ctx.invalidate_all();
+        // Note: menu is already closed and its dirty rect already sent by the
+        // MenuSheet caller.  Only invalidate_all when form content changes too.
         match idx {
-            0 => { self.form = Form::new("new_app"); None }
-            1 => { self.add_component(ComponentType::Button); None }
-            2 => { self.add_component(ComponentType::Label); None }
-            3 => { self.add_component(ComponentType::TextInput); None }
-            4 => { self.add_component(ComponentType::TextArea); None }
-            5 => { self.add_component(ComponentType::Checkbox); None }
-            6 => { self.start_editing(EditField::Id); None }
-            7 => { self.start_editing(EditField::Class); None }
-            8 => { self.start_editing(EditField::Label); None }
-            9 => { self.start_editing(EditField::Binding); None }
-            10 => { self.edit_overlay.delete_selected(&mut self.form); None }
+            0 => { self.form = Form::new("new_app"); ctx.invalidate_all(); None }
+            1 => { self.add_component(ComponentType::Button); ctx.invalidate_all(); None }
+            2 => { self.add_component(ComponentType::Label); ctx.invalidate_all(); None }
+            3 => { self.add_component(ComponentType::TextInput); ctx.invalidate_all(); None }
+            4 => { self.add_component(ComponentType::TextArea); ctx.invalidate_all(); None }
+            5 => { self.add_component(ComponentType::Checkbox); ctx.invalidate_all(); None }
+            6 => { self.start_editing(EditField::Id); ctx.invalidate_all(); None }
+            7 => { self.start_editing(EditField::Class); ctx.invalidate_all(); None }
+            8 => { self.start_editing(EditField::Label); ctx.invalidate_all(); None }
+            9 => { self.start_editing(EditField::Binding); ctx.invalidate_all(); None }
+            10 => { self.edit_overlay.delete_selected(&mut self.form); ctx.invalidate_all(); None }
             11 => { self.persist(); None }
             12 => {
-                // "Back" — return to resource picker (or home if no app selected).
                 self.state = if self.selected_app_id.is_empty() {
                     BuilderState::Home
                 } else {
                     BuilderState::ResourcePicker
                 };
+                ctx.invalidate_all();
                 None
             }
             _ => None,
@@ -642,7 +624,7 @@ impl MobileBuilder {
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, Self::NAME);
         let _ = label(canvas, Point::new(10, 35), "Select or create an app:");
         for i in 0..HOME_MENU.len() {
-            let pressed = self.menu_touch == Some(i);
+            let pressed = self.button_touch == Some(i);
             let _ = button(canvas, Self::home_button_rect(i), HOME_MENU[i], pressed);
         }
     }
@@ -652,7 +634,7 @@ impl MobileBuilder {
         let name_line = format!("App: {}", self.selected_app_name);
         let _ = label(canvas, Point::new(10, 35), &name_line);
         for i in 0..RESOURCE_MENU.len() {
-            let pressed = self.menu_touch == Some(i);
+            let pressed = self.button_touch == Some(i);
             let _ = button(canvas, Self::resource_button_rect(i), RESOURCE_MENU[i], pressed);
         }
     }
@@ -679,19 +661,7 @@ impl MobileBuilder {
             }
         }
 
-        if self.menu_open {
-            let rect = Rectangle::new(Point::new(10, 15), Size::new(220, 224));
-            let _ = rect
-                .into_styled(PrimitiveStyle::with_fill(soul_ui::WHITE))
-                .draw(canvas);
-            let _ = rect
-                .into_styled(PrimitiveStyle::with_stroke(soul_ui::BLACK, 1))
-                .draw(canvas);
-            for i in 0..FORM_MENU.len() {
-                let pressed = self.menu_touch == Some(i);
-                let _ = button(canvas, Self::menu_item_rect(i), FORM_MENU[i], pressed);
-            }
-        }
+        self.menu.draw(canvas, FORM_MENU_ITEMS);
 
         if let Some((input, field)) = &mut self.editing_value {
             let rect = Rectangle::new(Point::new(10, 20), Size::new(220, 60));
@@ -751,15 +721,7 @@ impl App for MobileBuilder {
                 .collect(),
             BuilderState::EditingForm => {
                 let mut nodes = self.form.a11y_nodes();
-                if self.menu_open {
-                    for i in 0..FORM_MENU.len() {
-                        nodes.push(A11yNode::new(
-                            Self::menu_item_rect(i),
-                            FORM_MENU[i],
-                            A11yRole::MenuItem,
-                        ));
-                    }
-                }
+                nodes.extend(self.menu.a11y_nodes(FORM_MENU_ITEMS));
                 nodes
             }
         }
