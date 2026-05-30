@@ -43,7 +43,7 @@ use embedded_graphics::{
 };
 use soul_core::{App, Ctx, Event, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
-use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H, WHITE};
+use soul_ui::{hit_test, title_bar, MenuItem, MenuSheet, BLACK, TITLE_BAR_H, WHITE};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,12 @@ const PAT_CELL_H: i32 = 20;
 
 /// Undo depth limit.
 const UNDO_DEPTH: usize = 16;
+
+const PAINT_MENU_ITEMS: &[MenuItem<'static>] = &[
+    MenuItem::with_shortcut("Save", 'S'),
+    MenuItem::with_shortcut("Undo", 'U'),
+    MenuItem::with_shortcut("Clear", 'C'),
+];
 
 // ---------------------------------------------------------------------------
 // Tool sprite sheet
@@ -427,7 +433,7 @@ pub struct Paint {
     ant_last_ms: u64, // platform time of last phase step
 
     touch: TouchTarget,
-    menu_open: bool,
+    menu: MenuSheet,
 
     /// The paint_tools.pgm sprite sheet; `None` if the file is missing.
     tool_sheet: Option<ToolSheet>,
@@ -461,7 +467,7 @@ impl Paint {
             ant_phase: 0,
             ant_last_ms: 0,
             touch: TouchTarget::None,
-            menu_open: false,
+            menu: MenuSheet::new(),
             tool_sheet,
         }
     }
@@ -1383,6 +1389,19 @@ impl Paint {
     }
 
     // -----------------------------------------------------------------------
+    // Menu actions
+    // -----------------------------------------------------------------------
+
+    fn paint_menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        match idx {
+            0 => { self.persist(); None }
+            1 => { self.pop_undo(ctx); None }
+            2 => { self.clear_canvas(ctx); None }
+            _ => None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Event handler
     // -----------------------------------------------------------------------
 
@@ -1397,15 +1416,14 @@ impl Paint {
                 }
             }
             Event::Menu => {
-                self.menu_open = !self.menu_open;
-                ctx.invalidate_all();
+                let out = self.menu.handle(&Event::Menu, PAINT_MENU_ITEMS);
+                if let Some(r) = out.dirty { ctx.invalidate(r); }
             }
             Event::PenDown { x, y } => {
-                if self.menu_open {
-                    self.menu_open = false;
-                    ctx.invalidate_all();
-                    return None;
-                }
+                let was_open = self.menu.is_open();
+                let menu_out = self.menu.handle(&Event::PenDown { x, y }, PAINT_MENU_ITEMS);
+                if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                if was_open { return None; }
                 if (x as i32) < PALETTE_W {
                     self.touch = Self::hit_palette(x, y);
                     ctx.invalidate(palette_rect());
@@ -1419,6 +1437,11 @@ impl Paint {
                 }
             }
             Event::PenMove { x, y } => {
+                if self.menu.is_open() {
+                    let menu_out = self.menu.handle(&Event::PenMove { x, y }, PAINT_MENU_ITEMS);
+                    if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                    return None;
+                }
                 if self.touch != TouchTarget::Canvas || !self.pen_active {
                     return None;
                 }
@@ -1431,6 +1454,12 @@ impl Paint {
                 }
             }
             Event::PenUp { x, y } => {
+                let was_open = self.menu.is_open();
+                let menu_out = self.menu.handle(&Event::PenUp { x, y }, PAINT_MENU_ITEMS);
+                if let Some(r) = menu_out.dirty { ctx.invalidate(r); }
+                if let Some(idx) = menu_out.committed { return self.paint_menu_action(idx, ctx); }
+                if was_open { return None; }
+
                 match self.touch {
                     TouchTarget::ToolCell(i) => {
                         if let Some(tool) = PALETTE_CELLS[i] {
@@ -1489,6 +1518,7 @@ impl Paint {
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, "Paint");
         self.draw_canvas_area(canvas, dirty);
         self.draw_palette(canvas);
+        self.menu.draw(canvas, PAINT_MENU_ITEMS);
     }
 
     fn draw_canvas_area<D: DrawTarget<Color = Gray8>>(&self, canvas: &mut D, dirty: Rectangle) {
