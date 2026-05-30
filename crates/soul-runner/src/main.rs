@@ -72,6 +72,25 @@ mod screenshot_tests {
     }
 
     #[test]
+    fn screenshot_launcher_search() {
+        if !should_run("launcher_search") {
+            return;
+        }
+        use soul_core::HardButton;
+        use soul_hal::KeyCode;
+        let mut h = Harness::new(Launcher::new());
+        h.settle().ok();
+        h.press(HardButton::Menu);
+        h.settle().ok();
+        h.key(KeyCode::Char('F'));
+        h.settle().ok();
+        h.key(KeyCode::Char('s'));
+        h.settle().ok();
+        h.save_png(output_dir().join("launcher_search.png"))
+            .expect("save png");
+    }
+
+    #[test]
     fn screenshot_draw() {
         if !should_run("draw") {
             return;
