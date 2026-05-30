@@ -12,13 +12,13 @@ use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::Gray8,
     prelude::*,
-    primitives::Rectangle,
+    primitives::{PrimitiveStyleBuilder, Rectangle},
     text::{Baseline, Text},
 };
-use soul_core::{App, Ctx, Event, HardButton, APP_HEIGHT, SCREEN_WIDTH};
+use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
 use soul_db::{Database, CATEGORY_UNFILED};
-use soul_ui::{hit_test, title_bar, BLACK, TITLE_BAR_H};
+use soul_ui::{button, hit_test, title_bar, MenuItem, MenuSheet, BLACK, TITLE_BAR_H, WHITE};
 
 use crate::assets;
 
@@ -33,6 +33,57 @@ const LAUNCHER_ROWS: i32 = 6;
 const LAUNCHER_H_GAP: i32 = 4;
 const LAUNCHER_V_GAP: i32 = 3;
 const LAUNCHER_TOP_PAD: i32 = 4;
+const TAB_STRIP_H: i32 = 15;
+
+// --- Categories ---------------------------------------------------------
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Category {
+    All,
+    Main,
+    Util,
+    System,
+}
+
+impl Category {
+    fn label(self) -> &'static str {
+        match self {
+            Category::All => "All",
+            Category::Main => "Main",
+            Category::Util => "Util",
+            Category::System => "Sys",
+        }
+    }
+
+    fn matches(self, app_cat: Category) -> bool {
+        self == Category::All || self == app_cat
+    }
+}
+
+const CATEGORIES: &[Category] = &[
+    Category::All,
+    Category::Main,
+    Category::Util,
+    Category::System,
+];
+
+fn category_for(app_id: &str) -> Category {
+    match app_id {
+        "com.soulos.settings" | "com.soulos.system_settings" => Category::System,
+        "com.soulos.builder"
+        | "com.soulos.draw"
+        | "com.soulos.paint"
+        | "com.soulos.egui_demo_native" => Category::Util,
+        _ => Category::Main,
+    }
+}
+
+// --- Launcher MenuSheet items ------------------------------------------
+
+const LAUNCHER_MENU_ITEMS: &[MenuItem<'static>] = &[
+    MenuItem::with_shortcut("Edit Order", 'E'),
+    MenuItem::with_shortcut("About SoulOS", 'A'),
+];
 
 // --- Internal app entry -------------------------------------------------
 
@@ -47,10 +98,15 @@ struct AppEntry {
 pub struct Launcher {
     apps: Vec<AppEntry>,
     order: Vec<usize>, // indices into apps, representing user order
+    visible: Vec<usize>, // indices into `order` that pass the current category filter
+    current_cat: Category,
     touched: Option<usize>,
     drag_from: Option<usize>,
     drag_to: Option<usize>,
     picker_mode: bool,
+    reorder_mode: bool,
+    about_open: bool,
+    menu: MenuSheet,
     db: Option<Database>,
 }
 
@@ -63,10 +119,15 @@ impl Launcher {
         Self {
             apps: vec![],
             order: vec![],
+            visible: vec![],
+            current_cat: Category::All,
             touched: None,
             drag_from: None,
             drag_to: None,
             picker_mode: false,
+            reorder_mode: false,
+            about_open: false,
+            menu: MenuSheet::new(),
             db: Some(db),
         }
     }
@@ -107,6 +168,35 @@ impl Launcher {
         } else {
             self.order = (0..self.apps.len()).collect();
         }
+        self.refresh_visible();
+    }
+
+    fn refresh_visible(&mut self) {
+        self.visible = self
+            .order
+            .iter()
+            .enumerate()
+            .filter_map(|(order_idx, &app_idx)| {
+                let entry = self.apps.get(app_idx)?;
+                if self.current_cat.matches(category_for(&entry.app_id)) {
+                    Some(order_idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    fn set_current_cat(&mut self, cat: Category, ctx: &mut Ctx<'_>) {
+        if cat == self.current_cat {
+            return;
+        }
+        self.current_cat = cat;
+        self.touched = None;
+        self.drag_from = None;
+        self.drag_to = None;
+        self.refresh_visible();
+        ctx.invalidate_all();
     }
 
     fn save_order(&mut self) {
@@ -132,9 +222,10 @@ impl Launcher {
         let col = idx as i32 % LAUNCHER_COLS;
         let row = idx as i32 / LAUNCHER_COLS;
         let x = x_off + col * (tile_w + LAUNCHER_H_GAP);
-        let avail_h = APP_HEIGHT as i32 - TITLE_BAR_H as i32 - LAUNCHER_TOP_PAD;
+        let grid_top = TITLE_BAR_H as i32 + TAB_STRIP_H + LAUNCHER_TOP_PAD;
+        let avail_h = APP_HEIGHT as i32 - TITLE_BAR_H as i32 - TAB_STRIP_H - LAUNCHER_TOP_PAD;
         let row_pitch = (avail_h - (LAUNCHER_ROWS - 1) * LAUNCHER_V_GAP) / LAUNCHER_ROWS;
-        let y_slot = TITLE_BAR_H as i32 + LAUNCHER_TOP_PAD + row * (row_pitch + LAUNCHER_V_GAP);
+        let y_slot = grid_top + row * (row_pitch + LAUNCHER_V_GAP);
         (x, y_slot + (row_pitch - tile_h) / 2)
     }
 
@@ -149,8 +240,27 @@ impl Launcher {
         Rectangle::new(Point::new(x, y), Size::new(ICON_CELL, h as u32))
     }
 
+    fn tab_rect(idx: usize) -> Rectangle {
+        let n = CATEGORIES.len() as i32;
+        let tab_w = SCREEN_WIDTH as i32 / n;
+        let x = idx as i32 * tab_w;
+        let w = if idx as i32 == n - 1 {
+            SCREEN_WIDTH as i32 - x
+        } else {
+            tab_w
+        };
+        Rectangle::new(
+            Point::new(x, TITLE_BAR_H as i32),
+            Size::new(w as u32, TAB_STRIP_H as u32),
+        )
+    }
+
     fn find_hit(&self, x: i16, y: i16) -> Option<usize> {
-        (0..self.order.len()).find(|&i| hit_test(&Self::tile_rect(i), x, y))
+        (0..self.visible.len()).find(|&i| hit_test(&Self::tile_rect(i), x, y))
+    }
+
+    fn tab_hit_test(x: i16, y: i16) -> Option<usize> {
+        (0..CATEGORIES.len()).find(|&i| hit_test(&Self::tab_rect(i), x, y))
     }
 
     fn set_touched(&mut self, new: Option<usize>, ctx: &mut Ctx<'_>) {
@@ -177,8 +287,9 @@ impl Launcher {
     }
 
     fn activate_display_idx(&mut self, display_idx: usize) -> Option<SystemRequest> {
-        let idx = *self.order.get(display_idx)?;
-        let entry = self.apps.get(idx)?;
+        let order_idx = *self.visible.get(display_idx)?;
+        let app_idx = *self.order.get(order_idx)?;
+        let entry = self.apps.get(app_idx)?;
         if self.picker_mode {
             self.picker_mode = false;
             Some(SystemRequest::SendResult {
@@ -187,6 +298,22 @@ impl Launcher {
             })
         } else {
             Some(SystemRequest::LaunchById(entry.app_id.clone()))
+        }
+    }
+
+    fn launcher_menu_action(&mut self, idx: usize, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        match idx {
+            0 => {
+                self.reorder_mode = !self.reorder_mode;
+                ctx.invalidate_all();
+                None
+            }
+            1 => {
+                self.about_open = true;
+                ctx.invalidate_all();
+                None
+            }
+            _ => None,
         }
     }
 
@@ -309,6 +436,41 @@ impl Launcher {
     // --- App interface --------------------------------------------------
 
     pub fn handle_event(&mut self, event: Event, ctx: &mut Ctx<'_>) -> Option<SystemRequest> {
+        // About modal absorbs all input until dismissed.
+        if self.about_open {
+            match event {
+                Event::PenDown { .. } | Event::Menu | Event::ButtonDown(_) | Event::Key(_) => {
+                    self.about_open = false;
+                    ctx.invalidate_all();
+                    return None;
+                }
+                Event::AppStop => {
+                    self.about_open = false;
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+
+        // MenuSheet gets first crack at events when relevant.
+        if matches!(
+            event,
+            Event::Menu | Event::AppStop | Event::PenDown { .. } | Event::PenMove { .. }
+                | Event::PenUp { .. } | Event::Key(_) | Event::ButtonDown(_)
+        ) {
+            let was_open = self.menu.is_open();
+            let out = self.menu.handle(&event, LAUNCHER_MENU_ITEMS);
+            if let Some(r) = out.dirty {
+                ctx.invalidate(r);
+            }
+            if let Some(idx) = out.committed {
+                return self.launcher_menu_action(idx, ctx);
+            }
+            if self.menu.is_open() || was_open {
+                return None;
+            }
+        }
+
         match event {
             Event::AppStart => {
                 self.picker_mode = false;
@@ -317,14 +479,20 @@ impl Launcher {
                 None
             }
             Event::PenDown { x, y } => {
+                if let Some(tab) = Self::tab_hit_test(x, y) {
+                    self.set_current_cat(CATEGORIES[tab], ctx);
+                    return None;
+                }
                 let hit = self.find_hit(x, y);
                 self.set_touched(hit, ctx);
-                self.drag_from = hit;
-                self.drag_to = hit;
+                if self.reorder_mode {
+                    self.drag_from = hit;
+                    self.drag_to = hit;
+                }
                 None
             }
             Event::PenMove { x, y } => {
-                if self.drag_from.is_some() {
+                if self.reorder_mode && self.drag_from.is_some() {
                     let hit = self.find_hit(x, y);
                     if hit != self.drag_to {
                         self.drag_to = hit;
@@ -336,23 +504,26 @@ impl Launcher {
             Event::PenUp { x, y } => {
                 let drag_from = self.drag_from;
                 let drag_to = self.drag_to;
-                let was = self.touched; // capture before clearing
+                let was = self.touched;
                 self.set_touched(None, ctx);
                 self.drag_from = None;
                 self.drag_to = None;
-                if let (Some(from), Some(to)) = (drag_from, drag_to) {
-                    if from != to {
-                        // Move tile in order
-                        let mut new_order = self.order.clone();
-                        let idx = new_order.remove(from);
-                        new_order.insert(to, idx);
-                        self.order = new_order;
-                        self.save_order();
-                        ctx.invalidate_all();
-                        return None;
+                if self.reorder_mode {
+                    if let (Some(from), Some(to)) = (drag_from, drag_to) {
+                        if from != to {
+                            let from_order = self.visible[from];
+                            let to_order = self.visible[to];
+                            let mut new_order = self.order.clone();
+                            let idx = new_order.remove(from_order);
+                            new_order.insert(to_order, idx);
+                            self.order = new_order;
+                            self.save_order();
+                            self.refresh_visible();
+                            ctx.invalidate_all();
+                            return None;
+                        }
                     }
                 }
-                // If not a drag, treat as tap
                 let hit = self.find_hit(x, y);
                 if hit.is_some() && hit == was {
                     hit.and_then(|i| self.activate_display_idx(i))
@@ -364,6 +535,20 @@ impl Launcher {
             Event::ButtonDown(HardButton::AppB) => self.activate_display_idx(1),
             Event::ButtonDown(HardButton::AppC) => self.activate_display_idx(2),
             Event::ButtonDown(HardButton::AppD) => self.activate_display_idx(3),
+            Event::Key(KeyCode::ArrowLeft) => {
+                let cur = CATEGORIES.iter().position(|&c| c == self.current_cat).unwrap_or(0);
+                if cur > 0 {
+                    self.set_current_cat(CATEGORIES[cur - 1], ctx);
+                }
+                None
+            }
+            Event::Key(KeyCode::ArrowRight) => {
+                let cur = CATEGORIES.iter().position(|&c| c == self.current_cat).unwrap_or(0);
+                if cur + 1 < CATEGORIES.len() {
+                    self.set_current_cat(CATEGORIES[cur + 1], ctx);
+                }
+                None
+            }
             Event::Exchange { action, payload, .. } => match action.as_str() {
                 "pick_app" => {
                     self.picker_mode = true;
@@ -402,11 +587,25 @@ impl Launcher {
     }
 
     pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, _dirty: Rectangle) {
-        let title = if self.picker_mode { "Pick App" } else { Self::NAME };
+        let title = if self.picker_mode {
+            "Pick App"
+        } else if self.reorder_mode {
+            "Edit Order"
+        } else {
+            Self::NAME
+        };
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, title);
+
+        // Tab strip under the title bar.
+        for (i, &cat) in CATEGORIES.iter().enumerate() {
+            let r = Self::tab_rect(i);
+            let _ = button(canvas, r, cat.label(), cat == self.current_cat);
+        }
+
         let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);
 
-        for (display_idx, &app_idx) in self.order.iter().enumerate() {
+        for (display_idx, &order_idx) in self.visible.iter().enumerate() {
+            let app_idx = self.order[order_idx];
             let entry = &self.apps[app_idx];
             let icon_r = Self::icon_rect(display_idx);
             let pressed = self.touched == Some(display_idx);
@@ -424,11 +623,9 @@ impl Launcher {
                     let _ = Image::new(&raw, icon_r.top_left).draw(canvas);
                 }
             } else {
-                // Light gray so blank tiles are visible against the white background.
                 let _ = canvas.fill_solid(&icon_r, Gray8::new(if pressed || dragging { 128 } else { 210 }));
             }
 
-            // Draw drag target highlight
             if drag_target {
                 use embedded_graphics::Pixel;
                 let border = Rectangle::new(icon_r.top_left, icon_r.size);
@@ -442,22 +639,79 @@ impl Launcher {
             let _ = Text::with_baseline(&lbl, Point::new(tx, ty), label_style, Baseline::Top)
                 .draw(canvas);
         }
+
+        self.menu.draw(canvas, LAUNCHER_MENU_ITEMS);
+
+        if self.about_open {
+            self.draw_about(canvas);
+        }
+    }
+
+    fn draw_about<D: DrawTarget<Color = Gray8>>(&self, canvas: &mut D) {
+        let w = 180;
+        let h = 90;
+        let x = (SCREEN_WIDTH as i32 - w) / 2;
+        let y = TITLE_BAR_H as i32 + TAB_STRIP_H + 30;
+        let r = Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32));
+        let fill = PrimitiveStyleBuilder::new()
+            .fill_color(WHITE)
+            .stroke_color(BLACK)
+            .stroke_width(1)
+            .build();
+        let _ = r.into_styled(fill).draw(canvas);
+
+        let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);
+        let _ = Text::with_baseline(
+            "SoulOS",
+            Point::new(x + 12, y + 14),
+            label_style,
+            Baseline::Top,
+        )
+        .draw(canvas);
+        let _ = Text::with_baseline(
+            "Zen of Palm, reborn.",
+            Point::new(x + 12, y + 32),
+            label_style,
+            Baseline::Top,
+        )
+        .draw(canvas);
+        let _ = Text::with_baseline(
+            "Tap to close",
+            Point::new(x + 12, y + 64),
+            label_style,
+            Baseline::Top,
+        )
+        .draw(canvas);
     }
 
     pub fn a11y_nodes(&self) -> Vec<soul_core::a11y::A11yNode> {
         use soul_core::a11y::{A11yNode, A11yRole};
-        self.order
-            .iter()
-            .enumerate()
-            .filter_map(|(display_idx, &app_idx)| {
-                let entry = self.apps.get(app_idx)?;
-                Some(A11yNode::new(
+        let mut nodes: Vec<A11yNode> = Vec::new();
+
+        for (i, &cat) in CATEGORIES.iter().enumerate() {
+            nodes.push(A11yNode::new(
+                Self::tab_rect(i),
+                cat.label().to_string(),
+                A11yRole::Button,
+            ));
+        }
+
+        for (display_idx, &order_idx) in self.visible.iter().enumerate() {
+            let app_idx = match self.order.get(order_idx) {
+                Some(&i) => i,
+                None => continue,
+            };
+            if let Some(entry) = self.apps.get(app_idx) {
+                nodes.push(A11yNode::new(
                     Self::tile_rect(display_idx),
                     entry.name.clone(),
                     A11yRole::Button,
-                ))
-            })
-            .collect()
+                ));
+            }
+        }
+
+        nodes.extend(self.menu.a11y_nodes(LAUNCHER_MENU_ITEMS));
+        nodes
     }
 }
 
