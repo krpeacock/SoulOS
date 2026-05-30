@@ -18,7 +18,9 @@ use embedded_graphics::{
 use soul_core::{App, Ctx, Event, HardButton, KeyCode, APP_HEIGHT, SCREEN_WIDTH};
 use soul_script::SystemRequest;
 use soul_db::{Database, CATEGORY_UNFILED};
-use soul_ui::{button, hit_test, title_bar, MenuItem, MenuSheet, BLACK, TITLE_BAR_H, WHITE};
+use soul_ui::{
+    button, hit_test, title_bar, MenuItem, MenuSheet, TextInput, BLACK, TITLE_BAR_H, WHITE,
+};
 
 use crate::assets;
 
@@ -82,6 +84,7 @@ fn category_for(app_id: &str) -> Category {
 
 const LAUNCHER_MENU_ITEMS: &[MenuItem<'static>] = &[
     MenuItem::with_shortcut("Edit Order", 'E'),
+    MenuItem::with_shortcut("Search\u{2026}", 'F'),
     MenuItem::with_shortcut("About SoulOS", 'A'),
 ];
 
@@ -106,6 +109,7 @@ pub struct Launcher {
     picker_mode: bool,
     reorder_mode: bool,
     about_open: bool,
+    search: Option<TextInput>,
     menu: MenuSheet,
     db: Option<Database>,
 }
@@ -127,8 +131,36 @@ impl Launcher {
             picker_mode: false,
             reorder_mode: false,
             about_open: false,
+            search: None,
             menu: MenuSheet::new(),
             db: Some(db),
+        }
+    }
+
+    fn search_rect() -> Rectangle {
+        Rectangle::new(
+            Point::new(2, TITLE_BAR_H as i32 + 1),
+            Size::new(SCREEN_WIDTH as u32 - 4, TAB_STRIP_H as u32 - 2),
+        )
+    }
+
+    fn enter_search(&mut self, ctx: &mut Ctx<'_>) {
+        self.search = Some(TextInput::with_placeholder(
+            Self::search_rect(),
+            "Search apps\u{2026}",
+        ));
+        self.touched = None;
+        self.drag_from = None;
+        self.drag_to = None;
+        self.refresh_visible();
+        ctx.invalidate_all();
+    }
+
+    fn exit_search(&mut self, ctx: &mut Ctx<'_>) {
+        if self.search.is_some() {
+            self.search = None;
+            self.refresh_visible();
+            ctx.invalidate_all();
         }
     }
 
@@ -172,13 +204,25 @@ impl Launcher {
     }
 
     fn refresh_visible(&mut self) {
+        let query = self
+            .search
+            .as_ref()
+            .map(|i| i.text().to_lowercase())
+            .filter(|q| !q.is_empty());
         self.visible = self
             .order
             .iter()
             .enumerate()
             .filter_map(|(order_idx, &app_idx)| {
                 let entry = self.apps.get(app_idx)?;
-                if self.current_cat.matches(category_for(&entry.app_id)) {
+                let pass = if let Some(q) = &query {
+                    entry.name.to_lowercase().contains(q.as_str())
+                } else if self.search.is_some() {
+                    true
+                } else {
+                    self.current_cat.matches(category_for(&entry.app_id))
+                };
+                if pass {
                     Some(order_idx)
                 } else {
                     None
@@ -309,6 +353,10 @@ impl Launcher {
                 None
             }
             1 => {
+                self.enter_search(ctx);
+                None
+            }
+            2 => {
                 self.about_open = true;
                 ctx.invalidate_all();
                 None
@@ -452,12 +500,75 @@ impl Launcher {
             }
         }
 
+        // Menu key while search is active exits search.
+        if self.search.is_some() && matches!(event, Event::Menu) {
+            self.exit_search(ctx);
+            return None;
+        }
+
+        // Search input owns typing and Enter while active.
+        if self.search.is_some() {
+            if let Event::Key(k) = &event {
+                let input = self.search.as_mut().unwrap();
+                match k {
+                    KeyCode::Char(c) => {
+                        let out = input.insert_char(*c);
+                        if let Some(r) = out.dirty {
+                            ctx.invalidate(r);
+                        }
+                        if out.text_changed {
+                            self.refresh_visible();
+                            ctx.invalidate_all();
+                        }
+                        return None;
+                    }
+                    KeyCode::Backspace => {
+                        if input.text().is_empty() {
+                            self.exit_search(ctx);
+                            return None;
+                        }
+                        let out = input.backspace();
+                        if let Some(r) = out.dirty {
+                            ctx.invalidate(r);
+                        }
+                        if out.text_changed {
+                            self.refresh_visible();
+                            ctx.invalidate_all();
+                        }
+                        return None;
+                    }
+                    KeyCode::Enter => {
+                        if !self.visible.is_empty() {
+                            return self.activate_display_idx(0);
+                        }
+                        return None;
+                    }
+                    KeyCode::ArrowLeft => {
+                        if let Some(r) = input.cursor_left() {
+                            ctx.invalidate(r);
+                        }
+                        return None;
+                    }
+                    KeyCode::ArrowRight => {
+                        if let Some(r) = input.cursor_right() {
+                            ctx.invalidate(r);
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // MenuSheet gets first crack at events when relevant.
-        if matches!(
+        // While search is active, do NOT route Key events to the menu
+        // (the menu's shortcut keys would swallow typing).
+        let route_to_menu = matches!(
             event,
             Event::Menu | Event::AppStop | Event::PenDown { .. } | Event::PenMove { .. }
-                | Event::PenUp { .. } | Event::Key(_) | Event::ButtonDown(_)
-        ) {
+                | Event::PenUp { .. } | Event::ButtonDown(_)
+        ) || (self.search.is_none() && matches!(event, Event::Key(_)));
+        if route_to_menu {
             let was_open = self.menu.is_open();
             let out = self.menu.handle(&event, LAUNCHER_MENU_ITEMS);
             if let Some(r) = out.dirty {
@@ -479,7 +590,11 @@ impl Launcher {
                 None
             }
             Event::PenDown { x, y } => {
-                if let Some(tab) = Self::tab_hit_test(x, y) {
+                if let Some(input) = self.search.as_ref() {
+                    if input.contains(x, y) {
+                        return None;
+                    }
+                } else if let Some(tab) = Self::tab_hit_test(x, y) {
                     self.set_current_cat(CATEGORIES[tab], ctx);
                     return None;
                 }
@@ -502,6 +617,14 @@ impl Launcher {
                 None
             }
             Event::PenUp { x, y } => {
+                if let Some(input) = self.search.as_mut() {
+                    if input.contains(x, y) {
+                        if let Some(r) = input.pen_released(x, y) {
+                            ctx.invalidate(r);
+                        }
+                        return None;
+                    }
+                }
                 let drag_from = self.drag_from;
                 let drag_to = self.drag_to;
                 let was = self.touched;
@@ -589,6 +712,8 @@ impl Launcher {
     pub fn draw<D: DrawTarget<Color = Gray8>>(&mut self, canvas: &mut D, _dirty: Rectangle) {
         let title = if self.picker_mode {
             "Pick App"
+        } else if self.search.is_some() {
+            "Search"
         } else if self.reorder_mode {
             "Edit Order"
         } else {
@@ -596,10 +721,13 @@ impl Launcher {
         };
         let _ = title_bar(canvas, SCREEN_WIDTH as u32, title);
 
-        // Tab strip under the title bar.
-        for (i, &cat) in CATEGORIES.iter().enumerate() {
-            let r = Self::tab_rect(i);
-            let _ = button(canvas, r, cat.label(), cat == self.current_cat);
+        if let Some(input) = &self.search {
+            let _ = input.draw(canvas);
+        } else {
+            for (i, &cat) in CATEGORIES.iter().enumerate() {
+                let r = Self::tab_rect(i);
+                let _ = button(canvas, r, cat.label(), cat == self.current_cat);
+            }
         }
 
         let label_style = MonoTextStyle::new(&FONT_6X10, BLACK);
@@ -688,12 +816,16 @@ impl Launcher {
         use soul_core::a11y::{A11yNode, A11yRole};
         let mut nodes: Vec<A11yNode> = Vec::new();
 
-        for (i, &cat) in CATEGORIES.iter().enumerate() {
-            nodes.push(A11yNode::new(
-                Self::tab_rect(i),
-                cat.label().to_string(),
-                A11yRole::Button,
-            ));
+        if let Some(input) = &self.search {
+            nodes.push(input.a11y_node("Search apps"));
+        } else {
+            for (i, &cat) in CATEGORIES.iter().enumerate() {
+                nodes.push(A11yNode::new(
+                    Self::tab_rect(i),
+                    cat.label().to_string(),
+                    A11yRole::Button,
+                ));
+            }
         }
 
         for (display_idx, &order_idx) in self.visible.iter().enumerate() {
